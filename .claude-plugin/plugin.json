@@ -1,0 +1,7 @@
+{
+  "name": "super-speech",
+  "version": "0.1.0",
+  "description": "Speak Claude's replies aloud as natural local voice, via the Kokoro TTS drainer. No cloud, no API key.",
+  "author": { "name": "reasonmethis" },
+  "license": "MIT"
+}

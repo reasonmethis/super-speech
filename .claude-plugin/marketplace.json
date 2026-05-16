@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "super-speech",
+  "description": "Local text-to-speech voice replies for Claude Code, via the Kokoro drainer. No cloud, no API key.",
+  "owner": { "name": "reasonmethis" },
+  "plugins": [
+    {
+      "name": "super-speech",
+      "description": "Speak Claude's replies aloud as natural local voice, via the Kokoro TTS drainer.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
