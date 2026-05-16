@@ -2,7 +2,7 @@
 # Queue one chunk of text for the Kokoro drainer to speak.
 #
 # Ensures the drainer is running first (via ensure-drainer.sh), then writes the
-# chunk as the next-numbered file in ~/.claude/podcast/queue/ so you don't have
+# chunk as the next-numbered file in the shared queue dir so you don't have
 # to manage chunk numbers yourself.
 #
 # Usage: speak.sh "<text to speak>" [voice] [gap_ms]
@@ -19,9 +19,12 @@ VOICE="${2:-am_echo}"
 GAP="${3:-}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PODCAST_DIR="$HOME/.claude/podcast"
-QUEUE="$PODCAST_DIR/queue"
-SPOKEN="$PODCAST_DIR/spoken"
+# Agent-neutral runtime home — shared by every install (Claude Code, Codex, ...)
+# and by the drainer. Override with SUPER_SPEECH_HOME; keep in sync with the
+# BASE constant in drainer-kokoro.py.
+SPEECH_HOME="${SUPER_SPEECH_HOME:-$HOME/.super-speech}"
+QUEUE="$SPEECH_HOME/queue"
+SPOKEN="$SPEECH_HOME/spoken"
 mkdir -p "$QUEUE" "$SPOKEN"
 
 # 1. Make sure the drainer is alive (starts it + waits for warmup if not).

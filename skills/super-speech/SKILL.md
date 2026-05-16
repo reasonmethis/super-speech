@@ -1,6 +1,6 @@
 ---
 name: super-speech
-description: Speak responses aloud as voice replies through the local Kokoro TTS drainer. Use whenever the user asks you to reply by voice/audio, says "use voice", or wants spoken answers turn by turn. Also use to install or set up this plugin — triggers like "install super-speech", "set up super-speech", "set up the super-speech marketplace", or "super-speech voice not working" — in which case follow SETUP.md at the plugin root. Covers the speak.sh / ensure-drainer.sh helpers (always make sure the drainer is alive before queueing — never just write to the queue), the chunking rules (short first chunk, strictly <2× growth, ~600 char cap), per-chunk gaps (gMMM), drainer signal files and their pitfalls, the restart procedure, and the Kokoro voices. This is the BASE voice skill — the auto-podcast skill (long multi-chunk podcasts) and the whatsapp-voice skill (reaching the user when they are away from the computer) both build on it.
+description: Speak responses aloud as voice replies through the local Kokoro TTS drainer. Use whenever the user asks you to reply by voice/audio, says "use voice", or wants spoken answers turn by turn. Also use to install or set up super-speech — triggers like "install super-speech", "set up super-speech", "set up the super-speech marketplace", or "super-speech voice not working" — in which case follow SETUP.md at the repo root. Covers the speak.sh / ensure-drainer.sh helpers (always make sure the drainer is alive before queueing — never just write to the queue), the chunking rules (short first chunk, strictly <2× growth, ~600 char cap), per-chunk gaps (gMMM), drainer signal files and their pitfalls, the restart procedure, and the Kokoro voices. This is the BASE voice skill — the auto-podcast skill (long multi-chunk podcasts) and the whatsapp-voice skill (reaching the user when they are away from the computer) both build on it.
 ---
 
 # Super-Speech
@@ -14,20 +14,27 @@ Everything below is **voice-reply mode**: short spoken answers, turn by turn, th
 
 ## Install / setup
 
-This skill ships as a Claude Code plugin. Before first use, the plugin must be
-set up: follow **`SETUP.md` at the plugin root**. That agentic playbook installs
-the plugin, installs the Python deps, downloads the Kokoro voice model, verifies
-audio works, and — crucially — writes the plugin's bundled scripts directory to
-`~/.claude/podcast/super-speech.paths` as a `SCRIPTS_DIR=<abs path>` line. The
-four helper scripts (`speak.sh`, `ensure-drainer.sh`, `drainer-kokoro.py`,
-`drainer.py`) live at the plugin root.
+Before first use, super-speech must be set up: follow **`SETUP.md` at the repo
+root**. That agentic playbook locates the scripts, installs the Python deps,
+downloads the Kokoro voice model, verifies audio works, and — crucially — writes
+the scripts directory to `~/.super-speech/super-speech.paths` as a
+`SCRIPTS_DIR=<abs path>` line. The four helper scripts (`speak.sh`,
+`ensure-drainer.sh`, `drainer-kokoro.py`, `drainer.py`) live together in that
+directory.
 
-**Resolving the scripts directory.** An installed plugin's absolute path is not
-known ahead of time, so do not hardcode it. Read `~/.claude/podcast/super-speech.paths`,
-take the value of the `SCRIPTS_DIR=` line, and use that as `$SCRIPTS_DIR` when
-calling the helpers. **If that file is missing, follow `SETUP.md` at the plugin
-root first** (the copy cloned by `claude plugin marketplace add` lives at
-`~/.claude/plugins/marketplaces/super-speech/SETUP.md`).
+**Resolving the scripts directory.** The install path is not known ahead of
+time, so do not hardcode it. Read `~/.super-speech/super-speech.paths`, take the
+value of the `SCRIPTS_DIR=` line, and use that as `$SCRIPTS_DIR` when calling the
+helpers. **If that file is missing, follow `SETUP.md` first** — it sits at the
+root of the cloned super-speech repo (for a Claude Code marketplace install,
+that copy is under `~/.claude/plugins/marketplaces/super-speech/`).
+
+**Runtime home.** The drainer's working files — `queue/`, `spoken/`, `log.txt`,
+the signal files — and the downloaded Kokoro model under `models/kokoro/` all
+live under one agent-neutral directory: `~/.super-speech/` by default, or
+wherever the `SUPER_SPEECH_HOME` environment variable points. Nothing here is
+tied to `~/.claude`, so the same drainer and model serve Claude Code, Codex,
+OpenCode, or any other agent — only the per-install `SCRIPTS_DIR` differs.
 
 ## The drainer and `speak.sh`
 
@@ -37,7 +44,7 @@ The Kokoro drainer is a separate background process that synthesizes queued text
 bash "$SCRIPTS_DIR/speak.sh" "Your chunk text." bm_fable
 ```
 
-(`$SCRIPTS_DIR` is the `SCRIPTS_DIR=` value from `~/.claude/podcast/super-speech.paths` — see Install / setup above.)
+(`$SCRIPTS_DIR` is the `SCRIPTS_DIR=` value from `~/.super-speech/super-speech.paths` — see Install / setup above.)
 
 For the rarer case where you write queue files directly, run `bash "$SCRIPTS_DIR/ensure-drainer.sh"` once first (prints `running`/`started`) — same drainer check, without queueing anything.
 
@@ -118,7 +125,7 @@ Use varied gaps within the normal range to give speech a natural rhythm. Sitting
 
 ## Drainer signals
 
-Signal files under `~/.claude/podcast/` (create via `touch`):
+Signal files under `~/.super-speech/` (create via `touch`):
 
 | Signal | Effect |
 |---|---|
@@ -140,7 +147,7 @@ If you ever truly need to drop queued chunks before exit, do it BEFORE INTERRUPT
 **If the drainer is just dead** (not running), don't do this dance — `ensure-drainer.sh` / `speak.sh` start it for you. This procedure is for a **forced restart** of a *running* drainer (e.g. you changed a config knob in `drainer-kokoro.py`, or it's wedged):
 
 ```bash
-touch "$HOME/.claude/podcast/INTERRUPT"   # or STOP for graceful
+touch "$HOME/.super-speech/INTERRUPT"   # or STOP for graceful
 # wait briefly for log to show "exiting"
 # then re-run ensure-drainer.sh (it does the detached launch + warmup wait):
 bash "$SCRIPTS_DIR/ensure-drainer.sh"
@@ -175,8 +182,8 @@ Use any other voice only when the user asks for it specifically.
 
 ## Bundled scripts
 
-This skill is part of the **super-speech plugin** and bundles its own helpers at
-the plugin root:
+This skill is part of the **super-speech** repo and bundles its own helpers
+alongside it:
 
 - `drainer-kokoro.py` — the active Kokoro drainer.
 - `drainer.py` — legacy ElevenLabs drainer.
@@ -184,9 +191,9 @@ the plugin root:
 - `speak.sh` — `speak.sh "<text>" [voice] [gap_ms]`; calls `ensure-drainer.sh`, then queues the text as the next-numbered chunk.
 
 Their directory is not hardcoded — `SETUP.md` records it to
-`~/.claude/podcast/super-speech.paths` as `SCRIPTS_DIR=<abs path>`. Read that
+`~/.super-speech/super-speech.paths` as `SCRIPTS_DIR=<abs path>`. Read that
 line and use it as `$SCRIPTS_DIR` (see Install / setup at the top). If the file
-is missing, follow `SETUP.md` at the plugin root.
+is missing, follow `SETUP.md` at the repo root.
 
 **Sibling skills that build on this one:** `auto-podcast` (long multi-chunk
 podcasts) and `whatsapp-voice` (voice notes when the user is away from the

@@ -8,10 +8,10 @@ to the system speak.cmd if speak-eleven isn't present.
 Stops cleanly when a STOP file appears in BASE, or on KeyboardInterrupt.
 
 Layout (auto-created):
-    ~/.claude/podcast/queue/      pending NNN-slug.txt chunks
-    ~/.claude/podcast/spoken/     archived after playback
-    ~/.claude/podcast/log.txt     drainer log
-    ~/.claude/podcast/STOP        touch to stop drainer cleanly
+    ~/.super-speech/queue/      pending NNN-slug.txt chunks
+    ~/.super-speech/spoken/     archived after playback
+    ~/.super-speech/log.txt     drainer log
+    ~/.super-speech/STOP        touch to stop drainer cleanly
 """
 import glob
 import os
@@ -19,7 +19,8 @@ import subprocess
 import sys
 import time
 
-BASE = os.path.join(os.environ.get("USERPROFILE", os.path.expanduser("~")), ".claude", "podcast")
+BASE = os.environ.get("SUPER_SPEECH_HOME") or os.path.join(
+    os.environ.get("USERPROFILE") or os.path.expanduser("~"), ".super-speech")
 QUEUE = os.path.join(BASE, "queue")
 SPOKEN = os.path.join(BASE, "spoken")
 LOG = os.path.join(BASE, "log.txt")

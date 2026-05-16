@@ -24,7 +24,12 @@ try:
 except Exception:
     pass
 
-BASE = Path(os.environ.get("USERPROFILE", os.path.expanduser("~"))) / ".claude" / "podcast"
+# Runtime home — queue, spoken, log, signals, tone, and the Kokoro model all
+# live under here. Agent-neutral by design (no ".claude" in the path) so one
+# drainer install can serve Claude Code, Codex, OpenCode, etc. equally well.
+# Override the whole location with the SUPER_SPEECH_HOME environment variable.
+_USER_HOME = Path(os.environ.get("USERPROFILE") or os.path.expanduser("~"))
+BASE = Path(os.environ.get("SUPER_SPEECH_HOME") or (_USER_HOME / ".super-speech"))
 QUEUE = BASE / "queue"
 SPOKEN = BASE / "spoken"
 FAILED = BASE / "failed"
@@ -37,7 +42,7 @@ CLEAR = BASE / "CLEAR"
 
 TONE_WAV = BASE / "tone.wav"
 
-MODEL_DIR = Path(os.environ.get("USERPROFILE", os.path.expanduser("~"))) / ".claude" / "models" / "kokoro"
+MODEL_DIR = BASE / "models" / "kokoro"
 MODEL_PATH = MODEL_DIR / "kokoro-v1.0.onnx"
 VOICES_PATH = MODEL_DIR / "voices-v1.0.bin"
 
