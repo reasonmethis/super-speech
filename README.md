@@ -4,25 +4,13 @@ Local text-to-speech voice replies for AI coding agents. Your agent speaks its
 answers aloud through the **Kokoro** neural TTS engine running entirely on your
 machine — no cloud service, no API key, no per-word billing.
 
-It is the **base voice skill**. Two siblings build on it: **auto-podcast** (long
-multi-chunk spoken segments) and **whatsapp-voice** (voice notes when you are
-away from the computer). super-speech itself is voice-reply mode: short spoken
-answers, turn by turn, through a local background drainer process.
-
-Works with any capable coding agent — Claude Code, Codex, OpenCode — on Windows
-out of the box; macOS/Linux with a small adaptation the setup playbook explains.
+Works with any coding agent like Claude Code, Codex, OpenCode, etc.
 
 ## Install
 
-Clone the repo:
+Tell your agent:
 
-```bash
-git clone https://github.com/reasonmethis/super-speech.git
-```
-
-Then tell your agent:
-
-> **Set up super-speech by following SETUP.md in the cloned repo.**
+> Set up super-speech from github.com/reasonmethis/super-speech
 
 `SETUP.md` is an agentic playbook — your agent runs it end to end: locate the
 scripts, install the Python dependencies, download the Kokoro voice model,
