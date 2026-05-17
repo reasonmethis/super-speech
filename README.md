@@ -26,8 +26,11 @@ during setup into `~/.super-speech/models/kokoro/` and are reused afterward.
 
 ## Usage
 
-Once set up, just ask your agent to reply by voice ("use voice", "speak your
-answer"). The `super-speech` skill handles chunking, the drainer lifecycle, and
+Once set up, just ask your agent to reply using super-speech, e.g.
+
+> Use super-speech for your replies until i tell you otherwise
+
+The `super-speech` skill handles chunking, the drainer lifecycle, and
 voice selection. See `skills/super-speech/SKILL.md` for the full chunking
 contract and TTS details.
 
