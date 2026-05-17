@@ -120,8 +120,8 @@ After each fix, re-run Phase 2. Repeat until verification passes cleanly.
 ## Phase 4 — Optional voice picker
 
 Once verification passes, offer to pick a default voice. Synthesize and play one
-short sample line in each of these five recommended voices, one at a time:
-`bm_fable`, `af_aoede`, `af_bella`, `am_michael`, `bm_george`. For example:
+short sample line in each of these six recommended voices, one at a time:
+`af_aoede`, `af_bella`, `af_heart`, `am_echo`, `bm_fable`, `bm_george`. For example:
 ```
 bash "<SCRIPTS_DIR>/speak.sh" "This is the bm_fable voice." bm_fable
 ```
