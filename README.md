@@ -16,10 +16,6 @@ Tell your agent:
 scripts, install the Python dependencies, download the Kokoro voice model,
 verify audio works, self-heal any failures, and pick a default voice.
 
-**Claude Code shortcut:** instead of cloning manually you can add the repo as a
-marketplace — `claude plugin marketplace add reasonmethis/super-speech` — then
-tell Claude *"Set up the super-speech marketplace."* SETUP.md handles the rest.
-
 **First-run download:** the Kokoro v1.0 model files total about **338 MB**
 (`kokoro-v1.0.onnx` ~311 MB + `voices-v1.0.bin` ~27 MB). They download once
 during setup into `~/.super-speech/models/kokoro/` and are reused afterward.

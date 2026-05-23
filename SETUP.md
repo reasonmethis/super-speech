@@ -36,16 +36,9 @@ The runtime home is `~/.super-speech/` on every OS (override it with the
 
 The four scripts live together in one directory. Find its absolute path:
 
-- **Cloned repo (any agent — Codex, OpenCode, manual, ...):** it is the repo
-  root the user pointed you at — the directory that contains `speak.sh` and
-  `ensure-drainer.sh`. There is no install step; you already have the files.
-- **Claude Code marketplace install:** if the user instead ran
-  `claude plugin marketplace add` (optionally followed by
-  `claude plugin install super-speech@super-speech`), the scripts are under the
-  Claude plugin tree — typically
-  `~/.claude/plugins/cache/super-speech/super-speech/<version>/` or the
-  marketplace clone `~/.claude/plugins/marketplaces/super-speech/`. Use whichever
-  directory actually contains `speak.sh`.
+It is the repo root the user pointed you at — the directory that contains
+`speak.sh` and `ensure-drainer.sh`. There is no install step; you already have
+the files.
 
 **Record it.** Create `~/.super-speech/` if needed and write the absolute path
 into `~/.super-speech/super-speech.paths` as a single line:
@@ -131,5 +124,20 @@ Ask the user which they prefer, then save their choice to
 DEFAULT_VOICE=<chosen voice id>
 ```
 
-When everything passes, tell the user setup is complete and that they can now
-ask you to reply by voice.
+## Phase 5 — Install super-speech as a skill
+
+Phases 0-4 set up the runtime, but that alone won't make a *future* session
+reach for super-speech unless the user points you at this repo again. So once
+verification passes, finish the job: **install super-speech as a skill for
+yourself**, using whatever skill mechanism your agent provides — you know your
+own. Prefer a user-level (global) install so it works in every project, unless
+the user wants it somewhere specific.
+
+The skill is `SKILL.md`, alongside the scripts under `skills/super-speech/`.
+Register it as a skill (its body loads on demand) rather than pasting it into
+always-on instructions. Nothing here is agent-specific — the runtime resolves
+through `~/.super-speech/super-speech.paths`.
+
+When everything passes, tell the user setup is complete — the runtime works, and
+(if Phase 5 ran) the skill is discoverable in new sessions — and that they can
+now ask you to reply by voice.
