@@ -1,6 +1,6 @@
 ---
 name: super-speech
-description: Speak responses aloud as voice replies through the local Kokoro TTS drainer. Use whenever the user asks you to reply by voice/audio, says "use voice", or wants spoken answers turn by turn. Also use to install or set up super-speech — triggers like "install super-speech", "set up super-speech", "set up the super-speech marketplace", or "super-speech voice not working" — in which case follow SETUP.md at the repo root. Covers the speak.sh / ensure-drainer.sh helpers (always make sure the drainer is alive before queueing — never just write to the queue), the chunking rules (short first chunk, strictly <2× growth, ~600 char cap), per-chunk gaps (gMMM), drainer signal files and their pitfalls, the restart procedure, and the Kokoro voices. This is the BASE voice skill — the auto-podcast skill (long multi-chunk podcasts) and the whatsapp-voice skill (reaching the user when they are away from the computer) both build on it.
+description: Speak responses aloud as voice replies through the local Kokoro TTS drainer. Use whenever the user asks you to reply by voice/audio, says "use voice", or wants spoken answers turn by turn. Also use to install or set up super-speech — triggers like "install super-speech", "set up super-speech", or "super-speech voice not working" — in which case follow SETUP.md at the repo root. Covers the speak.sh / ensure-drainer.sh helpers (always make sure the drainer is alive before queueing — never just write to the queue), the chunking rules (short first chunk, strictly <1.5× growth, ~600 char cap), per-chunk gaps (gMMM), drainer signal files and their pitfalls, the restart procedure, and the Kokoro voices. This is the BASE voice skill — the auto-podcast skill (long multi-chunk podcasts) and the whatsapp-voice skill (reaching the user when they are away from the computer) both build on it.
 ---
 
 # Super-Speech
@@ -26,8 +26,7 @@ directory.
 time, so do not hardcode it. Read `~/.super-speech/super-speech.paths`, take the
 value of the `SCRIPTS_DIR=` line, and use that as `$SCRIPTS_DIR` when calling the
 helpers. **If that file is missing, follow `SETUP.md` first** — it sits at the
-root of the cloned super-speech repo (for a Claude Code marketplace install,
-that copy is under `~/.claude/plugins/marketplaces/super-speech/`).
+root of the cloned super-speech repo.
 
 **Runtime home.** The drainer's working files — `queue/`, `spoken/`, `log.txt`,
 the signal files — and the downloaded Kokoro model under `models/kokoro/` all
@@ -52,15 +51,15 @@ For the rarer case where you write queue files directly, run `bash "$SCRIPTS_DIR
 
 These four rules are the **canonical chunking contract** — the auto-podcast and whatsapp-voice skills refer back here rather than restating them.
 
-1. **First chunk is short.** Aim for one short sentence, ~50-60 chars. Kokoro synth runs at ~0.4× realtime, so a 55-char chunk gives first audio in ~2 seconds. Long first chunks blow up time-to-first-audio (a 700-char first chunk takes ~14s to synthesize before any sound is heard).
+1. **First chunk is short.** Aim for one short sentence, ~90-110 chars. Kokoro synth runs at ~0.4× realtime, so a 100-char chunk gives first audio in ~2.5 seconds. Long first chunks blow up time-to-first-audio (a 700-char first chunk takes ~14s to synthesize before any sound is heard).
 
-2. **Growth ratio strictly less than 2.0×.** No chunk may have a char count >= 2× its predecessor. Count chars before queueing. 1.96× is fine; 2.06× is not. If you're over, split the larger chunk.
+2. **Growth ratio strictly less than 1.5×.** No chunk may have a char count >= 1.5× its predecessor. Count chars before queueing. 1.46× is fine; 1.56× is not. If you're over, split the larger chunk.
 
 3. **Cap chunks at ~600 characters** (roughly 3-4 sentences). Above that, you lose the ability to control rhetorical pauses inside a thought and the speech starts sounding monotone. Plateau under 600 is fine.
 
 4. **Shrinking is fine.** A chunk can be smaller than its predecessor with no penalty.
 
-**Why <2× is the rule:** the drainer pre-synthesizes chunk N+1 *during* chunk N's playback. Synth at 0.4× realtime means synth time = 0.4 × audio duration. If chunk N+1's duration is <2× chunk N's, then synth(N+1) < 0.8 × duration(N), so synthesis comfortably finishes before chunk N ends — no audible gap. At 2× and above you risk falling behind. (Char count is a good proxy for audio duration; both scale at ~17 chars/second of speech for am_echo.)
+**Why <1.5× is the rule:** the drainer pre-synthesizes chunk N+1 *during* chunk N's playback. Synth at 0.4× realtime means synth time = 0.4 × audio duration. The hard ceiling for no gap is 2× — there synth(N+1) = 0.8 × duration(N), only just finishing in time. Keeping growth under 1.5× means synth(N+1) < 0.6 × duration(N), so synthesis finishes well before chunk N ends, with margin to spare. At 2× and above you risk falling behind and an audible gap. (Char count is a good proxy for audio duration; both scale at ~17 chars/second of speech for am_echo.)
 
 ## Voice-reply workflow
 
@@ -77,7 +76,7 @@ These four rules are the **canonical chunking contract** — the auto-podcast an
    ```
    `speak.sh` ensures the drainer is running first and auto-picks the next chunk number, so you don't manage numbers and the drainer can't be silently dead.
    - Args: `speak.sh "<text>" [voice] [gap_ms]`. `voice` defaults to `bm_fable` (male) — use `af_aoede` when picking a female voice, `bm_fable` when picking a male voice. Override with any other voice ID when the user asks for one specifically. `gap_ms` is the optional pre-play gap (`g500`-style; omit for the default). Pass the digits only — `speak.sh` prepends the `g` itself; passing `g600` yields filename `gg600` which fails to parse and falls back to the default 1.0 s gap.
-   - Write the chunk text for the ear (see TTS pronunciation gotchas) and obey the chunking rules (first chunk ~50-60 chars; each chunk < 2× its predecessor; cap ~600).
+   - Write the chunk text for the ear (see TTS pronunciation gotchas) and obey the chunking rules (first chunk ~90-110 chars; each chunk < 1.5× its predecessor; cap ~600).
    - Apply per-chunk gaps via the `gap_ms` arg, same meanings as the `gMMM` filename token below.
 
 3. **Minimal text in the visible reply.** A one-line acknowledgement is enough — the audio is the answer.
