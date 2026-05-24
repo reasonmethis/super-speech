@@ -130,13 +130,25 @@ Phases 0-4 set up the runtime, but that alone won't make a *future* session
 reach for super-speech unless the user points you at this repo again. So once
 verification passes, finish the job: **install super-speech as a skill for
 yourself**, using whatever skill mechanism your agent provides — you know your
-own. Prefer a user-level (global) install so it works in every project, unless
-the user wants it somewhere specific.
+own. Prefer a user-level (global) install so it works in every project.
 
 The skill is `SKILL.md`, alongside the scripts under `skills/super-speech/`.
-Register it as a skill (its body loads on demand) rather than pasting it into
-always-on instructions. Nothing here is agent-specific — the runtime resolves
-through `~/.super-speech/super-speech.paths`.
+**Ask the user which of these two ways to install it, defaulting to the first:**
+
+1. **Copy it in (default).** Copy `SKILL.md` into your agent's skills location —
+   the normal install. This is the right choice when super-speech is used with a
+   single coding agent.
+
+2. **Link it (keep in sync).** Instead of copying, point your skills location at
+   this repo's `skills/super-speech/` via a symlink (a directory *junction* on
+   Windows — no admin needed). Choose this *only* when the user runs super-speech
+   across **multiple** coding agents and wants one source of truth: an edit to
+   the repo's `SKILL.md` then reaches every agent with no re-copying. Trade-off:
+   the install now depends on the repo staying in place.
+
+Either way, register it as a skill (its body loads on demand) rather than
+pasting it into always-on instructions. Nothing here is agent-specific — the
+runtime resolves through `~/.super-speech/super-speech.paths`.
 
 When everything passes, tell the user setup is complete — the runtime works, and
 (if Phase 5 ran) the skill is discoverable in new sessions — and that they can
