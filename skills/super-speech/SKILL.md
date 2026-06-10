@@ -1,6 +1,6 @@
 ---
 name: super-speech
-description: Speak responses aloud as voice replies through the local Kokoro TTS drainer. Use whenever the user asks you to reply by voice/audio, says "use voice", or wants spoken answers turn by turn. Also use to install or set up super-speech — triggers like "install super-speech", "set up super-speech", or "super-speech voice not working" — in which case follow SETUP.md at the repo root. Covers the speak.sh / ensure-drainer.sh helpers (always make sure the drainer is alive before queueing — never just write to the queue), the chunking rules (short first chunk, strictly <1.5× growth, ~600 char cap), per-chunk gaps (gMMM), drainer signal files and their pitfalls, the restart procedure, and the Kokoro voices. This is the BASE voice skill — the auto-podcast skill (long multi-chunk podcasts) and the whatsapp-voice skill (reaching the user when they are away from the computer) both build on it.
+description: Speak responses aloud as voice replies through the local Kokoro TTS drainer. Use whenever the user asks you to reply by voice/audio, says "use voice", or wants spoken answers turn by turn. Also use to install or set up super-speech — triggers like "install super-speech", "set up super-speech", or "super-speech voice not working" — in which case follow SETUP.md at the repo root. Covers the speak.sh / ensure-drainer.sh helpers (always make sure the drainer is alive before queueing — never just write to the queue), the chunking rules (short first chunk, strictly <1.5× growth, ~600 char cap), per-chunk gaps (gMMM), drainer signal files and their pitfalls, the restart procedure, and the Kokoro voices. This is the BASE voice skill — the auto-podcast skill (long multi-chunk podcasts) and the whatsapp-voice skill (reaching the user when they are away from the computer) both build on it. By default, speak with the `af_heart` voice unless the user explicitly asks for a different one.
 ---
 
 # Super-Speech
@@ -76,6 +76,11 @@ These four rules are the **canonical chunking contract** — the auto-podcast an
    ```
    `speak.sh` ensures the drainer is running first and auto-picks the next chunk number, so you don't manage numbers and the drainer can't be silently dead.
    - Args: `speak.sh "<text>" [voice] [gap_ms]`. `voice` defaults to `bm_fable` (male) — use `af_aoede` when picking a female voice, `bm_fable` when picking a male voice. Override with any other voice ID when the user asks for one specifically. `gap_ms` is the optional pre-play gap (`g500`-style; omit for the default). Pass the digits only — `speak.sh` prepends the `g` itself; passing `g600` yields filename `gg600` which fails to parse and falls back to the default 1.0 s gap.
+   - **PowerShell / Codex on Windows:** avoid nested `bash -lc` quoting for `speak.sh`; it can split or truncate the text so only the first word is spoken. Call Git Bash directly with `speak.sh` as the script and pass the text as a PowerShell argument:
+     ```powershell
+     $text = 'Full sentence to speak.'
+     & 'C:\Program Files\Git\bin\bash.exe' 'C:/Users/micro/Documents/Projects/super-speech/speak.sh' $text 'bm_fable'
+     ```
    - Write the chunk text for the ear (see TTS pronunciation gotchas) and obey the chunking rules (first chunk ~90-110 chars; each chunk < 1.5× its predecessor; cap ~600).
    - Apply per-chunk gaps via the `gap_ms` arg, same meanings as the `gMMM` filename token below.
 
@@ -174,6 +179,7 @@ Tuning requires a process restart; the model itself does not reload.
 - `bm_*` UK male: daniel, fable, george, lewis
 
 Defaults for conversational replies:
+- **Default**: `af_heart` (use this unless the user asks for another voice)
 - **Male**: `bm_fable`
 - **Female**: `af_aoede`
 
