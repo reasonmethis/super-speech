@@ -22,6 +22,8 @@ set -u
 #   3. py / python3 / python on PATH       best-effort default
 SPEECH_HOME="${SUPER_SPEECH_HOME:-$HOME/.super-speech}"
 PATHS_FILE="$SPEECH_HOME/super-speech.paths"
+HEARTBEAT="$SPEECH_HOME/drainer.alive"
+HEARTBEAT_STALE_S=15   # a heartbeat newer than this => drainer is alive (cheap mtime read)
 
 resolve_python() {
   if [ -n "${SUPER_SPEECH_PYTHON:-}" ]; then
@@ -48,11 +50,28 @@ fi
 # "/c/Users/..." path — Windows misreads the leading "/c/" as "C:\c\...".
 DRAINER_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -W)/drainer-kokoro.py"
 
-_drainer_running() {
-  # True iff there is a python.exe process whose command line mentions drainer-kokoro.
+_drainer_scan() {
+  # Authoritative but slow (~2-3s): scan every process for the drainer.
   powershell -NoProfile -Command \
     "if (Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" -ErrorAction SilentlyContinue | Where-Object { \$_.CommandLine -like '*drainer-kokoro*' }) { 'yes' }" \
     2>/dev/null | tr -d '\r\n '
+}
+
+_drainer_running() {
+  # Fast path: a heartbeat file freshly touched by the drainer means it's alive.
+  # That's a microsecond mtime read instead of the ~2-3s process scan, so queueing
+  # many chunks no longer pays the scan once per chunk. Only when the heartbeat is
+  # missing or stale do we fall back to the authoritative scan -- so a long blocking
+  # synth (which briefly pauses the heartbeat) never makes us launch a 2nd drainer.
+  if [ -f "$HEARTBEAT" ]; then
+    now=$(date +%s)
+    mtime=$(stat -c %Y "$HEARTBEAT" 2>/dev/null)
+    if [ -n "$mtime" ] && [ "$(( now - mtime ))" -lt "$HEARTBEAT_STALE_S" ]; then
+      echo "yes"
+      return
+    fi
+  fi
+  _drainer_scan
 }
 
 if [ "$(_drainer_running)" = "yes" ]; then

@@ -28,7 +28,14 @@ SPOKEN="$SPEECH_HOME/spoken"
 mkdir -p "$QUEUE" "$SPOKEN"
 
 # 1. Make sure the drainer is alive (starts it + waits for warmup if not).
-bash "$HERE/ensure-drainer.sh" >/dev/null
+#    Set SUPER_SPEECH_ASSUME_RUNNING=1 to skip this per-call check when queueing
+#    many chunks in a row: run ensure-drainer.sh once yourself first, then set the
+#    var so each speak.sh skips the ~2-3s PowerShell process scan. That scan,
+#    run once per chunk, otherwise drips chunks into the queue slowly and can
+#    open a gap before the drainer's synth-ahead engages.
+if [ -z "${SUPER_SPEECH_ASSUME_RUNNING:-}" ]; then
+  bash "$HERE/ensure-drainer.sh" >/dev/null
+fi
 
 # 2. Next chunk number = 1 + the highest NNN currently in queue or spoken.
 maxn=$( { ls "$QUEUE" "$SPOKEN" 2>/dev/null; } | sed -n 's/^0*\([0-9][0-9]*\)-.*/\1/p' | sort -n | tail -1 )
