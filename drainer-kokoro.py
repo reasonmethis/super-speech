@@ -286,6 +286,7 @@ def play_one(sd, np, path: Path, audio, sr, buf: "queue.Queue", st: State) -> st
     """Play a pre-rendered chunk (non-blocking) and poll for completion/signals.
     Returns 'done' | 'interrupt' | 'skip'."""
     out = np.zeros(len(audio), dtype=getattr(audio, "dtype", "float32")) if SILENT else audio
+    t0 = time.time()
     sd.play(out, sr)
     deadline = time.time() + (len(audio) / float(sr)) + 2.0  # safety guard
     while True:
@@ -309,6 +310,15 @@ def play_one(sd, np, path: Path, audio, sr, buf: "queue.Queue", st: State) -> st
         sd.wait()
     except Exception:
         pass
+    # Wall clock stretching past the audio duration means the device starved
+    # mid-chunk (buffer underruns -> audible stutter), so record it.
+    wall = time.time() - t0
+    dur = len(audio) / float(sr)
+    lag = wall - dur
+    log(
+        f"played {path.name} wall={wall:.1f}s audio={dur:.1f}s"
+        + (f" UNDERRUN +{lag:.1f}s" if lag > 0.5 else "")
+    )
     return "done"
 
 
@@ -326,7 +336,19 @@ def main() -> None:
     sd.wait()
     log("loading kokoro model...")
     from kokoro_onnx import Kokoro
-    kokoro = Kokoro(str(MODEL_PATH), str(VOICES_PATH))
+    # Cap ONNX intra-op threads below the core count so a synth burst (worst
+    # right after a cold load) can never starve the audio callback into stutter.
+    try:
+        import onnxruntime as ort
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = max(1, (os.cpu_count() or 4) - 2)
+        kokoro = Kokoro.from_session(
+            ort.InferenceSession(str(MODEL_PATH), sess_options=opts), str(VOICES_PATH)
+        )
+        log(f"synth capped at {opts.intra_op_num_threads} intra-op threads")
+    except Exception as e:
+        log(f"capped session failed ({e}); using default Kokoro init")
+        kokoro = Kokoro(str(MODEL_PATH), str(VOICES_PATH))
     global AVAILABLE_VOICES
     try:
         AVAILABLE_VOICES = set(kokoro.get_voices())
