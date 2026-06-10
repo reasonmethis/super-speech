@@ -1,20 +1,37 @@
 #!/usr/bin/env python3
 """
-Auto-podcast drainer (Kokoro, single-thread, non-blocking audio).
+Auto-podcast drainer (Kokoro) — background-worker streaming buffer.
 
-One main loop. Playback runs through the OS audio driver via sounddevice
-(non-blocking), so while a chunk plays the same thread can synthesize the
-next chunk. The OS provides the audio parallelism; no second Python thread.
+A background synth WORKER thread synthesizes queued chunks continuously and
+banks the rendered audio in a bounded buffer. The MAIN thread consumes that
+buffer, playing each chunk through the OS audio driver via sounddevice
+(non-blocking) and staying responsive to control signals every ~50 ms.
+
+Because synth runs faster than playback, the worker races ahead and the buffer
+fills during long chunks. That cushion is what makes SHORT chunks safe anywhere
+in a script: by the time a brief chunk plays, the next (possibly long) chunk is
+already rendered and waiting — so there is no synth-overrun gap. The earlier
+single-thread design only ever rendered ONE chunk ahead, so a short chunk before
+a long one always opened an audible gap; this removes that constraint.
 
 Signal files in BASE control runtime (consumed when handled):
-  STOP       - finish current chunk, then exit cleanly
+  STOP       - finish the current chunk, then exit cleanly
   INTERRUPT  - stop playback immediately and exit
   SKIP       - stop current chunk, archive it, continue with next
-  CLEAR      - move every non-playing queued chunk to spoken/
+  CLEAR      - drop the buffer and every non-playing queued chunk (-> spoken/)
+  WARMUP     - synthesize a throwaway phrase to pay the first-inference cost
+
+Env:
+  SUPER_SPEECH_HOME    - override the runtime home directory
+  SUPER_SPEECH_SILENT  - opt-in: play silence of identical duration instead of
+                         audio (timing is preserved). For measuring gap behavior
+                         without making sound; default off.
 """
 import glob
 import os
+import queue
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -24,10 +41,6 @@ try:
 except Exception:
     pass
 
-# Runtime home — queue, spoken, log, signals, tone, and the Kokoro model all
-# live under here. Agent-neutral by design (no ".claude" in the path) so one
-# drainer install can serve Claude Code, Codex, OpenCode, etc. equally well.
-# Override the whole location with the SUPER_SPEECH_HOME environment variable.
 _USER_HOME = Path(os.environ.get("USERPROFILE") or os.path.expanduser("~"))
 BASE = Path(os.environ.get("SUPER_SPEECH_HOME") or (_USER_HOME / ".super-speech"))
 QUEUE = BASE / "queue"
@@ -39,8 +52,8 @@ STOP = BASE / "STOP"
 INTERRUPT = BASE / "INTERRUPT"
 SKIP = BASE / "SKIP"
 CLEAR = BASE / "CLEAR"
-
-TONE_WAV = BASE / "tone.wav"
+WARMUP = BASE / "WARMUP"
+HEARTBEAT = BASE / "drainer.alive"  # touched while alive; ensure-drainer.sh reads its mtime
 
 MODEL_DIR = BASE / "models" / "kokoro"
 MODEL_PATH = MODEL_DIR / "kokoro-v1.0.onnx"
@@ -50,23 +63,37 @@ DEFAULT_VOICE = "af_bella"
 AVAILABLE_VOICES: set[str] = set()  # populated in main() once kokoro loads
 POLL_INTERVAL = 0.2   # idle poll cadence
 SIGNAL_TICK = 0.05    # signal-file check cadence during playback
-CHUNK_GAP_S = 1.0     # silence inserted after each chunk for natural pacing
-PLAY_TONE = False     # short tone when synth starts; False mutes but keeps code path
+CHUNK_GAP_S = 0.2     # silence before each chunk (natural rhythm); override per-file with -gMMM-
+BUFFER_MAX = 8        # chunks of pre-rendered audio the worker may bank ahead (~4 is enough)
 
-TONE_FREQ_HZ = 880    # short "synth starting" blip
-TONE_DUR_S = 0.08
-TONE_SR = 22050
-TONE_VOLUME = 0.25
+SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
 
 def log(msg: str) -> None:
-    line = f"{time.strftime('%H:%M:%S')} {msg}\n"
+    now = time.time()
+    line = f"{time.strftime('%H:%M:%S', time.localtime(now))}.{int((now % 1) * 1000):03d} {msg}\n"
     try:
         with open(LOG, "a", encoding="utf-8") as f:
             f.write(line)
     except Exception:
         pass
     print(line, end="", flush=True)
+
+
+_last_hb = 0.0
+
+
+def heartbeat(force: bool = False) -> None:
+    """Touch the liveness file so ensure-drainer.sh can detect us cheaply.
+    Throttled to ~1/s; force=True before a long blocking synth keeps it fresh."""
+    global _last_hb
+    now = time.time()
+    if force or now - _last_hb >= 1.0:
+        try:
+            HEARTBEAT.touch()
+        except Exception:
+            pass
+        _last_hb = now
 
 
 def voice_from_name(name: str) -> str:
@@ -108,8 +135,8 @@ def consume(signal: Path) -> bool:
 def archive(path: Path) -> None:
     try:
         os.replace(str(path), str(SPOKEN / path.name))
-    except OSError as e:
-        log(f"archive error {path.name}: {e}")
+    except OSError:
+        pass  # already moved (e.g. by CLEAR) — harmless
 
 
 def archive_failed(path: Path) -> None:
@@ -119,56 +146,6 @@ def archive_failed(path: Path) -> None:
         os.replace(str(path), str(FAILED / path.name))
     except OSError as e:
         log(f"archive_failed error {path.name}: {e}")
-
-
-def clear_queue(currently_playing: Path | None) -> int:
-    keep = None if currently_playing is None else currently_playing.name
-    n = 0
-    for f in glob.glob(str(QUEUE / "*.txt")):
-        if keep is not None and os.path.basename(f) == keep:
-            continue
-        try:
-            os.replace(f, str(SPOKEN / os.path.basename(f)))
-            n += 1
-        except OSError:
-            pass
-    return n
-
-
-def init_tone() -> None:
-    """Generate the synth-start tone WAV. Played later via winsound (async),
-    which goes through a separate Windows audio path and therefore mixes
-    with sounddevice playback at the OS level instead of cutting it off."""
-    import numpy as np
-    import wave
-    n = int(TONE_DUR_S * TONE_SR)
-    t = np.arange(n, dtype=np.float32) / TONE_SR
-    tone = (TONE_VOLUME * np.sin(2 * np.pi * TONE_FREQ_HZ * t)).astype(np.float32)
-    fade = max(1, int(0.01 * TONE_SR))
-    env = np.ones(n, dtype=np.float32)
-    env[:fade] = np.linspace(0.0, 1.0, fade, dtype=np.float32)
-    env[-fade:] = np.linspace(1.0, 0.0, fade, dtype=np.float32)
-    tone *= env
-    pcm = (np.clip(tone, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
-    TONE_WAV.parent.mkdir(parents=True, exist_ok=True)
-    with wave.open(str(TONE_WAV), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(TONE_SR)
-        w.writeframes(pcm)
-
-
-def play_tone() -> None:
-    """Fire-and-forget tone via winsound (async). Mixes with sounddevice.
-    No-op when PLAY_TONE is False; code preserved for future re-enable."""
-    if not PLAY_TONE:
-        return
-    import winsound
-    flags = winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT
-    try:
-        winsound.PlaySound(str(TONE_WAV), flags)
-    except Exception as e:
-        log(f"tone error: {e}")
 
 
 def stream_active(sd) -> bool:
@@ -181,6 +158,7 @@ def stream_active(sd) -> bool:
 
 def synth_chunk(kokoro, path: Path):
     """Return (audio, sr) or None on empty / read error / synth error."""
+    heartbeat(force=True)
     try:
         text = path.read_text(encoding="utf-8").strip()
     except Exception as e:
@@ -205,105 +183,133 @@ def synth_chunk(kokoro, path: Path):
     return audio, sr
 
 
-def wait_for_chunk() -> Path | None:
-    """Block until a chunk appears or STOP/INTERRUPT is seen. Returns path or None to exit."""
-    while True:
-        if consume(STOP):
-            log("STOP (idle); exiting")
-            return None
+def warmup(kokoro) -> None:
+    """Synthesize a throwaway phrase and discard it to pay the one-time
+    first-inference cost up front, so the first real chunk renders fast."""
+    heartbeat(force=True)
+    t0 = time.time()
+    try:
+        kokoro.create("Warming up the model.", voice=DEFAULT_VOICE, speed=1.0, lang="en-us")
+        log(f"warmup (discarded) synth={time.time()-t0:.1f}s")
+    except Exception as e:
+        log(f"warmup error: {e}")
+
+
+class State:
+    """Shared coordination between the main (consumer) and worker (producer)."""
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.claimed: set[str] = set()  # filenames in the buffer or being synthesized
+        self.playing: str | None = None  # filename currently playing (never reclaim/clear)
+        self.stop = threading.Event()    # tell the worker to exit
+        self.saw_stop = False            # latched STOP — finish current chunk, then exit
+
+
+def drop_to_spoken(path: Path) -> None:
+    try:
+        os.replace(str(path), str(SPOKEN / path.name))
+    except OSError:
+        pass
+
+
+def do_clear(buf: "queue.Queue", st: State) -> None:
+    """Drop the rendered buffer and every non-playing queued chunk into spoken/."""
+    with st.lock:
+        n = 0
+        while True:
+            try:
+                p, _a, _sr = buf.get_nowait()
+            except queue.Empty:
+                break
+            drop_to_spoken(p)
+            n += 1
+        for f in glob.glob(str(QUEUE / "*.txt")):
+            if os.path.basename(f) == st.playing:
+                continue
+            drop_to_spoken(Path(f))
+            n += 1
+        st.claimed = {st.playing} if st.playing else set()
+    log(f"CLEAR; dropped {n} buffered/queued chunk(s)")
+
+
+def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
+    """Producer: continuously claim the next queued chunk, synthesize it, and
+    bank the audio in buf (blocking when buf is full — natural backpressure)."""
+    while not st.stop.is_set():
+        if consume(WARMUP):
+            warmup(kokoro)
+        nxt: Path | None = None
+        with st.lock:
+            for f in sorted(glob.glob(str(QUEUE / "*.txt"))):
+                name = os.path.basename(f)
+                if name in st.claimed or name == st.playing:
+                    continue
+                nxt = Path(f)
+                st.claimed.add(name)
+                break
+        if nxt is None:
+            heartbeat()
+            time.sleep(POLL_INTERVAL)
+            continue
+        res = synth_chunk(kokoro, nxt)
+        if res is None:
+            with st.lock:
+                st.claimed.discard(nxt.name)
+            continue
+        audio, sr = res
+        while not st.stop.is_set():
+            try:
+                buf.put((nxt, audio, sr), timeout=0.2)
+                break
+            except queue.Full:
+                heartbeat()
+
+
+def gap_wait(seconds: float, buf: "queue.Queue", st: State) -> str | None:
+    """Sleep for `seconds` while honoring control signals. Returns
+    'interrupt'/'skip' if one fired, else None."""
+    end = time.time() + seconds
+    while time.time() < end:
         if consume(INTERRUPT):
-            log("INTERRUPT (idle); exiting")
-            return None
+            return "interrupt"
+        if consume(SKIP):
+            return "skip"
+        if not st.saw_stop and STOP.exists():
+            st.saw_stop = True
         if consume(CLEAR):
-            log("CLEAR (idle); no-op")
-        files = sorted(glob.glob(str(QUEUE / "*.txt")))
-        if files:
-            return Path(files[0])
-        time.sleep(POLL_INTERVAL)
-
-
-def find_next(after: Path) -> Path | None:
-    for f in sorted(glob.glob(str(QUEUE / "*.txt"))):
-        if os.path.basename(f) != after.name:
-            return Path(f)
+            do_clear(buf, st)
+        time.sleep(SIGNAL_TICK)
     return None
 
 
-def play_and_overlap_synth(sd, kokoro, current_path: Path, audio, sr, next_path: Path | None):
-    """
-    Start non-blocking playback. While it plays, synthesize next_path (if any).
-    Then poll for completion or a signal.
-
-    Returns (outcome, next_pending):
-      outcome      : "done" | "stop" | "interrupt" | "skip"
-      next_pending : None or (path, audio, sr)
-    """
-    duration_s = float(len(audio)) / float(sr)
-    sd.play(audio, sr)
-
-    next_pending = None
-    if next_path is not None:
-        play_tone()
-        res = synth_chunk(kokoro, next_path)
-        if res is not None:
-            next_pending = (next_path, res[0], res[1])
-
-    deadline = time.time() + duration_s + 2.0  # safety guard
-    outcome = "done"
-    saw_stop = STOP.exists()
-
+def play_one(sd, np, path: Path, audio, sr, buf: "queue.Queue", st: State) -> str:
+    """Play a pre-rendered chunk (non-blocking) and poll for completion/signals.
+    Returns 'done' | 'interrupt' | 'skip'."""
+    out = np.zeros(len(audio), dtype=getattr(audio, "dtype", "float32")) if SILENT else audio
+    sd.play(out, sr)
+    deadline = time.time() + (len(audio) / float(sr)) + 2.0  # safety guard
     while True:
         if not stream_active(sd):
             break
         if consume(INTERRUPT):
             sd.stop()
-            outcome = "interrupt"
-            break
+            return "interrupt"
         if consume(SKIP):
             sd.stop()
-            outcome = "skip"
-            break
-        if not saw_stop and STOP.exists():
-            saw_stop = True
+            return "skip"
+        if not st.saw_stop and STOP.exists():
+            st.saw_stop = True
         if consume(CLEAR):
-            n = clear_queue(currently_playing=current_path)
-            log(f"CLEAR; dropped {n} queued chunk(s)")
-            next_pending = None
+            do_clear(buf, st)
         if time.time() >= deadline:
             break
+        heartbeat()
         time.sleep(SIGNAL_TICK)
-
     try:
         sd.wait()
     except Exception:
         pass
-
-    gap_s = CHUNK_GAP_S
-    if next_pending is not None:
-        specified = gap_from_name(next_pending[0].name)
-        if specified is not None:
-            gap_s = specified
-
-    if outcome == "done" and gap_s > 0:
-        gap_deadline = time.time() + gap_s
-        while time.time() < gap_deadline:
-            if consume(INTERRUPT):
-                outcome = "interrupt"
-                break
-            if consume(SKIP):
-                outcome = "skip"
-                break
-            if not saw_stop and STOP.exists():
-                saw_stop = True
-            if consume(CLEAR):
-                n = clear_queue(currently_playing=None)
-                log(f"CLEAR (gap); dropped {n} queued chunk(s)")
-                next_pending = None
-            time.sleep(SIGNAL_TICK)
-
-    if outcome == "done" and saw_stop and consume(STOP):
-        outcome = "stop"
-    return outcome, next_pending
+    return "done"
 
 
 def main() -> None:
@@ -315,10 +321,7 @@ def main() -> None:
 
     import sounddevice as sd
     import numpy as np
-    init_tone()
-    # Warm up PortAudio so the first real sd.play() doesn't pay device-open
-    # latency (otherwise the first chunk starts ~1s late and any winsound
-    # tone fired right after sd.play() audibly precedes the chunk).
+    # Warm up PortAudio so the first real sd.play() doesn't pay device-open latency.
     sd.play(np.zeros(int(0.1 * 24000), dtype=np.float32), 24000)
     sd.wait()
     log("loading kokoro model...")
@@ -331,50 +334,81 @@ def main() -> None:
         log(f"could not enumerate voices: {e}; voice validation disabled")
         AVAILABLE_VOICES = set()
     log(
-        f"kokoro loaded ({len(AVAILABLE_VOICES)} voices); "
-        "single-thread drainer (signals: STOP/INTERRUPT/SKIP/CLEAR)"
+        f"kokoro loaded ({len(AVAILABLE_VOICES)} voices); buffered drainer "
+        f"(buffer<= {BUFFER_MAX}, gap={CHUNK_GAP_S}s{', SILENT' if SILENT else ''})"
     )
 
-    pending = None  # (path, audio, sr) — pre-synth waiting to play
+    # Pay the one-time first-inference cost now (before the worker starts, so
+    # there is no concurrent kokoro call), then clear any pre-launch WARMUP.
+    warmup(kokoro)
+    consume(WARMUP)
 
+    buf: "queue.Queue" = queue.Queue(maxsize=BUFFER_MAX)
+    st = State()
+    worker = threading.Thread(target=synth_worker, args=(kokoro, buf, st), daemon=True)
+    worker.start()
+
+    first = True
     try:
         while True:
-            if consume(CLEAR):
-                n = clear_queue(currently_playing=None)
-                log(f"CLEAR (idle); dropped {n} queued chunk(s)")
-                pending = None
-
-            tone_t0 = None
-            if pending is not None:
-                path, audio, sr = pending
-                pending = None
-            else:
-                path = wait_for_chunk()
-                if path is None:
-                    return
-                play_tone()
-                tone_t0 = time.time()
-                res = synth_chunk(kokoro, path)
-                if res is None:
-                    continue
-                audio, sr = res
-
-            log(f"play {path.name}")
-            if tone_t0 is not None:
-                log(f"tone-to-audio gap: {time.time() - tone_t0:.2f}s")
-            next_path = find_next(after=path)
-            outcome, next_pending = play_and_overlap_synth(
-                sd, kokoro, path, audio, sr, next_path
-            )
-            archive(path)
-
-            if outcome in ("interrupt", "stop"):
-                log(f"exiting on {outcome}")
+            if consume(INTERRUPT):
+                log("INTERRUPT (idle); exiting")
                 return
-            pending = next_pending
+            if consume(CLEAR):
+                do_clear(buf, st)
+            if not st.saw_stop and STOP.exists():
+                st.saw_stop = True
+
+            try:
+                path, audio, sr = buf.get(timeout=POLL_INTERVAL)
+            except queue.Empty:
+                heartbeat()
+                # STOP/idle: nothing playing and nothing buffered -> exit cleanly.
+                if (st.saw_stop or consume(STOP)) and buf.empty():
+                    with st.lock:
+                        more = bool(glob.glob(str(QUEUE / "*.txt")))
+                    if not more or st.saw_stop:
+                        log("STOP (idle); exiting")
+                        return
+                continue
+
+            if not first:
+                g = gap_from_name(path.name)
+                outcome = gap_wait(g if g is not None else CHUNK_GAP_S, buf, st)
+                if outcome == "interrupt":
+                    log("INTERRUPT (gap); exiting")
+                    return
+                if outcome == "skip":
+                    archive(path)
+                    with st.lock:
+                        st.claimed.discard(path.name)
+                    continue
+            first = False
+
+            with st.lock:
+                st.playing = path.name
+            log(f"play {path.name}")
+            outcome = play_one(sd, np, path, audio, sr, buf, st)
+            archive(path)
+            with st.lock:
+                st.claimed.discard(path.name)
+                st.playing = None
+
+            if outcome == "interrupt":
+                log("exiting on interrupt")
+                return
+            if st.saw_stop and consume(STOP) or st.saw_stop:
+                log("exiting on stop")
+                return
 
     except KeyboardInterrupt:
         log("KeyboardInterrupt; exiting")
+    finally:
+        st.stop.set()
+        try:
+            HEARTBEAT.unlink()
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":
