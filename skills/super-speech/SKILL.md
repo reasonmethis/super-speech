@@ -55,7 +55,7 @@ These rules are the **canonical chunking contract** — the auto-podcast and wha
 
 2. **Cap chunks at ~600 characters** (roughly 3-4 sentences). Above that, you lose the ability to control rhetorical pauses inside a thought (per-chunk `gMMM` gaps apply at chunk boundaries only) and the speech starts sounding monotone.
 
-3. **Chunk-to-chunk growth doesn't matter.** (The old "strictly <1.5× growth" rule is retired as of 2026-06-10 — don't contort replies to satisfy it, and don't flag other agents' chunking for violating it.)
+3. **Chunk-to-chunk growth doesn't matter.** (The old "strictly <1.5× growth" rule is retired as of 2026-06-10 — don't contort replies to satisfy it, and don't flag other agents' chunking for violating it. The growth *principle* survives one level up, between Bash calls — see workflow step 2.)
 
 **Why growth stopped mattering:** the drainer now splits every chunk at sentence boundaries into ≤250-char pieces and banks each piece in the playback buffer the moment it renders. A chunk starts playing once its FIRST piece is ready (~1-2s), not when the whole chunk is done, so a 70-char opener followed by a 700-char body — the classic gap-maker, ~10s of dead air under the old whole-chunk design — now transitions in under 0.5s (measured: 384ms live, with ~100-200ms pauses at intra-chunk sentence boundaries, which read as natural rhythm). Synth runs at ~3.5-4× realtime (6 ONNX threads on 8 cores — measured faster than the oversubscribed default), so the cushion only ever needs to cover one sentence. The drainer logs every audible boundary as `boundary kind=chunk|piece silence=NNNms`; if a transition ever sounds wrong, that line is the ground truth.
 
@@ -66,7 +66,10 @@ These rules are the **canonical chunking contract** — the auto-podcast and wha
    - 2-4 chunks for moderate replies
    - More only if the reply is genuinely long enough to warrant it
 
-2. **Queue ALL chunks of a reply in ONE Bash call.** Chain `speak.sh` invocations with `&&` in a single Bash tool call — *not* one Bash call per chunk. Each Bash tool call in Claude Code has ~15 s of round-trip latency; one chunk per call drips chunks into the queue slower than the drainer plays them, so chunk N+1 isn't in `queue/` yet when N starts playing, synth-ahead never engages, and the drainer goes idle between every chunk. Symptom: a `tone-to-audio gap: X.XXs` line in `~/.claude/podcast/log.txt` after every single chunk. Batching all chunks in one call fixes it (gap line only on the first chunk, cold-start).
+2. **Queue in few, laddered Bash calls.** Two latencies compete here. Each Bash tool call has ~10-15 s of round-trip latency, so one call per chunk drips chunks in slower than the drainer plays them and it goes idle between every one (symptom: a long `boundary ... silence=NNNNms` line before each chunk). But composing one giant call delays first audio by however long the whole reply takes to write. The rule that balances both: **every call's queued audio must outlast the time it takes you to deliver the next call.**
+   - Reply fits in ~2-4 chunks (≲900 chars total): queue it ALL in one call.
+   - Longer reply: ladder the calls so speech starts before the full reply is composed — call 1 carries ~300 chars (~15-20 s of audio), call 2 ~2-3× that, call 3 the rest. Audio per call grows geometrically: the retired chunk-level "<1.5× growth" rule lives on *between calls*, which is where composition latency actually bites. Never send a non-final call carrying less than ~250 chars — the drainer would go idle before your next call lands.
+   - Within each call, chain `speak.sh` invocations with `&&`:
    ```bash
    bash "$SCRIPTS_DIR/speak.sh" "First short chunk." bm_fable && \
    bash "$SCRIPTS_DIR/speak.sh" "Second, somewhat longer chunk." bm_fable 600 && \
