@@ -4,32 +4,39 @@ Auto-podcast drainer (Kokoro) — background-worker streaming buffer.
 
 A background synth WORKER thread synthesizes queued chunks continuously and
 banks the rendered audio in a bounded buffer. The MAIN thread consumes that
-buffer, playing each chunk through the OS audio driver via sounddevice
+buffer, playing each piece through the OS audio driver via sounddevice
 (non-blocking) and staying responsive to control signals every ~50 ms.
 
-Because synth runs faster than playback, the worker races ahead and the buffer
-fills during long chunks. That cushion is what makes SHORT chunks safe anywhere
-in a script: by the time a brief chunk plays, the next (possibly long) chunk is
-already rendered and waiting — so there is no synth-overrun gap. The earlier
-single-thread design only ever rendered ONE chunk ahead, so a short chunk before
-a long one always opened an audible gap; this removes that constraint.
+Long chunks are split at sentence boundaries into pieces of at most
+SPLIT_CHARS characters; each piece is synthesized and banked separately, so a
+chunk starts playing once its FIRST piece renders (~1-2 s) instead of after
+the whole chunk renders (10-20 s for a 700-char chunk). Pieces of one chunk
+play back-to-back (the ~0.1-0.2 s of play-loop latency between them lands on
+a sentence boundary, where a pause is natural); the configured inter-chunk
+gap applies only before a chunk's first piece. This is what makes the
+queue gap-proof even when a short chunk is followed by a much longer one —
+the synth-ahead cushion only needs to cover one SENTENCE, not one chunk.
 
 Signal files in BASE control runtime (consumed when handled):
   STOP       - finish the current chunk, then exit cleanly
   INTERRUPT  - stop playback immediately and exit
-  SKIP       - stop current chunk, archive it, continue with next
-  CLEAR      - drop the buffer and every non-playing queued chunk (-> spoken/)
+  SKIP       - stop current chunk (all its remaining pieces), archive it,
+               continue with next
+  CLEAR      - drop the buffer and every non-playing queued chunk (-> spoken/);
+               never truncates the currently playing chunk
   WARMUP     - synthesize a throwaway phrase to pay the first-inference cost
 
 Env:
-  SUPER_SPEECH_HOME    - override the runtime home directory
-  SUPER_SPEECH_SILENT  - opt-in: play silence of identical duration instead of
-                         audio (timing is preserved). For measuring gap behavior
-                         without making sound; default off.
+  SUPER_SPEECH_HOME        - override the runtime home directory
+  SUPER_SPEECH_SILENT      - opt-in: play silence of identical duration instead
+                             of audio (timing is preserved). For measuring gap
+                             behavior without making sound; default off.
+  SUPER_SPEECH_SPLIT_CHARS - sentence-piece target size; 0 disables splitting
 """
 import glob
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -64,7 +71,8 @@ AVAILABLE_VOICES: set[str] = set()  # populated in main() once kokoro loads
 POLL_INTERVAL = 0.2   # idle poll cadence
 SIGNAL_TICK = 0.05    # signal-file check cadence during playback
 CHUNK_GAP_S = 0.2     # silence before each chunk (natural rhythm); override per-file with -gMMM-
-BUFFER_MAX = 8        # chunks of pre-rendered audio the worker may bank ahead (~4 is enough)
+BUFFER_MAX = 8        # pieces of pre-rendered audio the worker may bank ahead
+SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
@@ -122,6 +130,34 @@ def gap_from_name(name: str) -> float | None:
     return None
 
 
+_SENT_RE = re.compile(r"(?<=[.!?…])\s+")
+
+
+FIRST_PIECE_CHARS = 120  # small first piece: its synth is the only wait at a cold start
+
+
+def split_text(text: str, target: int) -> list[str]:
+    """Pack whole sentences into pieces of at most `target` chars (a single
+    longer sentence stays intact). The first piece is capped tighter so a
+    chunk starts playing fast even with no banked cushion. target<=0
+    disables splitting."""
+    if target <= 0:
+        return [text]
+    sents = [s for s in _SENT_RE.split(text) if s.strip()]
+    pieces: list[str] = []
+    cur = ""
+    for s in sents:
+        cap = min(FIRST_PIECE_CHARS, target) if not pieces else target
+        if cur and len(cur) + 1 + len(s) > cap:
+            pieces.append(cur)
+            cur = s
+        else:
+            cur = f"{cur} {s}" if cur else s
+    if cur:
+        pieces.append(cur)
+    return pieces or [text]
+
+
 def consume(signal: Path) -> bool:
     if not signal.exists():
         return False
@@ -156,33 +192,6 @@ def stream_active(sd) -> bool:
     return s is not None and getattr(s, "active", False)
 
 
-def synth_chunk(kokoro, path: Path):
-    """Return (audio, sr) or None on empty / read error / synth error."""
-    heartbeat(force=True)
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-    except Exception as e:
-        log(f"read error {path.name}: {e}")
-        return None
-    if not text:
-        log(f"empty {path.name}, archiving")
-        archive(path)
-        return None
-    voice = voice_from_name(path.name)
-    t0 = time.time()
-    try:
-        audio, sr = kokoro.create(text, voice=voice, speed=1.0, lang="en-us")
-    except Exception as e:
-        log(f"synth error {path.name} (voice={voice}): {e}; moving to failed/")
-        archive_failed(path)
-        return None
-    log(
-        f"synth {path.name} voice={voice} chars={len(text)} "
-        f"synth={time.time()-t0:.1f}s audio={len(audio)/sr:.1f}s"
-    )
-    return audio, sr
-
-
 def warmup(kokoro) -> None:
     """Synthesize a throwaway phrase and discard it to pay the one-time
     first-inference cost up front, so the first real chunk renders fast."""
@@ -201,6 +210,7 @@ class State:
         self.lock = threading.Lock()
         self.claimed: set[str] = set()  # filenames in the buffer or being synthesized
         self.playing: str | None = None  # filename currently playing (never reclaim/clear)
+        self.skip_name: str | None = None  # skipped chunk whose banked pieces must be dropped
         self.stop = threading.Event()    # tell the worker to exit
         self.saw_stop = False            # latched STOP — finish current chunk, then exit
 
@@ -213,16 +223,24 @@ def drop_to_spoken(path: Path) -> None:
 
 
 def do_clear(buf: "queue.Queue", st: State) -> None:
-    """Drop the rendered buffer and every non-playing queued chunk into spoken/."""
+    """Drop the rendered buffer and every non-playing queued chunk into spoken/.
+    Banked pieces of the currently playing chunk are kept — CLEAR never
+    truncates mid-chunk."""
     with st.lock:
+        keep = []
         n = 0
         while True:
             try:
-                p, _a, _sr = buf.get_nowait()
+                entry = buf.get_nowait()
             except queue.Empty:
                 break
-            drop_to_spoken(p)
-            n += 1
+            if st.playing and entry[0].name == st.playing:
+                keep.append(entry)
+            else:
+                drop_to_spoken(entry[0])
+                n += 1
+        for entry in keep:
+            buf.put_nowait(entry)
         for f in glob.glob(str(QUEUE / "*.txt")):
             if os.path.basename(f) == st.playing:
                 continue
@@ -232,9 +250,16 @@ def do_clear(buf: "queue.Queue", st: State) -> None:
     log(f"CLEAR; dropped {n} buffered/queued chunk(s)")
 
 
+def _claimed(st: State, name: str) -> bool:
+    with st.lock:
+        return (name in st.claimed or name == st.playing) and st.skip_name != name
+
+
 def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
-    """Producer: continuously claim the next queued chunk, synthesize it, and
-    bank the audio in buf (blocking when buf is full — natural backpressure)."""
+    """Producer: claim the next queued chunk, split it into sentence pieces,
+    synthesize each, and bank (path, audio, sr, first, last) entries in buf
+    (blocking when buf is full — natural backpressure). Abandons a chunk's
+    remaining pieces when CLEAR/SKIP unclaims it."""
     while not st.stop.is_set():
         if consume(WARMUP):
             warmup(kokoro)
@@ -251,18 +276,52 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
             heartbeat()
             time.sleep(POLL_INTERVAL)
             continue
-        res = synth_chunk(kokoro, nxt)
-        if res is None:
+        try:
+            text = nxt.read_text(encoding="utf-8").strip()
+        except Exception as e:
+            log(f"read error {nxt.name}: {e}")
             with st.lock:
                 st.claimed.discard(nxt.name)
             continue
-        audio, sr = res
-        while not st.stop.is_set():
-            try:
-                buf.put((nxt, audio, sr), timeout=0.2)
+        if not text:
+            log(f"empty {nxt.name}, archiving")
+            archive(nxt)
+            with st.lock:
+                st.claimed.discard(nxt.name)
+            continue
+        voice = voice_from_name(nxt.name)
+        pieces = split_text(text, SPLIT_CHARS)
+        delivered = 0
+        for idx, piece in enumerate(pieces):
+            if st.stop.is_set() or not _claimed(st, nxt.name):
                 break
-            except queue.Full:
-                heartbeat()
+            heartbeat(force=True)
+            t0 = time.time()
+            try:
+                audio, sr = kokoro.create(piece, voice=voice, speed=1.0, lang="en-us")
+            except Exception as e:
+                log(f"synth error {nxt.name}[{idx}] (voice={voice}): {e}")
+                if delivered == 0:
+                    archive_failed(nxt)
+                    with st.lock:
+                        st.claimed.discard(nxt.name)
+                    break
+                # Mid-chunk failure: deliver an empty terminal piece so the
+                # consumer still archives and releases the chunk.
+                audio = audio[:0]
+            else:
+                log(
+                    f"synth {nxt.name}[{idx+1}/{len(pieces)}] voice={voice} "
+                    f"chars={len(piece)} synth={time.time()-t0:.1f}s audio={len(audio)/sr:.1f}s"
+                )
+            entry = (nxt, audio, sr, idx == 0, idx == len(pieces) - 1)
+            while not st.stop.is_set() and _claimed(st, nxt.name):
+                try:
+                    buf.put(entry, timeout=0.2)
+                    delivered += 1
+                    break
+                except queue.Full:
+                    heartbeat()
 
 
 def gap_wait(seconds: float, buf: "queue.Queue", st: State) -> str | None:
@@ -282,13 +341,23 @@ def gap_wait(seconds: float, buf: "queue.Queue", st: State) -> str | None:
     return None
 
 
-def play_one(sd, np, path: Path, audio, sr, buf: "queue.Queue", st: State) -> str:
-    """Play a pre-rendered chunk (non-blocking) and poll for completion/signals.
+_prev_audio_end: float | None = None
+
+
+def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: State) -> str:
+    """Play a pre-rendered piece (non-blocking) and poll for completion/signals.
     Returns 'done' | 'interrupt' | 'skip'."""
+    global _prev_audio_end
+    if len(audio) == 0:
+        return "done"
     out = np.zeros(len(audio), dtype=getattr(audio, "dtype", "float32")) if SILENT else audio
     t0 = time.time()
     sd.play(out, sr)
+    if _prev_audio_end is not None:
+        # The silence the listener actually hears at this boundary.
+        log(f"boundary kind={kind} silence={(t0 - _prev_audio_end)*1000:.0f}ms before {path.name}")
     deadline = time.time() + (len(audio) / float(sr)) + 2.0  # safety guard
+    stalled = False
     while True:
         if not stream_active(sd):
             break
@@ -303,17 +372,25 @@ def play_one(sd, np, path: Path, audio, sr, buf: "queue.Queue", st: State) -> st
         if consume(CLEAR):
             do_clear(buf, st)
         if time.time() >= deadline:
+            stalled = True
             break
         heartbeat()
         time.sleep(SIGNAL_TICK)
+    if stalled:
+        # The stream is past its audio duration and still claims to be active —
+        # a starved/wedged device. sd.wait() here can hang for the rest of the
+        # starvation (observed 44s once); cut the piece and move on instead.
+        log(f"PLAYBACK_STALL {path.name}: stream active {2.0:.0f}s past audio end; cutting")
+        sd.stop()
     try:
         sd.wait()
     except Exception:
         pass
     # Wall clock stretching past the audio duration means the device starved
-    # mid-chunk (buffer underruns -> audible stutter), so record it.
+    # mid-piece (buffer underruns -> audible stutter), so record it.
     wall = time.time() - t0
     dur = len(audio) / float(sr)
+    _prev_audio_end = t0 + dur
     lag = wall - dur
     log(
         f"played {path.name} wall={wall:.1f}s audio={dur:.1f}s"
@@ -336,8 +413,9 @@ def main() -> None:
     sd.wait()
     log("loading kokoro model...")
     from kokoro_onnx import Kokoro
-    # Cap ONNX intra-op threads below the core count so a synth burst (worst
-    # right after a cold load) can never starve the audio callback into stutter.
+    # Cap ONNX intra-op threads below the core count: leaves headroom for the
+    # audio callback under synth bursts AND measures faster than the
+    # oversubscribed default (3.9x vs 3.1x realtime on this 8-core box).
     try:
         import onnxruntime as ort
         opts = ort.SessionOptions()
@@ -357,7 +435,8 @@ def main() -> None:
         AVAILABLE_VOICES = set()
     log(
         f"kokoro loaded ({len(AVAILABLE_VOICES)} voices); buffered drainer "
-        f"(buffer<= {BUFFER_MAX}, gap={CHUNK_GAP_S}s{', SILENT' if SILENT else ''})"
+        f"(buffer<={BUFFER_MAX}, gap={CHUNK_GAP_S}s, split={SPLIT_CHARS}c"
+        f"{', SILENT' if SILENT else ''})"
     )
 
     # Pay the one-time first-inference cost now (before the worker starts, so
@@ -370,7 +449,7 @@ def main() -> None:
     worker = threading.Thread(target=synth_worker, args=(kokoro, buf, st), daemon=True)
     worker.start()
 
-    first = True
+    session_first = True
     try:
         while True:
             if consume(INTERRUPT):
@@ -382,7 +461,7 @@ def main() -> None:
                 st.saw_stop = True
 
             try:
-                path, audio, sr = buf.get(timeout=POLL_INTERVAL)
+                path, audio, sr, first, last = buf.get(timeout=POLL_INTERVAL)
             except queue.Empty:
                 heartbeat()
                 # STOP/idle: nothing playing and nothing buffered -> exit cleanly.
@@ -394,7 +473,15 @@ def main() -> None:
                         return
                 continue
 
-            if not first:
+            # Drop banked pieces of a chunk that was skipped mid-play.
+            with st.lock:
+                stale = st.skip_name == path.name
+                if first and st.skip_name and not stale:
+                    st.skip_name = None
+            if stale:
+                continue
+
+            if first and not session_first:
                 g = gap_from_name(path.name)
                 outcome = gap_wait(g if g is not None else CHUNK_GAP_S, buf, st)
                 if outcome == "interrupt":
@@ -404,22 +491,30 @@ def main() -> None:
                     archive(path)
                     with st.lock:
                         st.claimed.discard(path.name)
+                        st.skip_name = path.name
                     continue
-            first = False
+            session_first = False
 
-            with st.lock:
-                st.playing = path.name
-            log(f"play {path.name}")
-            outcome = play_one(sd, np, path, audio, sr, buf, st)
-            archive(path)
-            with st.lock:
-                st.claimed.discard(path.name)
-                st.playing = None
+            if first:
+                with st.lock:
+                    st.playing = path.name
+                log(f"play {path.name}")
+            outcome = play_one(sd, np, path, audio, sr,
+                               "chunk" if first else "piece", buf, st)
+
+            if outcome != "done" or last:
+                archive(path)
+                with st.lock:
+                    st.claimed.discard(path.name)
+                    st.playing = None
+                    if outcome == "skip":
+                        st.skip_name = path.name
 
             if outcome == "interrupt":
                 log("exiting on interrupt")
                 return
-            if st.saw_stop and consume(STOP) or st.saw_stop:
+            if st.saw_stop and (last or outcome == "skip"):
+                consume(STOP)
                 log("exiting on stop")
                 return
 
