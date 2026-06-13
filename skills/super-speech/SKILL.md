@@ -77,7 +77,7 @@ These rules are the **canonical chunking contract** — the auto-podcast and wha
    bash "$SCRIPTS_DIR/speak.sh" "Third chunk." bm_fable 800
    ```
    `speak.sh` ensures the drainer is running first and auto-picks the next chunk number, so you don't manage numbers and the drainer can't be silently dead.
-   - Args: `speak.sh "<text>" [voice] [gap_ms]`. `voice` defaults to `bm_fable` (male) — use `af_aoede` when picking a female voice, `bm_fable` when picking a male voice. Override with any other voice ID when the user asks for one specifically. `gap_ms` is the optional pre-play gap (`g500`-style; omit for the default). Pass the digits only — `speak.sh` prepends the `g` itself; passing `g600` yields filename `gg600` which fails to parse and falls back to the default 0.2 s gap.
+   - Args: `speak.sh "<text>" [voice] [gap_ms]`. `voice` defaults to `bm_fable` if omitted — for a male reply use `am_echo` (`bm_fable` also fine), `af_aoede` for a female reply. Override with any other voice ID when the user asks for one specifically. `gap_ms` is the optional pre-play gap (`g500`-style; omit for the default). Pass the digits only — `speak.sh` prepends the `g` itself; passing `g600` yields filename `gg600` which fails to parse and falls back to the default 0.2 s gap.
    - **PowerShell / Codex on Windows:** avoid nested `bash -lc` quoting for `speak.sh`; it can split or truncate the text so only the first word is spoken. Call Git Bash directly with `speak.sh` as the script and pass the text as a PowerShell argument:
      ```powershell
      $text = 'Full sentence to speak.'
@@ -182,8 +182,8 @@ Tuning requires a process restart; the model itself does not reload.
 
 Defaults for conversational replies:
 - **Default**: `af_heart` (use this unless the user asks for another voice)
-- **Male**: `bm_fable`
-- **Female**: `af_aoede`
+- **Male**: `am_echo` (`bm_fable` is also acceptable)
+- **Female**: `af_aoede` (`af_kore`, `af_nova`, and `af_jessica` are also acceptable)
 
 Use any other voice only when the user asks for it specifically.
 
