@@ -330,7 +330,12 @@ function runSmokeTest(): void {
   const startedAt = Date.now();
   const interval = setInterval(() => {
     const status = getStatus();
-    if (status.engine_running && status.state === "idle") {
+    if (
+      status.engine_running &&
+      status.state === "idle" &&
+      status.queue_count === 0 &&
+      !status.current
+    ) {
       clearInterval(interval);
       console.log("Super Speech desktop smoke test passed");
       app.quit();
