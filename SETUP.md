@@ -1,6 +1,11 @@
-# super-speech — Setup Playbook
+# Super Speech source setup playbook
 
-You are an AI coding agent reading `SETUP.md` for **super-speech**: local Kokoro
+This is the legacy, repository-driven development setup. Most users should
+install the self-contained desktop app described in [README.md](README.md).
+That installer already includes the engine, model, voices, and agent
+integration, so it does not use this playbook.
+
+You are an AI coding agent reading `SETUP.md` for **Super Speech**: local Kokoro
 text-to-speech voice replies. The user cloned this repo and asked you to set it
 up. Execute the phases below — actually run the commands, read the output, and
 fix problems yourself. Do not just describe the steps to the user.
@@ -8,7 +13,7 @@ fix problems yourself. Do not just describe the steps to the user.
 super-speech speaks an agent's answers aloud through a neural TTS engine running
 entirely on the user's machine — no cloud, no API key.
 
-This repo bundles four scripts at its **root**: `speak.sh`, `ensure-drainer.sh`,
+This source workflow uses four scripts at the repository root: `speak.sh`, `ensure-drainer.sh`,
 `drainer-kokoro.py`, `drainer.py`. A core job of this playbook is to find that
 directory and record it for the skill to use later.
 

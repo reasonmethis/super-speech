@@ -13,25 +13,26 @@ work session without having to reconstruct the product decisions.
 - [x] Current voice, current text, and scrollable read-only upcoming queue
 - [x] Electron architecture following Littlebird's packaged-helper precedent
 - [x] Native Windows installer build through Electron
+- [x] Self-contained Windows installer with the frozen engine, model, and voices
+- [x] First-launch Codex and Claude skill installation without overwriting custom skills
+- [x] Packaged-app and frozen-engine smoke tests against isolated runtime homes
 - [ ] Test the macOS bundle on Apple Silicon hardware
 
 ## P0: one-click public installation
 
-- Bundle the Kokoro engine as a platform-specific sidecar so end users do not
-  need a system Python installation
-- Use a directory-style frozen engine, package it outside `app.asar`, and build
-  it independently for Windows x64, macOS x64, and macOS arm64
-- Download the 338 MB model and voice data on first run with visible progress,
-  checksum verification, retry, and resume
-- Install the Super Speech skill for supported coding agents from the app
-- Replace the current agent-assisted setup guide with an in-app setup flow
+- [x] Bundle the Kokoro engine as a directory-style sidecar outside `app.asar`
+- [x] Bundle SHA-256-verified Kokoro model and voice data for offline first use
+- [x] Install the Super Speech skill for existing Codex and Claude setups
+- [x] Replace agent-assisted setup as the primary installation path
+- Add an optional smaller installer that downloads verified model assets with
+  visible progress, retry, and resume
 - Add launch-at-login as an opt-in installer or settings choice
 - Build signed Windows releases and signed, notarized macOS releases
 - Add an automated release workflow for version tags
 - Sign the Electron shell, installer, frozen engine, and bundled native
   libraries rather than signing only the outer app
-- Produce third-party notices and complete a licensing review for the bundled
-  eSpeak NG dependency before any closed-source commercial distribution
+- [x] Produce third-party notices and ship corresponding engine source
+- Complete legal review before any closed-source commercial distribution
 
 ## P1: interactive queue
 
