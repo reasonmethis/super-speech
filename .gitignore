@@ -9,3 +9,7 @@ app/node_modules/
 app/dist/
 app/dist-electron/
 app/release/
+app/.engine-build/
+app/.engine-dist/
+app/build-resources/engine/
+app/build-resources/models/

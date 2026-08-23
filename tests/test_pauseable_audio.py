@@ -14,6 +14,15 @@ class CallbackStop(Exception):
     pass
 
 
+def load_drainer(module_name: str):
+    module_path = Path(__file__).parents[1] / "drainer-kokoro.py"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    assert spec and spec.loader
+    drainer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(drainer)
+    return drainer
+
+
 def test_pause_keeps_the_next_sample_position() -> None:
     audio = np.arange(8, dtype=np.float32)
     playback = PauseableAudio(audio, CallbackStop)
@@ -51,11 +60,7 @@ def test_callback_stops_after_the_last_sample() -> None:
 
 
 def test_status_exposes_pause_current_chunk_and_queue(tmp_path: Path) -> None:
-    module_path = Path(__file__).parents[1] / "drainer-kokoro.py"
-    spec = importlib.util.spec_from_file_location("drainer_kokoro", module_path)
-    assert spec and spec.loader
-    drainer = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(drainer)
+    drainer = load_drainer("drainer_kokoro")
 
     drainer.QUEUE = tmp_path / "queue"
     drainer.STATUS = tmp_path / "status.json"
@@ -85,3 +90,33 @@ def test_status_exposes_pause_current_chunk_and_queue(tmp_path: Path) -> None:
     assert len(status["queue"]) == 5
     assert status["queue"][0]["text"] == "Queued words 2"
     assert status["queue"][-1]["text"] == "Queued words 6"
+
+
+def test_enqueue_text_reserves_the_next_queue_number(tmp_path: Path) -> None:
+    drainer = load_drainer("drainer_kokoro_enqueue")
+
+    drainer.QUEUE = tmp_path / "queue"
+    drainer.SPOKEN = tmp_path / "spoken"
+    drainer.QUEUE.mkdir()
+    drainer.SPOKEN.mkdir()
+    (drainer.SPOKEN / "007-af_heart-say.txt").write_text("Earlier", encoding="utf-8")
+
+    queued = drainer.enqueue_text("New words", "bm_fable", 650)
+
+    assert queued.name == "008-bm_fable-g650-say.txt"
+    assert queued.read_text(encoding="utf-8") == "New words"
+
+
+@pytest.mark.parametrize(
+    ("voice", "gap_ms"),
+    [("heart", None), ("af_heart", -1), ("af_heart", 1501)],
+)
+def test_enqueue_text_rejects_invalid_metadata(
+    tmp_path: Path, voice: str, gap_ms: int | None
+) -> None:
+    drainer = load_drainer("drainer_kokoro_invalid")
+    drainer.QUEUE = tmp_path / "queue"
+    drainer.SPOKEN = tmp_path / "spoken"
+
+    with pytest.raises(ValueError):
+        drainer.enqueue_text("New words", voice, gap_ms)

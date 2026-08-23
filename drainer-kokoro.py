@@ -29,11 +29,13 @@ Signal files in BASE control runtime:
 
 Env:
   SUPER_SPEECH_HOME        - override the runtime home directory
+  SUPER_SPEECH_MODEL_DIR   - override the read-only Kokoro model directory
   SUPER_SPEECH_SILENT      - opt-in: play silence of identical duration instead
                              of audio (timing is preserved). For measuring gap
                              behavior without making sound; default off.
   SUPER_SPEECH_SPLIT_CHARS - sentence-piece target size; 0 disables splitting
 """
+import argparse
 import glob
 import json
 import os
@@ -68,7 +70,9 @@ WARMUP = BASE / "WARMUP"
 HEARTBEAT = BASE / "drainer.alive"  # touched while alive; ensure-drainer.sh reads its mtime
 STATUS = BASE / "status.json"
 
-MODEL_DIR = BASE / "models" / "kokoro"
+MODEL_DIR = Path(
+    os.environ.get("SUPER_SPEECH_MODEL_DIR") or (BASE / "models" / "kokoro")
+)
 MODEL_PATH = MODEL_DIR / "kokoro-v1.0.onnx"
 VOICES_PATH = MODEL_DIR / "voices-v1.0.bin"
 
@@ -81,6 +85,40 @@ BUFFER_MAX = 8        # pieces of pre-rendered audio the worker may bank ahead
 SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
+
+ENGINE_VERSION = "0.2.0"
+
+
+def enqueue_text(text: str, voice: str, gap_ms: int | None = None) -> Path:
+    """Atomically append one chunk to the shared speech queue."""
+    text = text.strip()
+    if not text:
+        raise ValueError("speech text cannot be empty")
+    if not re.fullmatch(r"[ab][fm]_[a-z0-9_]+", voice):
+        raise ValueError(f"invalid Kokoro voice: {voice}")
+    if gap_ms is not None and not 0 <= gap_ms <= 1500:
+        raise ValueError("gap must be between 0 and 1500 milliseconds")
+
+    QUEUE.mkdir(parents=True, exist_ok=True)
+    SPOKEN.mkdir(parents=True, exist_ok=True)
+    existing = [*QUEUE.glob("*.txt"), *SPOKEN.glob("*.txt")]
+    numbers = [
+        int(path.name.split("-", 1)[0])
+        for path in existing
+        if path.name.split("-", 1)[0].isdigit()
+    ]
+    number = max(numbers, default=0) + 1
+    gap = f"-g{gap_ms}" if gap_ms is not None else ""
+    for candidate in range(number, number + 100):
+        path = QUEUE / f"{candidate:03d}-{voice}{gap}-say.txt"
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(descriptor, "w", encoding="utf-8") as chunk:
+            chunk.write(text)
+        return path
+    raise RuntimeError("could not reserve a speech queue number")
 
 
 def log(msg: str) -> None:
@@ -682,5 +720,25 @@ def main() -> None:
             pass
 
 
+def cli(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="super-speech-engine")
+    parser.add_argument("--version", action="version", version=ENGINE_VERSION)
+    parser.add_argument("--enqueue", metavar="TEXT", help="queue one chunk and exit")
+    parser.add_argument("--voice", default="af_heart", help="Kokoro voice ID")
+    parser.add_argument("--gap-ms", type=int, help="pre-speech gap from 0 to 1500 ms")
+    args = parser.parse_args(argv)
+    if args.enqueue is None:
+        if args.gap_ms is not None or args.voice != "af_heart":
+            parser.error("--voice and --gap-ms require --enqueue")
+        main()
+        return 0
+    try:
+        queued = enqueue_text(args.enqueue, args.voice, args.gap_ms)
+    except (RuntimeError, ValueError) as error:
+        parser.error(str(error))
+    print(queued)
+    return 0
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(cli())
