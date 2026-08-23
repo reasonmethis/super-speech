@@ -1,0 +1,30 @@
+{
+  "name": "super-speech-app",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Pause and manage private local Super Speech playback",
+  "author": "Dmitriy Vasilyuk",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "prebuild": "npm run check",
+    "build": "vite build",
+    "check": "tsc --noEmit",
+    "prepackage": "npm run build",
+    "package": "electron-builder",
+    "prepackage:win": "npm run build",
+    "package:win": "electron-builder --win nsis",
+    "prepackage:mac": "npm run build",
+    "package:mac": "electron-builder --mac dmg"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "electron": "43.4.1",
+    "electron-builder": "26.15.3",
+    "typescript": "7.0.2",
+    "vite": "8.2.2",
+    "vite-plugin-electron": "1.1.1"
+  }
+}

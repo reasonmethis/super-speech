@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0b0d14" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+    />
+    <title>Super Speech</title>
+  </head>
+  <body>
+    <main class="app-shell">
+      <header id="titlebar" class="titlebar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <span></span><span></span><span></span><span></span>
+          </span>
+          <span>Super Speech</span>
+        </div>
+        <div class="window-controls">
+          <button id="minimize-button" class="window-button" aria-label="Minimize">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5h10" /></svg>
+          </button>
+          <button id="hide-button" class="window-button" aria-label="Hide to tray">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8m0-8-8 8" /></svg>
+          </button>
+        </div>
+      </header>
+
+      <section class="playback-card" aria-live="polite">
+        <div class="ambient-ring" aria-hidden="true">
+          <div class="ring ring-one"></div>
+          <div class="ring ring-two"></div>
+        </div>
+
+        <div class="status-line">
+          <span id="status-dot" class="status-dot"></span>
+          <span id="status-label">Connecting</span>
+        </div>
+
+        <button id="playback-button" class="playback-button" aria-label="Pause speech">
+          <span id="playback-icon" class="playback-icon" aria-hidden="true"></span>
+        </button>
+
+        <div class="playback-copy">
+          <p id="playback-kicker" class="playback-kicker">SUPER SPEECH</p>
+          <h1 id="playback-title">Getting ready</h1>
+          <p id="current-text" class="current-text">Reading the local speech engine...</p>
+        </div>
+
+        <div class="metadata-row">
+          <span id="voice-pill" class="metadata-pill is-hidden">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5a2 2 0 0 0-2 2v3a2 2 0 0 0 4 0v-3a2 2 0 0 0-2-2Z"/><path d="M3.8 7.2a4.2 4.2 0 0 0 8.4 0M8 11.4v2.1M5.8 13.5h4.4"/></svg>
+            <span id="voice-label"></span>
+          </span>
+          <span id="piece-pill" class="metadata-pill is-hidden"></span>
+        </div>
+      </section>
+
+      <section class="queue-section">
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">COMING UP</p>
+            <h2>Speech queue</h2>
+          </div>
+          <span id="queue-count" class="queue-count">0</span>
+        </div>
+        <div id="queue-list" class="queue-list"></div>
+      </section>
+
+      <footer>
+        <span>Local audio, private by default</span>
+        <span class="footer-separator"></span>
+        <span id="runtime-state">Checking engine</span>
+      </footer>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

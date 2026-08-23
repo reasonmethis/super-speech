@@ -1,0 +1,40 @@
+appId: com.reasonmethis.superspeech
+productName: Super Speech
+copyright: Copyright (c) 2026 Dmitriy Vasilyuk
+asar: true
+directories:
+  output: release/${version}
+files:
+  - dist/**
+  - dist-electron/**
+  - package.json
+extraResources:
+  - from: build/tray-icon.ico
+    to: assets/tray-icon.ico
+  - from: build/tray-iconTemplate.png
+    to: assets/tray-iconTemplate.png
+  - from: build/tray-iconTemplate@2x.png
+    to: assets/tray-iconTemplate@2x.png
+win:
+  icon: build/icon.ico
+  artifactName: Super-Speech-Win-${arch}-${version}-Setup.${ext}
+  target:
+    - target: nsis
+      arch:
+        - x64
+mac:
+  icon: build/icon.icns
+  artifactName: Super-Speech-Mac-${arch}-${version}.${ext}
+  category: public.app-category.utilities
+  hardenedRuntime: true
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+nsis:
+  oneClick: true
+  perMachine: false
+  deleteAppDataOnUninstall: false
+npmRebuild: false
+publish: null

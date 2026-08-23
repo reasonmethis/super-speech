@@ -1,5 +1,11 @@
 *.wav
 *.ogg
 __pycache__/
-*.pyc
+.pytest_cache/
+*.py[cod]
 *.log
+
+app/node_modules/
+app/dist/
+app/dist-electron/
+app/release/
