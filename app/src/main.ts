@@ -80,10 +80,18 @@ function statusCopy(status: RuntimeStatus): {
 } {
   if (status.state === "setup_required") {
     return {
-      label: "Setup needed",
-      kicker: "ONE-TIME SETUP",
-      title: "Install the speech engine",
-      body: "Open the setup guide, then give its one-line install request to your coding agent.",
+      label: "Install incomplete",
+      kicker: "REINSTALL NEEDED",
+      title: "Speech files are missing",
+      body: "Reinstall Super Speech to restore its bundled engine and voices.",
+    };
+  }
+  if (status.state === "stopped") {
+    return {
+      label: "Engine stopped",
+      kicker: "ENGINE NEEDS ATTENTION",
+      title: "Super Speech could not start",
+      body: "Open the runtime folder from the tray and inspect engine.log for details.",
     };
   }
   if (status.state === "loading") {
@@ -159,10 +167,12 @@ function render(status: RuntimeStatus): void {
   queueCount.textContent = String(status.queue_count);
   renderQueue(status.queue, status.queue_count);
   runtimeState.textContent = !status.installed
-    ? "Engine setup required"
+    ? "Installation incomplete"
     : status.engine_running
-      ? "Engine running"
-      : "Engine starts on demand";
+      ? "Engine managed by Super Speech"
+      : status.state === "stopped"
+        ? "Engine stopped"
+        : "Engine starting";
 }
 
 function renderQueue(items: QueueItem[], total: number): void {

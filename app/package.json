@@ -9,14 +9,15 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
+    "resources": "node scripts/prepare_resources.mjs",
     "prebuild": "npm run check",
     "build": "vite build",
     "check": "tsc --noEmit",
-    "prepackage": "npm run build",
+    "prepackage": "npm run resources && npm run build",
     "package": "electron-builder",
-    "prepackage:win": "npm run build",
+    "prepackage:win": "npm run resources && npm run build",
     "package:win": "electron-builder --win nsis",
-    "prepackage:mac": "npm run build",
+    "prepackage:mac": "npm run resources && npm run build",
     "package:mac": "electron-builder --mac dmg"
   },
   "devDependencies": {

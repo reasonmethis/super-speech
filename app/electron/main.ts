@@ -7,9 +7,12 @@ import {
   shell,
   Tray,
 } from "electron";
+import { spawn, type ChildProcess } from "node:child_process";
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
   statSync,
   unlinkSync,
@@ -40,11 +43,19 @@ const RUNTIME_STATES = new Set<RuntimeState>([
 ]);
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const rendererDir = path.join(moduleDir, "..", "dist");
-const startHidden = process.argv.includes("--hidden");
+const smokeTest = process.argv.includes("--smoke-test");
+const startHidden = smokeTest || process.argv.includes("--hidden");
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
+let ownedEngine: ChildProcess | null = null;
+let engineStartFailed = false;
 let quitting = false;
+
+interface EngineLaunch {
+  command: string;
+  args: string[];
+}
 
 function runtimeDir(): string {
   return process.env.SUPER_SPEECH_HOME ?? path.join(homedir(), ".super-speech");
@@ -58,12 +69,41 @@ function fileExceeds(filePath: string, minimumBytes: number): boolean {
   }
 }
 
-function modelsInstalled(base: string): boolean {
-  const models = path.join(base, "models", "kokoro");
+function modelDirectory(): string {
+  if (process.env.SUPER_SPEECH_MODEL_DIR) {
+    return process.env.SUPER_SPEECH_MODEL_DIR;
+  }
+  return app.isPackaged
+    ? path.join(process.resourcesPath, "models", "kokoro")
+    : path.join(app.getAppPath(), "build-resources", "models", "kokoro");
+}
+
+function modelsInstalled(models: string): boolean {
   return (
     fileExceeds(path.join(models, "kokoro-v1.0.onnx"), MODEL_MIN_BYTES) &&
     fileExceeds(path.join(models, "voices-v1.0.bin"), VOICES_MIN_BYTES)
   );
+}
+
+function engineLaunch(): EngineLaunch | null {
+  const executableName = process.platform === "win32"
+    ? "super-speech-engine.exe"
+    : "super-speech-engine";
+  const configuredEngine = process.env.SUPER_SPEECH_ENGINE_PATH;
+  if (configuredEngine) {
+    return { command: configuredEngine, args: [] };
+  }
+  const bundledEngine = app.isPackaged
+    ? path.join(process.resourcesPath, "engine", executableName)
+    : path.join(app.getAppPath(), "build-resources", "engine", executableName);
+  if (existsSync(bundledEngine)) {
+    return { command: bundledEngine, args: [] };
+  }
+  const python = process.env.SUPER_SPEECH_PYTHON;
+  const sourceEngine = path.join(app.getAppPath(), "..", "drainer-kokoro.py");
+  return python && existsSync(sourceEngine)
+    ? { command: python, args: [sourceEngine] }
+    : null;
 }
 
 function heartbeatIsFresh(filePath: string): boolean {
@@ -72,6 +112,29 @@ function heartbeatIsFresh(filePath: string): boolean {
   } catch {
     return false;
   }
+}
+
+function processExists(processId: number | null | undefined): boolean {
+  if (!processId) {
+    return false;
+  }
+  try {
+    process.kill(processId, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function engineIsRunning(base: string, status: EngineStatus | null): boolean {
+  return (
+    heartbeatIsFresh(path.join(base, "drainer.alive")) ||
+    Boolean(
+      status &&
+      Date.now() / 1000 - status.updated_at < 300 &&
+      processExists(status.engine_pid),
+    )
+  );
 }
 
 function isEngineStatus(value: unknown): value is EngineStatus {
@@ -102,10 +165,11 @@ function readEngineStatus(base: string): EngineStatus | null {
 
 function getStatus(): RuntimeStatus {
   const base = runtimeDir();
-  const installed = modelsInstalled(base);
-  const engineRunning = heartbeatIsFresh(path.join(base, "drainer.alive"));
+  const installed = modelsInstalled(modelDirectory());
+  const ownedEngineRunning = ownedEngine !== null && ownedEngine.exitCode === null;
   const paused = existsSync(path.join(base, "PAUSE"));
   const engine = readEngineStatus(base);
+  const engineRunning = ownedEngineRunning || engineIsRunning(base, engine);
 
   let state: RuntimeState;
   if (!installed || engine?.state === "setup_required") {
@@ -113,7 +177,9 @@ function getStatus(): RuntimeStatus {
   } else if (paused) {
     state = "paused";
   } else if (engineRunning) {
-    state = engine?.state ?? "idle";
+    state = engine?.state ?? "loading";
+  } else if (engineStartFailed) {
+    state = "stopped";
   } else {
     state = "ready";
   }
@@ -122,13 +188,130 @@ function getStatus(): RuntimeStatus {
     version: engine?.version ?? 1,
     state,
     updated_at: engine?.updated_at ?? 0,
-    engine_pid: engineRunning ? (engine?.engine_pid ?? null) : null,
+    engine_pid: engineRunning ? (engine?.engine_pid ?? ownedEngine?.pid ?? null) : null,
     engine_running: engineRunning,
     installed,
     current: engineRunning ? (engine?.current ?? null) : null,
     queue_count: engine?.queue_count ?? 0,
     queue: engine?.queue ?? [],
   };
+}
+
+function clearTransientSignals(base: string): void {
+  for (const name of ["STOP", "INTERRUPT", "SKIP", "CLEAR"]) {
+    const signal = path.join(base, name);
+    if (existsSync(signal)) {
+      unlinkSync(signal);
+    }
+  }
+}
+
+function writeInstallManifest(base: string, launch: EngineLaunch | null): void {
+  writeFileSync(
+    path.join(base, "install.json"),
+    `${JSON.stringify(
+      {
+        version: app.getVersion(),
+        app_path: process.execPath,
+        engine_path: launch?.args.length === 0 ? launch.command : null,
+        runtime_home: base,
+        model_directory: modelDirectory(),
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+}
+
+function startEngine(): void {
+  const base = runtimeDir();
+  mkdirSync(path.join(base, "queue"), { recursive: true });
+  mkdirSync(path.join(base, "spoken"), { recursive: true });
+  mkdirSync(path.join(base, "failed"), { recursive: true });
+  const launch = engineLaunch();
+  writeInstallManifest(base, launch);
+
+  if (engineIsRunning(base, readEngineStatus(base))) {
+    engineStartFailed = false;
+    return;
+  }
+  if (ownedEngine && ownedEngine.exitCode === null) {
+    return;
+  }
+  if (!launch || !modelsInstalled(modelDirectory())) {
+    engineStartFailed = true;
+    return;
+  }
+
+  clearTransientSignals(base);
+  const logDescriptor = openSync(path.join(base, "engine.log"), "a");
+  try {
+    ownedEngine = spawn(launch.command, launch.args, {
+      env: {
+        ...process.env,
+        SUPER_SPEECH_HOME: base,
+        SUPER_SPEECH_MODEL_DIR: modelDirectory(),
+      },
+      windowsHide: true,
+      stdio: ["ignore", logDescriptor, logDescriptor],
+    });
+    engineStartFailed = false;
+    ownedEngine.once("error", () => {
+      engineStartFailed = true;
+    });
+    ownedEngine.once("exit", (code) => {
+      ownedEngine = null;
+      if (!quitting && code !== 0) {
+        engineStartFailed = true;
+      }
+    });
+  } catch {
+    ownedEngine = null;
+    engineStartFailed = true;
+  } finally {
+    closeSync(logDescriptor);
+  }
+}
+
+function stopOwnedEngine(): void {
+  if (!ownedEngine || ownedEngine.exitCode !== null) {
+    return;
+  }
+  ownedEngine.kill();
+  ownedEngine = null;
+  const heartbeat = path.join(runtimeDir(), "drainer.alive");
+  if (existsSync(heartbeat)) {
+    unlinkSync(heartbeat);
+  }
+}
+
+function runSmokeTest(): void {
+  const startedAt = Date.now();
+  const interval = setInterval(() => {
+    const status = getStatus();
+    if (status.engine_running && status.state === "idle") {
+      clearInterval(interval);
+      console.log("Super Speech desktop smoke test passed");
+      app.quit();
+      return;
+    }
+    if (status.state === "setup_required" || status.state === "stopped") {
+      clearInterval(interval);
+      quitting = true;
+      stopOwnedEngine();
+      console.error(`Super Speech desktop smoke test failed: ${status.state}`);
+      app.exit(1);
+      return;
+    }
+    if (Date.now() - startedAt > 45_000) {
+      clearInterval(interval);
+      quitting = true;
+      stopOwnedEngine();
+      console.error("Super Speech desktop smoke test timed out");
+      app.exit(1);
+    }
+  }, 250);
 }
 
 function setPaused(paused: boolean): RuntimeStatus {
@@ -148,6 +331,12 @@ function assetPath(name: string): string {
   return app.isPackaged
     ? path.join(process.resourcesPath, "assets", name)
     : path.join(app.getAppPath(), "build", name);
+}
+
+function noticesPath(): string {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, "THIRD_PARTY_NOTICES.md")
+    : path.join(app.getAppPath(), "..", "THIRD_PARTY_NOTICES.md");
 }
 
 function showWindow(): void {
@@ -226,6 +415,8 @@ function refreshTrayMenu(): void {
         label: paused ? "Resume Speech" : "Pause Speech",
         click: () => setPaused(!paused),
       },
+      { label: "Open runtime folder", click: () => void shell.openPath(runtimeDir()) },
+      { label: "Third-party notices", click: () => void shell.openPath(noticesPath()) },
       { type: "separator" },
       {
         label: "Quit",
@@ -266,6 +457,7 @@ if (!hasSingleInstanceLock) {
   app.on("second-instance", showWindow);
   app.on("before-quit", () => {
     quitting = true;
+    stopOwnedEngine();
   });
   app.on("activate", showWindow);
   app.on("window-all-closed", () => {
@@ -274,7 +466,11 @@ if (!hasSingleInstanceLock) {
   void app.whenReady().then(() => {
     Menu.setApplicationMenu(null);
     registerIpc();
+    startEngine();
     createWindow();
     createTray();
+    if (smokeTest) {
+      runSmokeTest();
+    }
   });
 }

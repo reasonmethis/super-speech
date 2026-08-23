@@ -15,6 +15,22 @@ extraResources:
     to: assets/tray-iconTemplate.png
   - from: build/tray-iconTemplate@2x.png
     to: assets/tray-iconTemplate@2x.png
+  - from: build-resources/engine
+    to: engine
+  - from: build-resources/models
+    to: models
+  - from: ../LICENSE
+    to: LICENSE.txt
+  - from: ../THIRD_PARTY_NOTICES.md
+    to: THIRD_PARTY_NOTICES.md
+  - from: ../drainer-kokoro.py
+    to: source/drainer-kokoro.py
+  - from: ../pauseable_audio.py
+    to: source/pauseable_audio.py
+  - from: ../requirements-runtime.txt
+    to: source/requirements-runtime.txt
+  - from: scripts/build_engine.py
+    to: source/build_engine.py
 win:
   icon: build/icon.ico
   artifactName: Super-Speech-Win-${arch}-${version}-Setup.${ext}
@@ -36,5 +52,6 @@ nsis:
   oneClick: true
   perMachine: false
   deleteAppDataOnUninstall: false
+  runAfterFinish: true
 npmRebuild: false
 publish: null
