@@ -31,6 +31,8 @@ extraResources:
     to: source/requirements-runtime.txt
   - from: scripts/build_engine.py
     to: source/build_engine.py
+  - from: resources/agent-skill
+    to: integrations/super-speech
 win:
   icon: build/icon.ico
   artifactName: Super-Speech-Win-${arch}-${version}-Setup.${ext}

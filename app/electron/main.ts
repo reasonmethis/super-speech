@@ -10,6 +10,7 @@ import {
 import { spawn, type ChildProcess } from "node:child_process";
 import {
   closeSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   openSync,
@@ -206,7 +207,45 @@ function clearTransientSignals(base: string): void {
   }
 }
 
-function writeInstallManifest(base: string, launch: EngineLaunch | null): void {
+function packagedSkillPath(): string {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, "integrations", "super-speech", "SKILL.md")
+    : path.join(app.getAppPath(), "resources", "agent-skill", "SKILL.md");
+}
+
+function installAgentSkills(): string[] {
+  const agentHome = process.env.SUPER_SPEECH_AGENT_HOME;
+  if ((!app.isPackaged && !agentHome) || process.env.SUPER_SPEECH_SKIP_SKILL_INSTALL) {
+    return [];
+  }
+  const source = packagedSkillPath();
+  if (!existsSync(source)) {
+    return [];
+  }
+
+  const home = agentHome ?? homedir();
+  const installed: string[] = [];
+  for (const agentDirectory of [".codex", ".claude"]) {
+    const agentRoot = path.join(home, agentDirectory);
+    if (!existsSync(agentRoot)) {
+      continue;
+    }
+    const targetDirectory = path.join(agentRoot, "skills", "super-speech");
+    const target = path.join(targetDirectory, "SKILL.md");
+    if (!existsSync(target)) {
+      mkdirSync(targetDirectory, { recursive: true });
+      copyFileSync(source, target);
+    }
+    installed.push(target);
+  }
+  return installed;
+}
+
+function writeInstallManifest(
+  base: string,
+  launch: EngineLaunch | null,
+  agentSkills: string[],
+): void {
   writeFileSync(
     path.join(base, "install.json"),
     `${JSON.stringify(
@@ -216,6 +255,7 @@ function writeInstallManifest(base: string, launch: EngineLaunch | null): void {
         engine_path: launch?.args.length === 0 ? launch.command : null,
         runtime_home: base,
         model_directory: modelDirectory(),
+        agent_skills: agentSkills,
       },
       null,
       2,
@@ -230,7 +270,7 @@ function startEngine(): void {
   mkdirSync(path.join(base, "spoken"), { recursive: true });
   mkdirSync(path.join(base, "failed"), { recursive: true });
   const launch = engineLaunch();
-  writeInstallManifest(base, launch);
+  writeInstallManifest(base, launch, installAgentSkills());
 
   if (engineIsRunning(base, readEngineStatus(base))) {
     engineStartFailed = false;
@@ -454,7 +494,11 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {
-  app.on("second-instance", showWindow);
+  app.on("second-instance", (_event, argv) => {
+    if (!argv.includes("--hidden")) {
+      showWindow();
+    }
+  });
   app.on("before-quit", () => {
     quitting = true;
     stopOwnedEngine();
