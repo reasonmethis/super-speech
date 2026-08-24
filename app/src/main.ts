@@ -52,6 +52,7 @@ const desktopApi = window.superSpeech;
 let currentStatus = desktopApi ? INITIAL_STATUS : demoStatus;
 let commandPending = false;
 let expandedQueueItemId: string | null = null;
+let renderedQueueKey: string | null = null;
 
 function requiredElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -193,11 +194,22 @@ function render(status: RuntimeStatus): void {
 }
 
 function renderQueue(items: QueueItem[], total: number, currentItemId: string | null): void {
-  const previousScrollTop = queueList.scrollTop;
-  queueList.replaceChildren();
   if (!items.some((item) => item.id === expandedQueueItemId)) {
     expandedQueueItemId = null;
   }
+  const queueKey = JSON.stringify([
+    expandedQueueItemId,
+    total,
+    currentItemId,
+    items.map(({ id, text, voice }) => [id, text, voice]),
+  ]);
+  if (queueKey === renderedQueueKey) {
+    return;
+  }
+  renderedQueueKey = queueKey;
+
+  const previousScrollTop = queueList.scrollTop;
+  queueList.replaceChildren();
   if (items.length === 0) {
     const empty = document.createElement("div");
     empty.className = "queue-empty";
@@ -233,22 +245,17 @@ function renderQueue(items: QueueItem[], total: number, currentItemId: string | 
     row.append(order, copy);
     queueList.append(row);
 
-    const isExpandable = isExpanded || text.scrollWidth > text.clientWidth;
-    row.classList.toggle("is-expandable", isExpandable);
-    row.disabled = !isExpandable;
-    if (isExpandable) {
-      row.setAttribute("aria-expanded", String(isExpanded));
-      row.addEventListener("click", () => {
-        const expanding = expandedQueueItemId !== item.id;
-        expandedQueueItemId = expanding ? item.id : null;
-        renderQueue(items, total, currentItemId);
-        if (expanding) {
-          queueList
-            .querySelector<HTMLElement>('.queue-item[aria-expanded="true"]')
-            ?.scrollIntoView({ block: "nearest" });
-        }
-      });
-    }
+    row.setAttribute("aria-expanded", String(isExpanded));
+    row.addEventListener("click", () => {
+      const expanding = expandedQueueItemId !== item.id;
+      expandedQueueItemId = expanding ? item.id : null;
+      renderQueue(items, total, currentItemId);
+      if (expanding) {
+        queueList
+          .querySelector<HTMLElement>('.queue-item[aria-expanded="true"]')
+          ?.scrollIntoView({ block: "nearest" });
+      }
+    });
   }
 
   if (total > items.length) {
