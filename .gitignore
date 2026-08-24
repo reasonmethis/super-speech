@@ -14,3 +14,6 @@ app/.engine-build/
 app/.engine-dist/
 app/build-resources/engine/
 app/build-resources/models/
+
+skills/super-speech/runtime/
+skills/super-speech/engine/build/

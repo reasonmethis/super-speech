@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
+
+ENGINE_SOURCE = Path(__file__).parents[1] / "skills" / "super-speech" / "engine"
+sys.path.insert(0, str(ENGINE_SOURCE))
 
 from pauseable_audio import PauseableAudio
 
@@ -15,7 +19,7 @@ class CallbackStop(Exception):
 
 
 def load_engine(module_name: str):
-    module_path = Path(__file__).parents[1] / "super_speech_engine.py"
+    module_path = ENGINE_SOURCE / "super_speech_engine.py"
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     assert spec and spec.loader
     engine = importlib.util.module_from_spec(spec)

@@ -58,44 +58,57 @@ For a comparison or a visible table, give its central takeaway first, then expla
 
 ## Install / setup
 
-Super Speech has two installations with one runtime contract:
+Super Speech has two installations with one engine contract:
 
 - The desktop installer bundles the engine, models, and UI. Its first launch writes `~/.super-speech/install.json` with the engine path
-- The headless installer creates `~/.super-speech/engine/`, installs the same Python engine there, downloads the same models, and installs this skill. It does not install Electron
+- The headless installer keeps the engine environment, models, queue, status, and logs in this skill's `runtime/` directory. It does not install Electron or write Super Speech files elsewhere
 
-Both use `~/.super-speech/` for the queue, status, logs, and models. Do not use repository shell scripts or write queue files directly.
+Both expose the same CLI and run the same engine source. Their mutable runtime directories are separate. Do not write queue or control files directly.
 
-Resolve the engine once per reply. On Windows, prefer the desktop manifest and otherwise use the fixed headless location:
+Resolve the engine once per reply. Set the skill directory to the absolute directory containing this loaded `SKILL.md`. On Windows, prefer a valid desktop engine and otherwise use this skill's headless engine:
 
 ```powershell
-$runtime = if ($env:SUPER_SPEECH_HOME) { $env:SUPER_SPEECH_HOME } else { Join-Path $env:USERPROFILE '.super-speech' }
-$manifest = Join-Path $runtime 'install.json'
+$skill = '<absolute directory containing this SKILL.md>'
+$desktopRuntime = if ($env:SUPER_SPEECH_HOME) { $env:SUPER_SPEECH_HOME } else { Join-Path $env:USERPROFILE '.super-speech' }
+$manifest = Join-Path $desktopRuntime 'install.json'
 $engine = $null
 if (Test-Path -LiteralPath $manifest) {
-  $desktopEngine = (Get-Content -Raw -LiteralPath $manifest | ConvertFrom-Json).engine_path
-  if ($desktopEngine -and (Test-Path -LiteralPath $desktopEngine)) { $engine = $desktopEngine }
+  try {
+    $desktopEngine = (Get-Content -Raw -LiteralPath $manifest | ConvertFrom-Json).engine_path
+    if ($desktopEngine -and (Test-Path -LiteralPath $desktopEngine)) { $engine = $desktopEngine }
+  } catch {}
 }
-$headlessEngine = Join-Path $runtime 'engine\Scripts\super-speech-engine.exe'
-if (-not $engine -and (Test-Path -LiteralPath $headlessEngine)) { $engine = $headlessEngine }
-if (-not $engine -or -not (Test-Path -LiteralPath $engine)) { throw 'Super Speech is not installed. Follow SETUP.md.' }
+$headlessRuntime = Join-Path $skill 'runtime'
+$headlessEngine = Join-Path $headlessRuntime 'venv\Scripts\super-speech-engine.exe'
+if (-not $engine -and (Test-Path -LiteralPath $headlessEngine)) {
+  $engine = $headlessEngine
+  $env:SUPER_SPEECH_HOME = $headlessRuntime
+  $env:SUPER_SPEECH_MODEL_DIR = Join-Path $headlessRuntime 'models\kokoro'
+}
+if (-not $engine) { throw 'Super Speech is not installed. Run this skill''s scripts/install.py.' }
 ```
 
 On macOS, prefer the desktop manifest and otherwise use the headless virtual environment:
 
 ```bash
-RUNTIME="${SUPER_SPEECH_HOME:-$HOME/.super-speech}"
+SKILL='<absolute directory containing this SKILL.md>'
+DESKTOP_RUNTIME="${SUPER_SPEECH_HOME:-$HOME/.super-speech}"
 ENGINE=""
-if [ -f "$RUNTIME/install.json" ]; then
-  DESKTOP_ENGINE="$(plutil -extract engine_path raw "$RUNTIME/install.json" 2>/dev/null || true)"
+if [ -f "$DESKTOP_RUNTIME/install.json" ]; then
+  DESKTOP_ENGINE="$(plutil -extract engine_path raw "$DESKTOP_RUNTIME/install.json" 2>/dev/null || true)"
   [ -x "$DESKTOP_ENGINE" ] && ENGINE="$DESKTOP_ENGINE"
 fi
-[ -n "$ENGINE" ] || ENGINE="$RUNTIME/engine/bin/super-speech-engine"
-test -x "$ENGINE" || { echo "Super Speech is not installed. Follow SETUP.md." >&2; exit 1; }
+if [ -z "$ENGINE" ]; then
+  ENGINE="$SKILL/runtime/venv/bin/super-speech-engine"
+  export SUPER_SPEECH_HOME="$SKILL/runtime"
+  export SUPER_SPEECH_MODEL_DIR="$SKILL/runtime/models/kokoro"
+fi
+test -x "$ENGINE" || { echo "Super Speech is not installed. Run this skill's scripts/install.py." >&2; exit 1; }
 ```
 
 ## The shared engine CLI
 
-Queue every chunk through `super-speech-engine speak`. That command starts the single engine process when needed and reserves the next queue number atomically. The desktop app supervises and controls that same engine.
+Queue every chunk through `super-speech-engine speak`. That command starts the selected runtime's single engine process when needed and reserves the next queue number atomically. When the desktop engine is selected, the app supervises and controls that process.
 
 ```powershell
 & $engine speak 'Your chunk text.' --voice bm_fable
@@ -181,7 +194,7 @@ The CLI owns playback controls. Do not create or remove runtime files directly:
 
 For a forced restart, run `interrupt`, then use `speak` normally. The next `speak` command starts the engine before it queues text.
 
-## Configuration knobs in `super_speech_engine.py`
+## Configuration knobs in `engine/super_speech_engine.py`
 
 | Constant | Purpose | Current |
 |---|---|---|
@@ -207,9 +220,9 @@ Defaults for conversational replies:
 
 Use any other voice only when the user asks for it specifically.
 
-## One engine in both installations
+## One engine implementation in both installations
 
-`super_speech_engine.py` is the authoritative implementation. The desktop build freezes that module into its bundled executable. The headless installer installs the same module into a private virtual environment. The skill invokes the resulting `super-speech-engine` command directly, so queueing, startup, controls, and audio behavior are not duplicated.
+`engine/super_speech_engine.py` is the authoritative implementation. The desktop build freezes that module into its bundled executable. The headless installer installs the same module into `runtime/venv/` beside this file. The skill invokes the resulting `super-speech-engine` command directly, so queueing, startup, controls, and audio behavior are not duplicated.
 
 **Sibling skills that build on this one:** `auto-podcast` (long multi-chunk
 podcasts) and `whatsapp-voice` (voice notes when the user is away from the

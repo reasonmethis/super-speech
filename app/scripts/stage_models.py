@@ -3,7 +3,8 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT))
+ENGINE_SOURCE = REPO_ROOT / "skills" / "super-speech" / "engine"
+sys.path.insert(0, str(ENGINE_SOURCE))
 
 from super_speech_engine import install_models  # noqa: E402
 

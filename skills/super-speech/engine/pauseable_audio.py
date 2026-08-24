@@ -1,4 +1,4 @@
-"""Sample-preserving pause support for sounddevice output streams."""
+"""Preserve the current sample while pausing sounddevice output streams."""
 
 from __future__ import annotations
 

@@ -11,7 +11,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   closeSync,
-  copyFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
   openSync,
@@ -107,7 +107,14 @@ function engineLaunch(): EngineLaunch | null {
     return { command: bundledEngine, args: [] };
   }
   const python = process.env.SUPER_SPEECH_PYTHON;
-  const sourceEngine = path.join(app.getAppPath(), "..", "super_speech_engine.py");
+  const sourceEngine = path.join(
+    app.getAppPath(),
+    "..",
+    "skills",
+    "super-speech",
+    "engine",
+    "super_speech_engine.py",
+  );
   return python && existsSync(sourceEngine)
     ? { command: python, args: [sourceEngine] }
     : null;
@@ -204,10 +211,10 @@ function getStatus(): RuntimeStatus {
   };
 }
 
-function packagedSkillPath(): string {
+function packagedSkillDirectory(): string {
   return app.isPackaged
-    ? path.join(process.resourcesPath, "integrations", "super-speech", "SKILL.md")
-    : path.join(app.getAppPath(), "..", "skills", "super-speech", "SKILL.md");
+    ? path.join(process.resourcesPath, "integrations", "super-speech")
+    : path.join(app.getAppPath(), "..", "skills", "super-speech");
 }
 
 function fileHash(filePath: string): string {
@@ -232,13 +239,14 @@ function installAgentSkills(base: string): AgentSkillInstall {
   if ((!app.isPackaged && !agentHome) || process.env.SUPER_SPEECH_SKIP_SKILL_INSTALL) {
     return { paths: [], hash: null };
   }
-  const source = packagedSkillPath();
-  if (!existsSync(source)) {
+  const sourceDirectory = packagedSkillDirectory();
+  const sourceSkill = path.join(sourceDirectory, "SKILL.md");
+  if (!existsSync(sourceSkill)) {
     return { paths: [], hash: null };
   }
 
   const home = agentHome ?? homedir();
-  const sourceHash = fileHash(source);
+  const sourceHash = fileHash(sourceSkill);
   const previousHash = previousAgentSkillHash(base);
   const installed: string[] = [];
   for (const agentDirectory of [".codex", ".claude"]) {
@@ -250,7 +258,10 @@ function installAgentSkills(base: string): AgentSkillInstall {
     const target = path.join(targetDirectory, "SKILL.md");
     if (!existsSync(target) || (previousHash && fileHash(target) === previousHash)) {
       mkdirSync(targetDirectory, { recursive: true });
-      copyFileSync(source, target);
+      cpSync(sourceDirectory, targetDirectory, {
+        recursive: true,
+        filter: (source) => path.basename(source) !== "runtime",
+      });
     }
     installed.push(target);
   }

@@ -8,6 +8,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 APP_DIR = REPO_ROOT / "app"
+ENGINE_SOURCE = REPO_ROOT / "skills" / "super-speech" / "engine"
 BUILD_DIR = APP_DIR / ".engine-build"
 DIST_DIR = APP_DIR / ".engine-dist"
 RESOURCE_DIR = APP_DIR / "build-resources" / "engine"
@@ -62,7 +63,7 @@ def main() -> None:
             "sounddevice",
             "--copy-metadata",
             "onnxruntime",
-            str(REPO_ROOT / "super_speech_engine.py"),
+            str(ENGINE_SOURCE / "super_speech_engine.py"),
         ],
         cwd=REPO_ROOT,
         check=True,
