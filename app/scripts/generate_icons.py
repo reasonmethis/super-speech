@@ -31,14 +31,15 @@ class IconVariant:
     bars: tuple[Bar, ...]
 
 
-def dense_bars(
-    count: int,
+def four_bars(
     minimum_height: int,
     maximum_height: int,
     *,
     baseline: int | None = None,
 ) -> tuple[Bar, ...]:
-    width, gap = {4: (36, 28), 5: (30, 20), 6: (26, 14)}[count]
+    count = 4
+    width = 36
+    gap = 28
     total_width = count * width + (count - 1) * gap
     left = (CANVAS_SIZE - total_width) // 2
     bars = []
@@ -60,53 +61,22 @@ def dense_bars(
     return tuple(bars)
 
 
-RISING_VARIANTS = (
-    IconVariant(
-        "a-rising",
-        "A3  Rising",
-        "3 centered bars",
-        (
-            Bar(142, 214, 42, 84, 0.78),
-            Bar(235, 181, 42, 150, 0.9),
-            Bar(328, 142, 42, 228),
-        ),
-    ),
-    *(
-        IconVariant(
-            f"a{count}-rising",
-            f"A{count}  Rising",
-            f"{count} centered bars",
-            dense_bars(count, 72, 228),
-        )
-        for count in range(4, 7)
-    ),
+A4_VARIANT = IconVariant(
+    "a4-rising",
+    "A4  Rising",
+    "4 centered bars",
+    four_bars(72, 228),
 )
 
-
-BEAM_VARIANTS = (
-    IconVariant(
-        "b-beam",
-        "B3  Beam",
-        "3 bars on one baseline",
-        (
-            Bar(142, 248, 42, 82, 0.78),
-            Bar(235, 198, 42, 132, 0.9),
-            Bar(328, 132, 42, 198),
-        ),
-    ),
-    *(
-        IconVariant(
-            f"b{count}-beam",
-            f"B{count}  Beam",
-            f"{count} bars on one baseline",
-            dense_bars(count, 72, 204, baseline=330),
-        )
-        for count in range(4, 7)
-    ),
+B4_VARIANT = IconVariant(
+    "b4-beam",
+    "B4  Beam",
+    "4 bars on one baseline, lowered 5%",
+    four_bars(72, 204, baseline=356),
 )
 
-
-VARIANTS = RISING_VARIANTS + BEAM_VARIANTS
+VARIANTS = (A4_VARIANT, B4_VARIANT)
+SELECTED_VARIANT = B4_VARIANT
 
 
 def icon_svg(variant: IconVariant) -> str:
@@ -209,7 +179,8 @@ def render_icon(variant: IconVariant) -> Image.Image:
 
 
 def write_preview(rendered: dict[str, Image.Image]) -> None:
-    columns = 4
+    columns = min(4, len(VARIANTS))
+    rows = (len(VARIANTS) + columns - 1) // columns
     margin = 32
     gap = 22
     card_width = 350
@@ -218,7 +189,7 @@ def write_preview(rendered: dict[str, Image.Image]) -> None:
         "RGB",
         (
             margin * 2 + columns * card_width + (columns - 1) * gap,
-            margin * 2 + 2 * card_height + gap,
+            margin * 2 + rows * card_height + (rows - 1) * gap,
         ),
         "#0b0d14",
     )
@@ -265,15 +236,14 @@ def main() -> None:
         rendered[variant.slug] = render_icon(variant)
         rendered[variant.slug].save(DESIGN_DIR / f"{variant.slug}.png", optimize=True)
 
-    selected = VARIANTS[0]
-    PUBLIC_ICON.write_text(icon_svg(selected), encoding="utf-8")
-    rendered[selected.slug].save(PUBLIC_ICON.with_suffix(".png"), optimize=True)
-    rendered[selected.slug].save(
+    PUBLIC_ICON.write_text(icon_svg(SELECTED_VARIANT), encoding="utf-8")
+    rendered[SELECTED_VARIANT.slug].save(PUBLIC_ICON.with_suffix(".png"), optimize=True)
+    rendered[SELECTED_VARIANT.slug].save(
         BUILD_DIR / "icon.ico",
         format="ICO",
         sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
     )
-    rendered[selected.slug].save(BUILD_DIR / "icon.icns", format="ICNS")
+    rendered[SELECTED_VARIANT.slug].save(BUILD_DIR / "icon.icns", format="ICNS")
     write_preview(rendered)
 
 
