@@ -436,17 +436,17 @@ def publish_status(
     queue_files = [
         path for path in sorted(QUEUE.glob("*.txt")) if path.name != playing
     ]
-    queue_preview = []
+    queue_items = []
     for path in queue_files:
         try:
             text = path.read_text(encoding="utf-8").strip()
         except OSError:
             continue
-        queue_preview.append(
+        queue_items.append(
             {
                 "id": path.stem,
                 "filename": path.name,
-                "text": text[:280],
+                "text": text,
                 "voice": voice_from_name(path.name),
             }
         )
@@ -476,7 +476,7 @@ def publish_status(
         "engine_pid": os.getpid(),
         "current": current,
         "queue_count": len(queue_files),
-        "queue": queue_preview,
+        "queue": queue_items,
     }
     temp_path = STATUS.with_name(f"{STATUS.name}.{os.getpid()}.tmp")
     try:

@@ -72,9 +72,11 @@ def test_status_exposes_pause_current_chunk_and_queue(tmp_path: Path) -> None:
     engine.QUEUE.mkdir()
     engine.PAUSE.touch()
     (engine.QUEUE / "001-af_heart-say.txt").write_text("Current words", encoding="utf-8")
+    full_queue_text = "Queued words " * 40
     for number in range(2, 7):
         (engine.QUEUE / f"{number:03}-bm_fable-say.txt").write_text(
-            f"Queued words {number}", encoding="utf-8"
+            full_queue_text if number == 2 else f"Queued words {number}",
+            encoding="utf-8",
         )
 
     state = engine.State()
@@ -92,7 +94,7 @@ def test_status_exposes_pause_current_chunk_and_queue(tmp_path: Path) -> None:
     assert status["current"]["voice"] == "af_heart"
     assert status["queue_count"] == 5
     assert len(status["queue"]) == 5
-    assert status["queue"][0]["text"] == "Queued words 2"
+    assert status["queue"][0]["text"] == full_queue_text.strip()
     assert status["queue"][-1]["text"] == "Queued words 6"
 
 

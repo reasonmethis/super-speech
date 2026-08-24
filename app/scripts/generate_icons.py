@@ -1,0 +1,210 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
+
+
+APP_ROOT = Path(__file__).resolve().parents[1]
+BUILD_DIR = APP_ROOT / "build"
+DESIGN_DIR = APP_ROOT / "design" / "icon-candidates"
+PUBLIC_ICON = APP_ROOT / "public" / "icon.svg"
+CANVAS_SIZE = 512
+RENDER_SCALE = 2
+
+
+@dataclass(frozen=True)
+class Bar:
+    x: int
+    y: int
+    width: int
+    height: int
+    opacity: float = 1.0
+
+
+@dataclass(frozen=True)
+class IconVariant:
+    slug: str
+    label: str
+    description: str
+    bars: tuple[Bar, ...]
+
+
+VARIANTS = (
+    IconVariant(
+        "a-rising",
+        "A  Rising",
+        "Your reversed three-bar idea",
+        (
+            Bar(142, 214, 42, 84, 0.78),
+            Bar(235, 181, 42, 150, 0.9),
+            Bar(328, 142, 42, 228),
+        ),
+    ),
+    IconVariant(
+        "b-beam",
+        "B  Beam",
+        "Three bars rising from one baseline",
+        (
+            Bar(142, 248, 42, 82, 0.78),
+            Bar(235, 198, 42, 132, 0.9),
+            Bar(328, 132, 42, 198),
+        ),
+    ),
+    IconVariant(
+        "c-voice",
+        "C  Voice",
+        "A compact asymmetric voice pulse",
+        (
+            Bar(142, 204, 42, 104, 0.82),
+            Bar(235, 132, 42, 248),
+            Bar(328, 176, 42, 160, 0.9),
+        ),
+    ),
+)
+
+
+def icon_svg(variant: IconVariant) -> str:
+    bars = "\n".join(
+        f'    <rect x="{bar.x}" y="{bar.y}" width="{bar.width}" '
+        f'height="{bar.height}" rx="{bar.width // 2}" opacity="{bar.opacity}"/>'
+        for bar in variant.bars
+    )
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="92" y1="70" x2="420" y2="450" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#C4B3FF"/>
+      <stop offset="0.52" stop-color="#8C70F4"/>
+      <stop offset="1" stop-color="#6045C8"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="128" y1="96" x2="365" y2="412" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity="0.38"/>
+      <stop offset="0.42" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#2A176F" flood-opacity="0.4"/>
+    </filter>
+  </defs>
+  <rect x="30" y="30" width="452" height="452" rx="126" fill="url(#bg)"/>
+  <rect x="45" y="45" width="422" height="422" rx="111" fill="none" stroke="url(#shine)" stroke-width="8"/>
+  <g filter="url(#shadow)" fill="#FFFFFF">
+{bars}
+  </g>
+</svg>
+'''
+
+
+def interpolate(
+    start: tuple[int, int, int],
+    end: tuple[int, int, int],
+    amount: float,
+) -> tuple[int, int, int, int]:
+    return tuple(round(left + (right - left) * amount) for left, right in zip(start, end)) + (255,)
+
+
+def render_icon(variant: IconVariant) -> Image.Image:
+    scale = RENDER_SCALE
+    size = CANVAS_SIZE * scale
+    image = Image.new("RGBA", (size, size))
+    gradient = Image.new("RGBA", (size, size))
+    gradient_draw = ImageDraw.Draw(gradient)
+    for y in range(size):
+        gradient_draw.line(
+            (0, y, size, y),
+            fill=interpolate((196, 179, 255), (96, 69, 200), y / (size - 1)),
+        )
+
+    tile_mask = Image.new("L", (size, size))
+    ImageDraw.Draw(tile_mask).rounded_rectangle(
+        (30 * scale, 30 * scale, 482 * scale, 482 * scale),
+        radius=126 * scale,
+        fill=255,
+    )
+    image.paste(gradient, mask=tile_mask)
+
+    shine = Image.new("RGBA", (size, size))
+    ImageDraw.Draw(shine).rounded_rectangle(
+        (45 * scale, 45 * scale, 467 * scale, 467 * scale),
+        radius=111 * scale,
+        outline=(255, 255, 255, 76),
+        width=8 * scale,
+    )
+    image.alpha_composite(shine)
+
+    shadow = Image.new("RGBA", (size, size))
+    shadow_draw = ImageDraw.Draw(shadow)
+    for bar in variant.bars:
+        shadow_draw.rounded_rectangle(
+            (
+                bar.x * scale,
+                (bar.y + 18) * scale,
+                (bar.x + bar.width) * scale,
+                (bar.y + bar.height + 18) * scale,
+            ),
+            radius=bar.width * scale // 2,
+            fill=(42, 23, 111, 102),
+        )
+    image.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(18 * scale)))
+
+    marks = Image.new("RGBA", (size, size))
+    marks_draw = ImageDraw.Draw(marks)
+    for bar in variant.bars:
+        marks_draw.rounded_rectangle(
+            (
+                bar.x * scale,
+                bar.y * scale,
+                (bar.x + bar.width) * scale,
+                (bar.y + bar.height) * scale,
+            ),
+            radius=bar.width * scale // 2,
+            fill=(255, 255, 255, round(255 * bar.opacity)),
+        )
+    image.alpha_composite(marks)
+    return image.resize((CANVAS_SIZE, CANVAS_SIZE), Image.Resampling.LANCZOS)
+
+
+def write_preview(rendered: dict[str, Image.Image]) -> None:
+    preview = Image.new("RGB", (1200, 450), "#0b0d14")
+    draw = ImageDraw.Draw(preview)
+    label_font = ImageFont.load_default(size=27)
+    detail_font = ImageFont.load_default(size=17)
+    for index, variant in enumerate(VARIANTS):
+        left = 38 + index * 388
+        draw.rounded_rectangle(
+            (left, 28, left + 350, 420),
+            radius=28,
+            fill="#151823",
+            outline="#292d3d",
+            width=2,
+        )
+        icon = rendered[variant.slug].resize((264, 264), Image.Resampling.LANCZOS)
+        preview.paste(icon, (left + 43, 52), icon)
+        draw.text((left + 28, 330), variant.label, fill="#f3efff", font=label_font)
+        draw.text((left + 28, 374), variant.description, fill="#9693a8", font=detail_font)
+    preview.save(APP_ROOT / "design" / "icon-candidates.png", optimize=True)
+
+
+def main() -> None:
+    BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    DESIGN_DIR.mkdir(parents=True, exist_ok=True)
+    rendered: dict[str, Image.Image] = {}
+    for variant in VARIANTS:
+        (DESIGN_DIR / f"{variant.slug}.svg").write_text(icon_svg(variant), encoding="utf-8")
+        rendered[variant.slug] = render_icon(variant)
+        rendered[variant.slug].save(DESIGN_DIR / f"{variant.slug}.png", optimize=True)
+
+    selected = VARIANTS[0]
+    PUBLIC_ICON.write_text(icon_svg(selected), encoding="utf-8")
+    rendered[selected.slug].save(PUBLIC_ICON.with_suffix(".png"), optimize=True)
+    rendered[selected.slug].save(
+        BUILD_DIR / "icon.ico",
+        format="ICO",
+        sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
+    )
+    rendered[selected.slug].save(BUILD_DIR / "icon.icns", format="ICNS")
+    write_preview(rendered)
+
+
+if __name__ == "__main__":
+    main()

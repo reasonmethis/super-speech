@@ -22,7 +22,7 @@ const demoStatus: RuntimeStatus = {
     {
       id: "015-bm_fable-say",
       filename: "015-bm_fable-say.txt",
-      text: "The queue will stay visible here, with richer controls arriving next.",
+      text: "The queue will stay visible here. Click this chunk to read its complete text without leaving the app. Click it again to collapse it.",
       voice: "bm_fable",
     },
     {
@@ -38,12 +38,14 @@ const playbackButton = requiredElement<HTMLButtonElement>("playback-button");
 const playbackIcon = requiredElement<HTMLSpanElement>("playback-icon");
 const statusDot = requiredElement<HTMLSpanElement>("status-dot");
 const statusLabel = requiredElement<HTMLSpanElement>("status-label");
+const playbackCopy = requiredElement<HTMLDivElement>("playback-copy");
 const playbackKicker = requiredElement<HTMLParagraphElement>("playback-kicker");
 const playbackTitle = requiredElement<HTMLHeadingElement>("playback-title");
 const currentText = requiredElement<HTMLParagraphElement>("current-text");
 const voicePill = requiredElement<HTMLSpanElement>("voice-pill");
 const voiceLabel = requiredElement<HTMLSpanElement>("voice-label");
 const piecePill = requiredElement<HTMLSpanElement>("piece-pill");
+const metadataRow = requiredElement<HTMLDivElement>("metadata-row");
 const queueCount = requiredElement<HTMLSpanElement>("queue-count");
 const queueList = requiredElement<HTMLDivElement>("queue-list");
 const runtimeState = requiredElement<HTMLSpanElement>("runtime-state");
@@ -51,6 +53,7 @@ const desktopApi = window.superSpeech;
 
 let currentStatus = desktopApi ? INITIAL_STATUS : demoStatus;
 let commandPending = false;
+let expandedQueueItemId: string | null = null;
 
 function requiredElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -74,9 +77,9 @@ function formatVoice(voice: string): string {
 
 function statusCopy(status: RuntimeStatus): {
   label: string;
-  kicker: string;
-  title: string;
-  body: string;
+  kicker?: string;
+  title?: string;
+  body?: string;
 } {
   if (status.state === "setup_required") {
     return {
@@ -103,12 +106,7 @@ function statusCopy(status: RuntimeStatus): {
     };
   }
   if (status.state === "paused") {
-    return {
-      label: "Paused",
-      kicker: status.current ? "PAUSED HERE" : "SPEECH PAUSED",
-      title: status.current ? "Your place is saved" : "Nothing will speak",
-      body: status.current?.text ?? "New speech will wait here until you resume.",
-    };
+    return { label: "Paused" };
   }
   if (status.state === "playing" && status.current) {
     return {
@@ -130,13 +128,15 @@ function render(status: RuntimeStatus): void {
   currentStatus = status;
   const paused = status.state === "paused";
   const copy = statusCopy(status);
+  const showPlaybackCopy = copy.kicker !== undefined;
   document.body.dataset.state = status.state;
 
   statusDot.className = `status-dot state-${status.state}`;
   statusLabel.textContent = copy.label;
-  playbackKicker.textContent = copy.kicker;
-  playbackTitle.textContent = copy.title;
-  currentText.textContent = copy.body;
+  playbackCopy.classList.toggle("is-hidden", !showPlaybackCopy);
+  playbackKicker.textContent = copy.kicker ?? "";
+  playbackTitle.textContent = copy.title ?? "";
+  currentText.textContent = copy.body ?? "";
 
   playbackButton.dataset.action = status.state === "setup_required" ? "setup" : paused ? "resume" : "pause";
   playbackButton.setAttribute(
@@ -150,7 +150,8 @@ function render(status: RuntimeStatus): void {
       ? '<svg viewBox="0 0 32 32"><path class="solid" d="m11 8 13 8-13 8Z"/></svg>'
       : '<svg viewBox="0 0 32 32"><rect class="solid" x="9" y="8" width="5" height="16" rx="2"/><rect class="solid" x="18" y="8" width="5" height="16" rx="2"/></svg>';
 
-  if (status.current) {
+  metadataRow.classList.toggle("is-hidden", paused);
+  if (status.current && !paused) {
     voiceLabel.textContent = formatVoice(status.current.voice);
     voicePill.classList.remove("is-hidden");
     if (status.current.piece_count > 1) {
@@ -177,6 +178,9 @@ function render(status: RuntimeStatus): void {
 
 function renderQueue(items: QueueItem[], total: number): void {
   queueList.replaceChildren();
+  if (!items.some((item) => item.id === expandedQueueItemId)) {
+    expandedQueueItemId = null;
+  }
   if (items.length === 0) {
     const empty = document.createElement("div");
     empty.className = "queue-empty";
@@ -186,8 +190,14 @@ function renderQueue(items: QueueItem[], total: number): void {
   }
 
   for (const [index, item] of items.entries()) {
-    const row = document.createElement("article");
+    const row = document.createElement("button");
     row.className = "queue-item";
+    row.type = "button";
+    row.setAttribute("aria-expanded", String(item.id === expandedQueueItemId));
+    row.addEventListener("click", () => {
+      expandedQueueItemId = expandedQueueItemId === item.id ? null : item.id;
+      renderQueue(items, total);
+    });
 
     const order = document.createElement("span");
     order.className = "queue-order";

@@ -9,6 +9,8 @@ files:
   - dist-electron/**
   - package.json
 extraResources:
+  - from: build/icon.ico
+    to: assets/icon.ico
   - from: build/tray-icon.ico
     to: assets/tray-icon.ico
   - from: build/tray-iconTemplate.png

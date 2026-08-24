@@ -21,5 +21,6 @@ function runPython(args) {
 }
 
 runPython(["-m", "pip", "install", "-r", "../requirements-build.txt"]);
+runPython(["scripts/generate_icons.py"]);
 runPython(["scripts/stage_models.py"]);
 runPython(["scripts/build_engine.py"]);

@@ -14,9 +14,7 @@
     <main class="app-shell">
       <header id="titlebar" class="titlebar">
         <div class="brand">
-          <span class="brand-mark" aria-hidden="true">
-            <span></span><span></span><span></span><span></span>
-          </span>
+          <img class="brand-mark" src="/icon.png" alt="" />
           <span>Super Speech</span>
         </div>
         <div class="window-controls">
@@ -44,13 +42,13 @@
           <span id="playback-icon" class="playback-icon" aria-hidden="true"></span>
         </button>
 
-        <div class="playback-copy">
+        <div id="playback-copy" class="playback-copy">
           <p id="playback-kicker" class="playback-kicker">SUPER SPEECH</p>
           <h1 id="playback-title">Getting ready</h1>
           <p id="current-text" class="current-text">Reading the local speech engine...</p>
         </div>
 
-        <div class="metadata-row">
+        <div id="metadata-row" class="metadata-row">
           <span id="voice-pill" class="metadata-pill is-hidden">
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5a2 2 0 0 0-2 2v3a2 2 0 0 0 4 0v-3a2 2 0 0 0-2-2Z"/><path d="M3.8 7.2a4.2 4.2 0 0 0 8.4 0M8 11.4v2.1M5.8 13.5h4.4"/></svg>
             <span id="voice-label"></span>
