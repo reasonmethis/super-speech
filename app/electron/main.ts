@@ -25,6 +25,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   IPC_CHANNELS,
+  statusForEngineProcess,
   type EngineStatus,
   type RuntimeState,
   type RuntimeStatus,
@@ -182,7 +183,10 @@ function getStatus(): RuntimeStatus {
   const installed = modelsInstalled(modelDirectory());
   const ownedEngineRunning = ownedEngine !== null && ownedEngine.exitCode === null;
   const paused = existsSync(path.join(base, "PAUSE"));
-  const engine = readEngineStatus(base);
+  const storedEngine = readEngineStatus(base);
+  const engine = ownedEngineRunning
+    ? statusForEngineProcess(storedEngine, ownedEngine?.pid)
+    : storedEngine;
   const engineRunning = ownedEngineRunning || engineIsRunning(base, engine);
 
   let state: RuntimeState;

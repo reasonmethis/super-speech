@@ -43,6 +43,13 @@ export interface DesktopApi {
   hide(): Promise<void>;
 }
 
+export function statusForEngineProcess(
+  status: EngineStatus | null,
+  processId: number | undefined,
+): EngineStatus | null {
+  return status?.engine_pid === processId ? status : null;
+}
+
 export const IPC_CHANNELS = {
   getStatus: "runtime:get-status",
   setPaused: "runtime:set-paused",
