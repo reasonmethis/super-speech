@@ -12,7 +12,7 @@ DESIGN_DIR = APP_ROOT / "design" / "icon-candidates"
 PUBLIC_ICON = APP_ROOT / "public" / "icon.svg"
 CANVAS_SIZE = 512
 RENDER_SCALE = 2
-BADGE_RADIUS = 238
+DEFAULT_BADGE_RADIUS = 238
 RGB = tuple[int, int, int]
 
 
@@ -32,6 +32,7 @@ class IconVariant:
     description: str
     bars: tuple[Bar, ...]
     bar_colors: tuple[RGB, ...] | None = None
+    badge_radius: int = DEFAULT_BADGE_RADIUS
 
 
 def four_bars(
@@ -40,10 +41,10 @@ def four_bars(
     *,
     baseline: int | None = None,
     horizontal_offset: int = 0,
+    width: int = 36,
+    gap: int = 28,
 ) -> tuple[Bar, ...]:
     count = 4
-    width = 36
-    gap = 28
     total_width = count * width + (count - 1) * gap
     left = (CANVAS_SIZE - total_width) // 2 + horizontal_offset
     bars = []
@@ -95,12 +96,19 @@ C2_VARIANT = IconVariant(
     ((112, 82, 217), (242, 157, 32), (29, 171, 199), (222, 66, 119)),
 )
 
+CARNIVAL_COLORS = (
+    (0, 154, 145),
+    (245, 112, 51),
+    (205, 55, 125),
+    (65, 83, 190),
+)
+
 C3_VARIANT = IconVariant(
     "c3-carnival",
     "C3  Carnival",
     "Teal, orange, raspberry, indigo",
     four_bars(72, 228, horizontal_offset=-18),
-    ((0, 154, 145), (245, 112, 51), (205, 55, 125), (65, 83, 190)),
+    CARNIVAL_COLORS,
 )
 
 C4_VARIANT = IconVariant(
@@ -111,6 +119,35 @@ C4_VARIANT = IconVariant(
     ((38, 150, 97), (104, 79, 211), (242, 82, 88), (224, 158, 22)),
 )
 
+S1_VARIANT = IconVariant(
+    "s1-carnival-plus",
+    "S1  Carnival Plus",
+    "Larger circle and a modestly larger mark",
+    four_bars(80, 252, horizontal_offset=-19, width=40),
+    CARNIVAL_COLORS,
+    badge_radius=250,
+)
+
+S2_VARIANT = IconVariant(
+    "s2-carnival-bold",
+    "S2  Carnival Bold",
+    "Larger circle and mark - selected",
+    four_bars(84, 264, horizontal_offset=-20, width=42),
+    CARNIVAL_COLORS,
+    badge_radius=250,
+)
+
+S3_VARIANT = IconVariant(
+    "s3-carnival-max",
+    "S3  Carnival Max",
+    "Larger circle and the largest mark",
+    four_bars(88, 278, horizontal_offset=-21, width=44, gap=29),
+    CARNIVAL_COLORS,
+    badge_radius=250,
+)
+
+SCALE_VARIANTS = (S1_VARIANT, S2_VARIANT, S3_VARIANT)
+
 VARIANTS = (
     A4_VARIANT,
     B4_VARIANT,
@@ -118,8 +155,9 @@ VARIANTS = (
     C2_VARIANT,
     C3_VARIANT,
     C4_VARIANT,
+    *SCALE_VARIANTS,
 )
-SELECTED_VARIANT = C3_VARIANT
+SELECTED_VARIANT = S2_VARIANT
 
 
 def purple_icon_svg(variant: IconVariant) -> str:
@@ -172,8 +210,8 @@ def badge_icon_svg(variant: IconVariant) -> str:
       <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#383044" flood-opacity="0.18"/>
     </filter>
   </defs>
-  <circle cx="256" cy="256" r="{BADGE_RADIUS}" fill="#FFFFFF" filter="url(#badgeShadow)"/>
-  <circle cx="256" cy="256" r="{BADGE_RADIUS - 2}" fill="none" stroke="#E8E5ED" stroke-width="4"/>
+  <circle cx="256" cy="256" r="{variant.badge_radius}" fill="#FFFFFF" filter="url(#badgeShadow)"/>
+  <circle cx="256" cy="256" r="{variant.badge_radius - 2}" fill="none" stroke="#E8E5ED" stroke-width="4"/>
   <g filter="url(#barShadow)">
 {bars}
   </g>
@@ -265,7 +303,7 @@ def render_badge_icon(variant: IconVariant) -> Image.Image:
     image = Image.new("RGBA", (size, size))
 
     badge_shadow = Image.new("RGBA", (size, size))
-    badge_edge = CANVAS_SIZE // 2 - BADGE_RADIUS
+    badge_edge = CANVAS_SIZE // 2 - variant.badge_radius
     ImageDraw.Draw(badge_shadow).ellipse(
         (
             badge_edge * scale,
@@ -331,9 +369,13 @@ def render_icon(variant: IconVariant) -> Image.Image:
     )
 
 
-def write_preview(rendered: dict[str, Image.Image]) -> None:
-    columns = min(3, len(VARIANTS))
-    rows = (len(VARIANTS) + columns - 1) // columns
+def write_preview(
+    rendered: dict[str, Image.Image],
+    variants: tuple[IconVariant, ...],
+    destination: Path,
+) -> None:
+    columns = min(3, len(variants))
+    rows = (len(variants) + columns - 1) // columns
     margin = 32
     gap = 22
     card_width = 350
@@ -349,7 +391,7 @@ def write_preview(rendered: dict[str, Image.Image]) -> None:
     draw = ImageDraw.Draw(preview)
     label_font = ImageFont.load_default(size=27)
     detail_font = ImageFont.load_default(size=17)
-    for index, variant in enumerate(VARIANTS):
+    for index, variant in enumerate(variants):
         left = margin + index % columns * (card_width + gap)
         top = margin + index // columns * (card_height + gap)
         draw.rounded_rectangle(
@@ -370,7 +412,7 @@ def write_preview(rendered: dict[str, Image.Image]) -> None:
             fill="#9693a8",
             font=detail_font,
         )
-    preview.save(APP_ROOT / "design" / "icon-candidates.png", optimize=True)
+    preview.save(destination, optimize=True)
 
 
 def main() -> None:
@@ -399,7 +441,12 @@ def main() -> None:
         sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
     )
     rendered[SELECTED_VARIANT.slug].save(BUILD_DIR / "icon.icns", format="ICNS")
-    write_preview(rendered)
+    write_preview(rendered, VARIANTS, APP_ROOT / "design" / "icon-candidates.png")
+    write_preview(
+        rendered,
+        SCALE_VARIANTS,
+        APP_ROOT / "design" / "icon-scale-candidates.png",
+    )
 
 
 if __name__ == "__main__":
