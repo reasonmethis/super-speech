@@ -10,7 +10,7 @@ This README is the canonical project entry point. The narrower documents cover
 
 ## Install
 
-On Windows, run `Super-Speech-Win-x64-0.2.0-Setup.exe`. The installer includes:
+On Windows, run `Super-Speech-Win-x64-0.2.1-Setup.exe`. The installer includes:
 
 - the Electron tray app and status window
 - a frozen Python speech engine
