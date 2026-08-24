@@ -109,6 +109,7 @@ def install(destination: Path) -> Path:
             "pip",
             "install",
             "--disable-pip-version-check",
+            "--no-cache-dir",
             "--upgrade",
             str(destination / "engine"),
         ],

@@ -65,6 +65,20 @@ Super Speech has two installations with one engine contract:
 
 Both expose the same CLI and run the same engine source. Their mutable runtime directories are separate. Do not write queue or control files directly.
 
+For a headless Codex installation, run the bundled installer with Python 3.11, 3.12, or 3.13. The first installation needs network access for Python packages and the two verified model files. On Windows, replace `3.12` below if another supported version is installed:
+
+```powershell
+$skill = '<absolute directory containing this SKILL.md>'
+py -3.12 "$skill\scripts\install.py" --agent codex
+```
+
+```bash
+SKILL='<absolute directory containing this SKILL.md>'
+python3 "$SKILL/scripts/install.py" --agent codex
+```
+
+Use `--agent claude` for Claude Code, or `--target <skill-directory>` for a custom destination.
+
 Resolve the engine once per reply. Set the skill directory to the absolute directory containing this loaded `SKILL.md`. On Windows, prefer a valid desktop engine and otherwise use this skill's headless engine:
 
 ```powershell

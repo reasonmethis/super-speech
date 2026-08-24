@@ -64,12 +64,13 @@ without the app by following [SETUP.md](SETUP.md).
 
 ## Headless installation
 
-Run `python skills/super-speech/scripts/install.py --agent codex` from the
-repository root. This copies the complete skill bundle into the Codex skill
-directory, then creates its Python environment, verified model assets, queue,
-and logs under that installed skill's `runtime/` directory. For Claude, run the
-same command with `--agent claude`. The desktop build and headless skill still
-use the same authoritative engine source.
+Run `py -3.12 skills/super-speech/scripts/install.py --agent codex` from the
+repository root. Python 3.11 and 3.13 are also supported. This copies the
+complete skill bundle into the Codex skill directory, then creates its Python
+environment, verified model assets, queue, and logs under that installed
+skill's `runtime/` directory. The first install needs network access. For
+Claude, run the same command with `--agent claude`. The desktop build and
+headless skill still use the same authoritative engine source.
 
 ## Licensing
 

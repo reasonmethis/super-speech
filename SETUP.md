@@ -8,12 +8,12 @@ On Windows, run the installer described in [README.md](README.md). It does not r
 
 ## Minimal headless installation
 
-Use this when the user wants spoken agent replies without the desktop app. Python 3.11, 3.12, or 3.13 is required. Windows is verified. macOS headless installation currently requires Apple Silicon and macOS 14 or newer because of the pinned ONNX Runtime wheel.
+Use this when the user wants spoken agent replies without the desktop app. Python 3.11, 3.12, or 3.13 and network access for the initial package and model downloads are required. Windows is verified. macOS headless installation currently requires Apple Silicon and macOS 14 or newer because of the pinned ONNX Runtime wheel.
 
 From the repository root, install the Codex skill:
 
 ```powershell
-py -3 .\skills\super-speech\scripts\install.py --agent codex
+py -3.12 .\skills\super-speech\scripts\install.py --agent codex
 ```
 
 On macOS:
@@ -23,7 +23,8 @@ python3 skills/super-speech/scripts/install.py --agent codex
 ```
 
 For Claude Code, use `--agent claude`. An agent that has already copied the
-skill folder can pass its absolute skill directory through `--target`.
+skill folder can pass its absolute skill directory through `--target`. Replace
+`3.12` in the Windows command if Python 3.11 or 3.13 is the installed version.
 
 The installer:
 
