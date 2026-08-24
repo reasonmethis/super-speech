@@ -7,8 +7,8 @@
       <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#383044" flood-opacity="0.18"/>
     </filter>
   </defs>
-  <circle cx="256" cy="256" r="220" fill="#FFFFFF" filter="url(#badgeShadow)"/>
-  <circle cx="256" cy="256" r="218" fill="none" stroke="#E8E5ED" stroke-width="4"/>
+  <circle cx="256" cy="256" r="238" fill="#FFFFFF" filter="url(#badgeShadow)"/>
+  <circle cx="256" cy="256" r="236" fill="none" stroke="#E8E5ED" stroke-width="4"/>
   <g filter="url(#barShadow)">
     <rect x="142" y="220" width="36" height="72" rx="18" fill="#7052D9"/>
     <rect x="206" y="194" width="36" height="124" rx="18" fill="#F29D20"/>

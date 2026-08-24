@@ -20,9 +20,13 @@ body {
 }
 
 body {
-  --accent: #a88cff;
-  --accent-bright: #d7caff;
-  --accent-deep: #7558e8;
+  --accent: #009a91;
+  --accent-bright: #63d6c8;
+  --accent-deep: #4153be;
+  --carnival-teal: #009a91;
+  --carnival-orange: #f57033;
+  --carnival-raspberry: #cd377d;
+  --carnival-indigo: #4153be;
   --surface: rgba(22, 24, 35, 0.86);
   --surface-raised: rgba(31, 33, 47, 0.84);
   --line: rgba(255, 255, 255, 0.075);
@@ -32,15 +36,15 @@ body {
 }
 
 body[data-state="playing"] {
-  --accent: #9e86ff;
-  --accent-bright: #ddd4ff;
-  --accent-deep: #7355ec;
+  --accent: var(--carnival-raspberry);
+  --accent-bright: #f09ac1;
+  --accent-deep: var(--carnival-indigo);
 }
 
 body[data-state="paused"] {
-  --accent: #f3a65a;
-  --accent-bright: #ffd8af;
-  --accent-deep: #d8752b;
+  --accent: var(--carnival-orange);
+  --accent-bright: #ffc09f;
+  --accent-deep: var(--carnival-raspberry);
 }
 
 .app-shell {
@@ -244,12 +248,12 @@ body[data-state="playing"] .ring-two {
   content: "";
 }
 
-.playback-button:hover {
+.playback-button:not(:disabled):hover {
   filter: brightness(1.08);
   transform: scale(1.025);
 }
 
-.playback-button:active {
+.playback-button:not(:disabled):active {
   transform: scale(0.97);
 }
 
@@ -258,8 +262,27 @@ body[data-state="playing"] .ring-two {
 }
 
 .playback-button:disabled {
-  cursor: wait;
-  filter: saturate(0.45);
+  cursor: default;
+}
+
+body[data-state="idle"] .playback-button,
+body[data-state="ready"] .playback-button,
+body[data-state="loading"] .playback-button {
+  border-color: rgba(232, 229, 237, 0.95);
+  background: #fff;
+  box-shadow:
+    0 15px 40px color-mix(in srgb, var(--carnival-indigo) 24%, transparent),
+    inset 0 1px 0 #fff;
+}
+
+body[data-state="idle"] .playback-button::after,
+body[data-state="ready"] .playback-button::after,
+body[data-state="loading"] .playback-button::after {
+  border-color: color-mix(in srgb, var(--carnival-teal) 22%, transparent);
+}
+
+body[data-state="loading"] .playback-icon {
+  animation: breathe 1.8s ease-in-out infinite;
 }
 
 body[data-state="paused"] .playback-button {
@@ -278,8 +301,28 @@ body[data-state="paused"] .playback-button {
   width: 36px;
 }
 
+.playback-icon .carnival-mark {
+  width: 50px;
+}
+
 .playback-icon .solid {
   fill: #fff;
+}
+
+.playback-icon .carnival-teal {
+  fill: var(--carnival-teal);
+}
+
+.playback-icon .carnival-orange {
+  fill: var(--carnival-orange);
+}
+
+.playback-icon .carnival-raspberry {
+  fill: var(--carnival-raspberry);
+}
+
+.playback-icon .carnival-indigo {
+  fill: var(--carnival-indigo);
 }
 
 .playback-icon path:not(.solid) {
@@ -297,7 +340,6 @@ body[data-state="paused"] .playback-button {
   text-align: center;
 }
 
-.playback-kicker,
 .section-kicker {
   margin: 0 0 6px;
   color: var(--accent-bright);
@@ -437,14 +479,22 @@ body[data-state="paused"] .playback-button {
   border-radius: 13px;
   background: rgba(255, 255, 255, 0.025);
   color: inherit;
-  cursor: pointer;
+  cursor: default;
   flex: 0 0 auto;
   text-align: left;
   transition: border-color 140ms ease, background 140ms ease;
 }
 
-.queue-item:hover,
-.queue-item[aria-expanded="true"] {
+.queue-item:disabled {
+  opacity: 1;
+}
+
+.queue-item.is-expandable {
+  cursor: pointer;
+}
+
+.queue-item.is-expandable:hover,
+.queue-item.is-expandable[aria-expanded="true"] {
   border-color: color-mix(in srgb, var(--accent) 24%, transparent);
   background: color-mix(in srgb, var(--accent) 7%, rgba(255, 255, 255, 0.025));
 }
@@ -454,7 +504,7 @@ body[data-state="paused"] .playback-button {
   outline-offset: 1px;
 }
 
-.queue-item::after {
+.queue-item.is-expandable::after {
   width: 6px;
   height: 6px;
   flex: 0 0 auto;
@@ -465,8 +515,16 @@ body[data-state="paused"] .playback-button {
   transition: transform 140ms ease;
 }
 
-.queue-item[aria-expanded="true"]::after {
+.queue-item.is-expandable[aria-expanded="true"]::after {
   transform: rotate(225deg);
+}
+
+.queue-item.is-expandable[aria-expanded="true"] {
+  align-items: flex-start;
+}
+
+.queue-item.is-expandable[aria-expanded="true"]::after {
+  margin-top: 4px;
 }
 
 .queue-order {

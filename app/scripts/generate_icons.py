@@ -12,6 +12,7 @@ DESIGN_DIR = APP_ROOT / "design" / "icon-candidates"
 PUBLIC_ICON = APP_ROOT / "public" / "icon.svg"
 CANVAS_SIZE = 512
 RENDER_SCALE = 2
+BADGE_RADIUS = 238
 RGB = tuple[int, int, int]
 
 
@@ -171,8 +172,8 @@ def badge_icon_svg(variant: IconVariant) -> str:
       <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#383044" flood-opacity="0.18"/>
     </filter>
   </defs>
-  <circle cx="256" cy="256" r="220" fill="#FFFFFF" filter="url(#badgeShadow)"/>
-  <circle cx="256" cy="256" r="218" fill="none" stroke="#E8E5ED" stroke-width="4"/>
+  <circle cx="256" cy="256" r="{BADGE_RADIUS}" fill="#FFFFFF" filter="url(#badgeShadow)"/>
+  <circle cx="256" cy="256" r="{BADGE_RADIUS - 2}" fill="none" stroke="#E8E5ED" stroke-width="4"/>
   <g filter="url(#barShadow)">
 {bars}
   </g>
@@ -264,15 +265,26 @@ def render_badge_icon(variant: IconVariant) -> Image.Image:
     image = Image.new("RGBA", (size, size))
 
     badge_shadow = Image.new("RGBA", (size, size))
+    badge_edge = CANVAS_SIZE // 2 - BADGE_RADIUS
     ImageDraw.Draw(badge_shadow).ellipse(
-        (36 * scale, 48 * scale, 476 * scale, 488 * scale),
+        (
+            badge_edge * scale,
+            (badge_edge + 12) * scale,
+            (CANVAS_SIZE - badge_edge) * scale,
+            (CANVAS_SIZE - badge_edge + 12) * scale,
+        ),
         fill=(41, 35, 58, 56),
     )
     image.alpha_composite(badge_shadow.filter(ImageFilter.GaussianBlur(14 * scale)))
 
     badge = Image.new("RGBA", (size, size))
     ImageDraw.Draw(badge).ellipse(
-        (36 * scale, 36 * scale, 476 * scale, 476 * scale),
+        (
+            badge_edge * scale,
+            badge_edge * scale,
+            (CANVAS_SIZE - badge_edge) * scale,
+            (CANVAS_SIZE - badge_edge) * scale,
+        ),
         fill=(255, 255, 255, 255),
         outline=(232, 229, 237, 255),
         width=4 * scale,

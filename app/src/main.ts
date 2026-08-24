@@ -39,7 +39,6 @@ const playbackIcon = requiredElement<HTMLSpanElement>("playback-icon");
 const statusDot = requiredElement<HTMLSpanElement>("status-dot");
 const statusLabel = requiredElement<HTMLSpanElement>("status-label");
 const playbackCopy = requiredElement<HTMLDivElement>("playback-copy");
-const playbackKicker = requiredElement<HTMLParagraphElement>("playback-kicker");
 const playbackTitle = requiredElement<HTMLHeadingElement>("playback-title");
 const currentText = requiredElement<HTMLParagraphElement>("current-text");
 const voicePill = requiredElement<HTMLSpanElement>("voice-pill");
@@ -77,14 +76,12 @@ function formatVoice(voice: string): string {
 
 function statusCopy(status: RuntimeStatus): {
   label: string;
-  kicker?: string;
   title?: string;
   body?: string;
 } {
   if (status.state === "setup_required") {
     return {
       label: "Install incomplete",
-      kicker: "REINSTALL NEEDED",
       title: "Speech files are missing",
       body: "Reinstall Super Speech to restore its bundled engine and voices.",
     };
@@ -92,7 +89,6 @@ function statusCopy(status: RuntimeStatus): {
   if (status.state === "stopped") {
     return {
       label: "Engine stopped",
-      kicker: "ENGINE NEEDS ATTENTION",
       title: "Super Speech could not start",
       body: "Open the runtime folder from the tray and inspect engine.log for details.",
     };
@@ -100,7 +96,6 @@ function statusCopy(status: RuntimeStatus): {
   if (status.state === "loading") {
     return {
       label: "Loading",
-      kicker: "WARMING UP",
       title: "Preparing your voice",
       body: "Kokoro is loading locally. This normally takes a few seconds.",
     };
@@ -111,44 +106,70 @@ function statusCopy(status: RuntimeStatus): {
   if (status.state === "playing" && status.current) {
     return {
       label: "Speaking",
-      kicker: "NOW SPEAKING",
       title: formatVoice(status.current.voice),
       body: status.current.text,
     };
   }
   return {
     label: "Ready",
-    kicker: "SUPER SPEECH",
     title: "Ready when you are",
     body: "Your next voice reply will appear here as soon as it starts.",
   };
+}
+
+type PlaybackAction = "pause" | "resume" | "setup" | "ready";
+
+function playbackAction(status: RuntimeStatus): PlaybackAction {
+  if (status.state === "setup_required") {
+    return "setup";
+  }
+  if (status.state === "paused") {
+    return "resume";
+  }
+  return status.state === "playing" ? "pause" : "ready";
+}
+
+function playbackIconMarkup(status: RuntimeStatus): string {
+  if (status.state === "setup_required") {
+    return '<svg viewBox="0 0 32 32"><path d="M16 7v14m-6-5 6 6 6-6M8 25h16"/></svg>';
+  }
+  if (status.state === "paused") {
+    return '<svg viewBox="0 0 32 32"><path class="solid" d="m11 8 13 8-13 8Z"/></svg>';
+  }
+  if (status.state === "playing") {
+    return '<svg viewBox="0 0 32 32"><rect class="solid" x="9" y="8" width="5" height="16" rx="2"/><rect class="solid" x="18" y="8" width="5" height="16" rx="2"/></svg>';
+  }
+  if (status.state === "stopped") {
+    return '<svg viewBox="0 0 32 32"><path d="M16 8v9m0 6v1"/></svg>';
+  }
+  return '<svg class="carnival-mark" viewBox="0 0 32 32"><rect class="carnival-teal" x="4" y="13" width="4" height="6" rx="2"/><rect class="carnival-orange" x="10" y="11" width="4" height="10" rx="2"/><rect class="carnival-raspberry" x="16" y="9" width="4" height="14" rx="2"/><rect class="carnival-indigo" x="22" y="6" width="4" height="20" rx="2"/></svg>';
 }
 
 function render(status: RuntimeStatus): void {
   currentStatus = status;
   const paused = status.state === "paused";
   const copy = statusCopy(status);
-  const showPlaybackCopy = copy.kicker !== undefined;
+  const action = playbackAction(status);
+  const showPlaybackCopy = copy.title !== undefined;
   document.body.dataset.state = status.state;
 
   statusDot.className = `status-dot state-${status.state}`;
   statusLabel.textContent = copy.label;
   playbackCopy.classList.toggle("is-hidden", !showPlaybackCopy);
-  playbackKicker.textContent = copy.kicker ?? "";
   playbackTitle.textContent = copy.title ?? "";
   currentText.textContent = copy.body ?? "";
 
-  playbackButton.dataset.action = status.state === "setup_required" ? "setup" : paused ? "resume" : "pause";
-  playbackButton.setAttribute(
-    "aria-label",
-    status.state === "setup_required" ? "Open setup guide" : paused ? "Resume speech" : "Pause speech",
-  );
-  playbackButton.disabled = commandPending;
-  playbackIcon.innerHTML = status.state === "setup_required"
-    ? '<svg viewBox="0 0 32 32"><path d="M16 7v14m-6-5 6 6 6-6M8 25h16"/></svg>'
-    : paused
-      ? '<svg viewBox="0 0 32 32"><path class="solid" d="m11 8 13 8-13 8Z"/></svg>'
-      : '<svg viewBox="0 0 32 32"><rect class="solid" x="9" y="8" width="5" height="16" rx="2"/><rect class="solid" x="18" y="8" width="5" height="16" rx="2"/></svg>';
+  const actionLabels: Record<PlaybackAction, string> = {
+    pause: "Pause speech",
+    resume: "Resume speech",
+    setup: "Open setup guide",
+    ready: status.state === "loading" ? "Preparing speech" : "Ready for speech",
+  };
+  playbackButton.dataset.action = action;
+  playbackButton.setAttribute("aria-label", actionLabels[action]);
+  playbackButton.disabled = commandPending || action === "ready";
+  playbackButton.setAttribute("aria-busy", String(commandPending || status.state === "loading"));
+  playbackIcon.innerHTML = playbackIconMarkup(status);
 
   metadataRow.classList.toggle("is-hidden", paused);
   if (status.current && !paused) {
@@ -193,11 +214,7 @@ function renderQueue(items: QueueItem[], total: number): void {
     const row = document.createElement("button");
     row.className = "queue-item";
     row.type = "button";
-    row.setAttribute("aria-expanded", String(item.id === expandedQueueItemId));
-    row.addEventListener("click", () => {
-      expandedQueueItemId = expandedQueueItemId === item.id ? null : item.id;
-      renderQueue(items, total);
-    });
+    const isExpanded = item.id === expandedQueueItemId;
 
     const order = document.createElement("span");
     order.className = "queue-order";
@@ -212,6 +229,17 @@ function renderQueue(items: QueueItem[], total: number): void {
     copy.append(text, meta);
     row.append(order, copy);
     queueList.append(row);
+
+    const isExpandable = isExpanded || text.scrollWidth > text.clientWidth;
+    row.classList.toggle("is-expandable", isExpandable);
+    row.disabled = !isExpandable;
+    if (isExpandable) {
+      row.setAttribute("aria-expanded", String(isExpanded));
+      row.addEventListener("click", () => {
+        expandedQueueItemId = expandedQueueItemId === item.id ? null : item.id;
+        renderQueue(items, total);
+      });
+    }
   }
 
   if (total > items.length) {
@@ -236,12 +264,13 @@ async function refreshStatus(): Promise<void> {
 }
 
 playbackButton.addEventListener("click", async () => {
-  if (commandPending) {
+  const action = playbackAction(currentStatus);
+  if (commandPending || action === "ready") {
     return;
   }
   commandPending = true;
   playbackButton.disabled = true;
-  if (currentStatus.state === "setup_required") {
+  if (action === "setup") {
     try {
       await desktopApi?.openSetup();
     } catch (error) {
@@ -252,7 +281,7 @@ playbackButton.addEventListener("click", async () => {
     }
     return;
   }
-  const paused = currentStatus.state !== "paused";
+  const paused = action === "pause";
   try {
     if (desktopApi) {
       render(await desktopApi.setPaused(paused));
