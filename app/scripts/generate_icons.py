@@ -76,7 +76,7 @@ B4_VARIANT = IconVariant(
 )
 
 VARIANTS = (A4_VARIANT, B4_VARIANT)
-SELECTED_VARIANT = B4_VARIANT
+SELECTED_VARIANT = A4_VARIANT
 
 
 def icon_svg(variant: IconVariant) -> str:
