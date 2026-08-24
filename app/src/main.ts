@@ -193,6 +193,7 @@ function render(status: RuntimeStatus): void {
 }
 
 function renderQueue(items: QueueItem[], total: number, currentItemId: string | null): void {
+  const previousScrollTop = queueList.scrollTop;
   queueList.replaceChildren();
   if (!items.some((item) => item.id === expandedQueueItemId)) {
     expandedQueueItemId = null;
@@ -238,8 +239,14 @@ function renderQueue(items: QueueItem[], total: number, currentItemId: string | 
     if (isExpandable) {
       row.setAttribute("aria-expanded", String(isExpanded));
       row.addEventListener("click", () => {
-        expandedQueueItemId = expandedQueueItemId === item.id ? null : item.id;
+        const expanding = expandedQueueItemId !== item.id;
+        expandedQueueItemId = expanding ? item.id : null;
         renderQueue(items, total, currentItemId);
+        if (expanding) {
+          queueList
+            .querySelector<HTMLElement>('.queue-item[aria-expanded="true"]')
+            ?.scrollIntoView({ block: "nearest" });
+        }
       });
     }
   }
@@ -250,6 +257,7 @@ function renderQueue(items: QueueItem[], total: number, currentItemId: string | 
     more.textContent = `+${total - items.length} more waiting`;
     queueList.append(more);
   }
+  queueList.scrollTop = previousScrollTop;
 }
 
 async function refreshStatus(): Promise<void> {

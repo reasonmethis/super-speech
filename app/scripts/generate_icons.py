@@ -157,7 +157,7 @@ VARIANTS = (
     C4_VARIANT,
     *SCALE_VARIANTS,
 )
-SELECTED_VARIANT = S2_VARIANT
+SELECTED_VARIANT = S3_VARIANT
 
 
 def purple_icon_svg(variant: IconVariant) -> str:
