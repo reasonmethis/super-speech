@@ -58,8 +58,8 @@ npm run package:win
 
 This single command installs pinned build dependencies, verifies model hashes,
 freezes the engine, builds Electron, and creates a current-user NSIS installer.
-The package contains the engine, model, voices, agent skill, third-party
-notices, and corresponding Super Speech engine source.
+The package contains the engine, model, voices, complete agent skill bundle,
+third-party notices, and corresponding Super Speech engine source.
 
 Electron Builder is configured for a macOS arm64 DMG, but the native sidecar
 must be built on Apple Silicon running macOS 14 or newer. Windows x64 is the

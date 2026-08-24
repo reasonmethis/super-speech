@@ -1,6 +1,6 @@
 # Super Speech setup
 
-Super Speech has one engine with two installation sizes. The desktop installer includes Electron, the engine, models, and agent skill. The headless installer includes only the Python engine, models, and skill. Both expose the same `super-speech-engine` command and use `~/.super-speech/` for runtime state.
+Super Speech has one engine implementation with two installation sizes. The desktop installer includes Electron, the engine, models, and agent skill. The headless installer includes only the Python engine, models, and skill. Both expose the same `super-speech-engine` command.
 
 ## Desktop installation
 
@@ -10,34 +10,47 @@ On Windows, run the installer described in [README.md](README.md). It does not r
 
 Use this when the user wants spoken agent replies without the desktop app. Python 3.11, 3.12, or 3.13 is required. Windows is verified. macOS headless installation currently requires Apple Silicon and macOS 14 or newer because of the pinned ONNX Runtime wheel.
 
-From the repository root, run:
+From the repository root, install the Codex skill:
 
 ```powershell
-py -3 .\install_headless.py
+py -3 .\skills\super-speech\scripts\install.py --agent codex
 ```
 
 On macOS:
 
 ```bash
-python3 install_headless.py
+python3 skills/super-speech/scripts/install.py --agent codex
 ```
+
+For Claude Code, use `--agent claude`. An agent that has already copied the
+skill folder can pass its absolute skill directory through `--target`.
 
 The installer:
 
-- creates a private virtual environment at `~/.super-speech/engine/`
-- installs `super_speech_engine.py` and its pinned runtime dependencies
-- downloads both Kokoro model files and verifies their SHA-256 hashes
-- copies the canonical Super Speech skill into existing Codex and Claude skill directories
+- copies the complete skill bundle into the selected agent's skill directory
+- creates a private virtual environment at `runtime/venv/` inside that skill
+- installs `engine/super_speech_engine.py` and its pinned runtime dependencies
+- downloads both Kokoro model files into `runtime/models/` and verifies their SHA-256 hashes
 
-It does not write a repository path file or require the repository after installation.
+The queue, spoken archive, status, controls, and logs are also created under
+that `runtime/` directory when the engine runs. The installation does not
+retain a repository path or write Super Speech files elsewhere.
+
+Re-running the bundled installer stops the local headless engine, updates the
+immutable skill files and Python packages, and preserves `runtime/`. Replacing
+the whole skill directory with another installer will also replace that local
+runtime unless the installer preserves it.
 
 ## Verify end to end
 
 On Windows:
 
 ```powershell
-$runtime = if ($env:SUPER_SPEECH_HOME) { $env:SUPER_SPEECH_HOME } else { Join-Path $env:USERPROFILE '.super-speech' }
-$engine = Join-Path $runtime 'engine\Scripts\super-speech-engine.exe'
+$agentHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
+$skill = Join-Path $agentHome 'skills\super-speech'
+$env:SUPER_SPEECH_HOME = Join-Path $skill 'runtime'
+$env:SUPER_SPEECH_MODEL_DIR = Join-Path $env:SUPER_SPEECH_HOME 'models\kokoro'
+$engine = Join-Path $skill 'runtime\venv\Scripts\super-speech-engine.exe'
 & $engine speak 'Super Speech is set up and working.' --voice af_heart
 & $engine status
 ```
@@ -45,16 +58,26 @@ $engine = Join-Path $runtime 'engine\Scripts\super-speech-engine.exe'
 On macOS:
 
 ```bash
-RUNTIME="${SUPER_SPEECH_HOME:-$HOME/.super-speech}"
-ENGINE="$RUNTIME/engine/bin/super-speech-engine"
+SKILL="${CODEX_HOME:-$HOME/.codex}/skills/super-speech"
+export SUPER_SPEECH_HOME="$SKILL/runtime"
+export SUPER_SPEECH_MODEL_DIR="$SKILL/runtime/models/kokoro"
+ENGINE="$SKILL/runtime/venv/bin/super-speech-engine"
 "$ENGINE" speak "Super Speech is set up and working." --voice af_heart
 "$ENGINE" status
 ```
 
-Confirm that the chunk moves from `~/.super-speech/queue/` to `spoken/` and that audio is audible. If playback fails, inspect `~/.super-speech/log.txt`, fix the reported dependency, model, or audio-device error, and retry the same `speak` command.
+Confirm that the chunk moves from the skill's `runtime/queue/` to
+`runtime/spoken/` and that audio is audible. If playback fails, inspect
+`runtime/log.txt`, fix the reported dependency, model, or audio-device error,
+and retry the same `speak` command.
 
 ## Switching between headless and desktop modes
 
-No queue migration or configuration file is required. Both installations use the same queue and engine protocol. Installing the desktop app makes its bundled engine the preferred path in the skill. If the app is removed and its manifest remains, the skill ignores the missing desktop executable and falls back to the headless engine when it exists.
+The skill prefers a valid desktop engine manifest when the app is installed.
+Otherwise it uses the engine inside its own `runtime/venv/`. The two modes use
+the same commands and engine implementation, but keep separate runtime state.
+Queued headless chunks do not migrate into the desktop app.
 
-Only one engine process can hold the runtime lock. If an older Super Speech process is still running during an upgrade, stop it before verification, then invoke `speak`; the new CLI starts the installed engine automatically.
+Each runtime allows one engine process to hold its lock. If an older process is
+still running during an upgrade, stop it before verification, then invoke
+`speak`; the new CLI starts the installed engine automatically.

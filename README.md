@@ -16,7 +16,7 @@ On Windows, run `Super-Speech-Win-x64-0.2.0-Setup.exe`. The installer includes:
 - a frozen Python speech engine
 - the Kokoro v1.0 model and all bundled voices
 - ONNX Runtime, eSpeak NG, phonemization, and audio libraries
-- the canonical Super Speech skill for existing Codex and Claude installations
+- the canonical Super Speech skill bundle for existing Codex and Claude installations
 
 The installed app does not need Python, Node.js, Git Bash, Rust, this repository,
 or a model download. First launch starts the engine and writes its local paths to
@@ -41,8 +41,9 @@ control that same engine and can pause immediately at the current audio sample,
 then resume from that exact point. The window also shows the current voice,
 current text, and a scrollable upcoming queue.
 
-Mutable state stays in `~/.super-speech/`. The installed model and engine are
-read-only application resources.
+In desktop mode, mutable state stays in `~/.super-speech/`. The installed model
+and engine are read-only application resources. A headless installation keeps
+its corresponding runtime inside the installed skill instead.
 
 ## Build from source
 
@@ -63,11 +64,12 @@ without the app by following [SETUP.md](SETUP.md).
 
 ## Headless installation
 
-Run `python install_headless.py` from the repository root. This creates a
-private Python environment under `~/.super-speech/`, installs only the engine
-and its runtime dependencies, downloads verified model assets, and installs the
-same agent skill used by the desktop app. It does not retain a path to the
-repository or maintain a second drainer implementation.
+Run `python skills/super-speech/scripts/install.py --agent codex` from the
+repository root. This copies the complete skill bundle into the Codex skill
+directory, then creates its Python environment, verified model assets, queue,
+and logs under that installed skill's `runtime/` directory. For Claude, run the
+same command with `--agent claude`. The desktop build and headless skill still
+use the same authoritative engine source.
 
 ## Licensing
 

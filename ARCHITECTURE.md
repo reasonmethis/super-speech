@@ -21,14 +21,14 @@ engine.
 - Runtime files remain a private, local protocol between engine processes. No
   web server or second playback state machine is needed
 
-The installer places the directory-style frozen engine, Kokoro model, and
-voices outside `app.asar`. Mutable queue, signal, status, and log files stay in
-`~/.super-speech/`. An engine lock prevents the app and headless CLI from
-starting competing processes. Electron stops only a child process it owns.
+The desktop installer places the directory-style frozen engine, Kokoro model,
+and voices outside `app.asar`. Its mutable queue, signal, status, and log files
+stay in `~/.super-speech/`. Electron stops only a child process it owns.
 
-The headless installer creates a private Python environment and installs the
-same module that is frozen into the desktop sidecar. The app is UI and
-supervision on top of the engine, not a second drainer.
+The headless installer creates `runtime/` inside the installed skill. That
+directory contains its private Python environment, models, queue, status, and
+logs. It installs the same module that is frozen into the desktop sidecar. The
+app is UI and supervision on top of the engine, not a second drainer.
 
 ## Options considered
 
@@ -80,8 +80,8 @@ need behavior that the local process protocol cannot express safely.
   Mac wheel
 - Use a directory-style sidecar so native libraries do not unpack on every
   start
-- Keep installed code and models read-only and mutable runtime state in the
-  user's home directory
+- Keep desktop code and models read-only, with mutable desktop state in the
+  user's home directory. Keep every headless component inside its skill folder
 - Ship corresponding engine source, dependency notices, and license files
 - Sign the Electron shell, installer, engine, and native libraries for public
   Windows releases
