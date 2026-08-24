@@ -12,6 +12,7 @@ DESIGN_DIR = APP_ROOT / "design" / "icon-candidates"
 PUBLIC_ICON = APP_ROOT / "public" / "icon.svg"
 CANVAS_SIZE = 512
 RENDER_SCALE = 2
+RGB = tuple[int, int, int]
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class IconVariant:
     label: str
     description: str
     bars: tuple[Bar, ...]
+    bar_colors: tuple[RGB, ...] | None = None
 
 
 def four_bars(
@@ -75,11 +77,50 @@ B4_VARIANT = IconVariant(
     four_bars(72, 204, baseline=356),
 )
 
-VARIANTS = (A4_VARIANT, B4_VARIANT)
+C1_VARIANT = IconVariant(
+    "c1-confetti",
+    "C1  Confetti",
+    "Coral, blue, gold, teal",
+    four_bars(72, 228),
+    ((255, 79, 108), (78, 107, 238), (245, 174, 29), (24, 166, 143)),
+)
+
+C2_VARIANT = IconVariant(
+    "c2-firefly",
+    "C2  Firefly",
+    "Violet, amber, cyan, rose",
+    four_bars(72, 228),
+    ((112, 82, 217), (242, 157, 32), (29, 171, 199), (222, 66, 119)),
+)
+
+C3_VARIANT = IconVariant(
+    "c3-carnival",
+    "C3  Carnival",
+    "Teal, orange, raspberry, indigo",
+    four_bars(72, 228),
+    ((0, 154, 145), (245, 112, 51), (205, 55, 125), (65, 83, 190)),
+)
+
+C4_VARIANT = IconVariant(
+    "c4-jubilee",
+    "C4  Jubilee",
+    "Green, violet, coral, gold",
+    four_bars(72, 228),
+    ((38, 150, 97), (104, 79, 211), (242, 82, 88), (224, 158, 22)),
+)
+
+VARIANTS = (
+    A4_VARIANT,
+    B4_VARIANT,
+    C1_VARIANT,
+    C2_VARIANT,
+    C3_VARIANT,
+    C4_VARIANT,
+)
 SELECTED_VARIANT = A4_VARIANT
 
 
-def icon_svg(variant: IconVariant) -> str:
+def purple_icon_svg(variant: IconVariant) -> str:
     bars = "\n".join(
         f'    <rect x="{bar.x}" y="{bar.y}" width="{bar.width}" '
         f'height="{bar.height}" rx="{bar.width // 2}" opacity="{bar.opacity}"/>'
@@ -109,6 +150,43 @@ def icon_svg(variant: IconVariant) -> str:
 '''
 
 
+def color_hex(color: RGB) -> str:
+    return "#" + "".join(f"{channel:02X}" for channel in color)
+
+
+def badge_icon_svg(variant: IconVariant) -> str:
+    assert variant.bar_colors is not None
+    bars = "\n".join(
+        f'    <rect x="{bar.x}" y="{bar.y}" width="{bar.width}" '
+        f'height="{bar.height}" rx="{bar.width // 2}" fill="{color_hex(color)}"/>'
+        for bar, color in zip(variant.bars, variant.bar_colors, strict=True)
+    )
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <filter id="badgeShadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#29233A" flood-opacity="0.22"/>
+    </filter>
+    <filter id="barShadow" x="-35%" y="-25%" width="170%" height="160%">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#383044" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+  <circle cx="256" cy="256" r="220" fill="#FFFFFF" filter="url(#badgeShadow)"/>
+  <circle cx="256" cy="256" r="218" fill="none" stroke="#E8E5ED" stroke-width="4"/>
+  <g filter="url(#barShadow)">
+{bars}
+  </g>
+</svg>
+'''
+
+
+def icon_svg(variant: IconVariant) -> str:
+    return (
+        badge_icon_svg(variant)
+        if variant.bar_colors is not None
+        else purple_icon_svg(variant)
+    )
+
+
 def interpolate(
     start: tuple[int, int, int],
     end: tuple[int, int, int],
@@ -117,7 +195,7 @@ def interpolate(
     return tuple(round(left + (right - left) * amount) for left, right in zip(start, end)) + (255,)
 
 
-def render_icon(variant: IconVariant) -> Image.Image:
+def render_purple_icon(variant: IconVariant) -> Image.Image:
     scale = RENDER_SCALE
     size = CANVAS_SIZE * scale
     image = Image.new("RGBA", (size, size))
@@ -178,8 +256,70 @@ def render_icon(variant: IconVariant) -> Image.Image:
     return image.resize((CANVAS_SIZE, CANVAS_SIZE), Image.Resampling.LANCZOS)
 
 
+def render_badge_icon(variant: IconVariant) -> Image.Image:
+    assert variant.bar_colors is not None
+    scale = RENDER_SCALE
+    size = CANVAS_SIZE * scale
+    image = Image.new("RGBA", (size, size))
+
+    badge_shadow = Image.new("RGBA", (size, size))
+    ImageDraw.Draw(badge_shadow).ellipse(
+        (36 * scale, 48 * scale, 476 * scale, 488 * scale),
+        fill=(41, 35, 58, 56),
+    )
+    image.alpha_composite(badge_shadow.filter(ImageFilter.GaussianBlur(14 * scale)))
+
+    badge = Image.new("RGBA", (size, size))
+    ImageDraw.Draw(badge).ellipse(
+        (36 * scale, 36 * scale, 476 * scale, 476 * scale),
+        fill=(255, 255, 255, 255),
+        outline=(232, 229, 237, 255),
+        width=4 * scale,
+    )
+    image.alpha_composite(badge)
+
+    bar_shadow = Image.new("RGBA", (size, size))
+    shadow_draw = ImageDraw.Draw(bar_shadow)
+    for bar in variant.bars:
+        shadow_draw.rounded_rectangle(
+            (
+                bar.x * scale,
+                (bar.y + 8) * scale,
+                (bar.x + bar.width) * scale,
+                (bar.y + bar.height + 8) * scale,
+            ),
+            radius=bar.width * scale // 2,
+            fill=(56, 48, 68, 46),
+        )
+    image.alpha_composite(bar_shadow.filter(ImageFilter.GaussianBlur(8 * scale)))
+
+    marks = Image.new("RGBA", (size, size))
+    marks_draw = ImageDraw.Draw(marks)
+    for bar, color in zip(variant.bars, variant.bar_colors, strict=True):
+        marks_draw.rounded_rectangle(
+            (
+                bar.x * scale,
+                bar.y * scale,
+                (bar.x + bar.width) * scale,
+                (bar.y + bar.height) * scale,
+            ),
+            radius=bar.width * scale // 2,
+            fill=(*color, 255),
+        )
+    image.alpha_composite(marks)
+    return image.resize((CANVAS_SIZE, CANVAS_SIZE), Image.Resampling.LANCZOS)
+
+
+def render_icon(variant: IconVariant) -> Image.Image:
+    return (
+        render_badge_icon(variant)
+        if variant.bar_colors is not None
+        else render_purple_icon(variant)
+    )
+
+
 def write_preview(rendered: dict[str, Image.Image]) -> None:
-    columns = min(4, len(VARIANTS))
+    columns = min(3, len(VARIANTS))
     rows = (len(VARIANTS) + columns - 1) // columns
     margin = 32
     gap = 22
@@ -208,6 +348,8 @@ def write_preview(rendered: dict[str, Image.Image]) -> None:
         )
         icon = rendered[variant.slug].resize((250, 250), Image.Resampling.LANCZOS)
         preview.paste(icon, (left + 50, top + 26), icon)
+        taskbar_icon = rendered[variant.slug].resize((32, 32), Image.Resampling.LANCZOS)
+        preview.paste(taskbar_icon, (left + 290, top + 296), taskbar_icon)
         draw.text((left + 28, top + 292), variant.label, fill="#f3efff", font=label_font)
         draw.text(
             (left + 28, top + 338),
