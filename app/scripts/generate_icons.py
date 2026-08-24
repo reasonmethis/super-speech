@@ -31,38 +31,82 @@ class IconVariant:
     bars: tuple[Bar, ...]
 
 
-VARIANTS = (
+def dense_bars(
+    count: int,
+    minimum_height: int,
+    maximum_height: int,
+    *,
+    baseline: int | None = None,
+) -> tuple[Bar, ...]:
+    width, gap = {4: (36, 28), 5: (30, 20), 6: (26, 14)}[count]
+    total_width = count * width + (count - 1) * gap
+    left = (CANVAS_SIZE - total_width) // 2
+    bars = []
+    for index in range(count):
+        height = round(
+            minimum_height
+            + (maximum_height - minimum_height) * index / (count - 1)
+        )
+        y = (CANVAS_SIZE - height) // 2 if baseline is None else baseline - height
+        bars.append(
+            Bar(
+                left + index * (width + gap),
+                y,
+                width,
+                height,
+                0.76 + 0.24 * index / (count - 1),
+            )
+        )
+    return tuple(bars)
+
+
+RISING_VARIANTS = (
     IconVariant(
         "a-rising",
-        "A  Rising",
-        "Your reversed three-bar idea",
+        "A3  Rising",
+        "3 centered bars",
         (
             Bar(142, 214, 42, 84, 0.78),
             Bar(235, 181, 42, 150, 0.9),
             Bar(328, 142, 42, 228),
         ),
     ),
+    *(
+        IconVariant(
+            f"a{count}-rising",
+            f"A{count}  Rising",
+            f"{count} centered bars",
+            dense_bars(count, 72, 228),
+        )
+        for count in range(4, 7)
+    ),
+)
+
+
+BEAM_VARIANTS = (
     IconVariant(
         "b-beam",
-        "B  Beam",
-        "Three bars rising from one baseline",
+        "B3  Beam",
+        "3 bars on one baseline",
         (
             Bar(142, 248, 42, 82, 0.78),
             Bar(235, 198, 42, 132, 0.9),
             Bar(328, 132, 42, 198),
         ),
     ),
-    IconVariant(
-        "c-voice",
-        "C  Voice",
-        "A compact asymmetric voice pulse",
-        (
-            Bar(142, 204, 42, 104, 0.82),
-            Bar(235, 132, 42, 248),
-            Bar(328, 176, 42, 160, 0.9),
-        ),
+    *(
+        IconVariant(
+            f"b{count}-beam",
+            f"B{count}  Beam",
+            f"{count} bars on one baseline",
+            dense_bars(count, 72, 204, baseline=330),
+        )
+        for count in range(4, 7)
     ),
 )
+
+
+VARIANTS = RISING_VARIANTS + BEAM_VARIANTS
 
 
 def icon_svg(variant: IconVariant) -> str:
@@ -165,29 +209,56 @@ def render_icon(variant: IconVariant) -> Image.Image:
 
 
 def write_preview(rendered: dict[str, Image.Image]) -> None:
-    preview = Image.new("RGB", (1200, 450), "#0b0d14")
+    columns = 4
+    margin = 32
+    gap = 22
+    card_width = 350
+    card_height = 392
+    preview = Image.new(
+        "RGB",
+        (
+            margin * 2 + columns * card_width + (columns - 1) * gap,
+            margin * 2 + 2 * card_height + gap,
+        ),
+        "#0b0d14",
+    )
     draw = ImageDraw.Draw(preview)
     label_font = ImageFont.load_default(size=27)
     detail_font = ImageFont.load_default(size=17)
     for index, variant in enumerate(VARIANTS):
-        left = 38 + index * 388
+        left = margin + index % columns * (card_width + gap)
+        top = margin + index // columns * (card_height + gap)
         draw.rounded_rectangle(
-            (left, 28, left + 350, 420),
+            (left, top, left + card_width, top + card_height),
             radius=28,
             fill="#151823",
             outline="#292d3d",
             width=2,
         )
-        icon = rendered[variant.slug].resize((264, 264), Image.Resampling.LANCZOS)
-        preview.paste(icon, (left + 43, 52), icon)
-        draw.text((left + 28, 330), variant.label, fill="#f3efff", font=label_font)
-        draw.text((left + 28, 374), variant.description, fill="#9693a8", font=detail_font)
+        icon = rendered[variant.slug].resize((250, 250), Image.Resampling.LANCZOS)
+        preview.paste(icon, (left + 50, top + 26), icon)
+        draw.text((left + 28, top + 292), variant.label, fill="#f3efff", font=label_font)
+        draw.text(
+            (left + 28, top + 338),
+            variant.description,
+            fill="#9693a8",
+            font=detail_font,
+        )
     preview.save(APP_ROOT / "design" / "icon-candidates.png", optimize=True)
 
 
 def main() -> None:
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
     DESIGN_DIR.mkdir(parents=True, exist_ok=True)
+    candidate_names = {
+        f"{variant.slug}{suffix}" for variant in VARIANTS for suffix in (".svg", ".png")
+    }
+    for candidate_path in DESIGN_DIR.iterdir():
+        if (
+            candidate_path.suffix in {".svg", ".png"}
+            and candidate_path.name not in candidate_names
+        ):
+            candidate_path.unlink()
     rendered: dict[str, Image.Image] = {}
     for variant in VARIANTS:
         (DESIGN_DIR / f"{variant.slug}.svg").write_text(icon_svg(variant), encoding="utf-8")

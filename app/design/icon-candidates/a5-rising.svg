@@ -16,8 +16,10 @@
   <rect x="30" y="30" width="452" height="452" rx="126" fill="url(#bg)"/>
   <rect x="45" y="45" width="422" height="422" rx="111" fill="none" stroke="url(#shine)" stroke-width="8"/>
   <g filter="url(#shadow)" fill="#FFFFFF">
-    <rect x="142" y="204" width="42" height="104" rx="21" opacity="0.82"/>
-    <rect x="235" y="132" width="42" height="248" rx="21" opacity="1.0"/>
-    <rect x="328" y="176" width="42" height="160" rx="21" opacity="0.9"/>
+    <rect x="141" y="220" width="30" height="72" rx="15" opacity="0.76"/>
+    <rect x="191" y="200" width="30" height="111" rx="15" opacity="0.8200000000000001"/>
+    <rect x="241" y="181" width="30" height="150" rx="15" opacity="0.88"/>
+    <rect x="291" y="161" width="30" height="189" rx="15" opacity="0.94"/>
+    <rect x="341" y="142" width="30" height="228" rx="15" opacity="1.0"/>
   </g>
 </svg>
