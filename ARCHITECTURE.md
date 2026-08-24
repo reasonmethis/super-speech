@@ -75,8 +75,9 @@ need behavior that the local process protocol cannot express safely.
 
 ## Distribution boundaries
 
-- Build the frozen engine independently for Windows x64, macOS x64, and macOS
-  arm64
+- Build the frozen engine independently for Windows x64 and macOS arm64. The
+  pinned ONNX Runtime requires macOS 14 or newer and does not provide an Intel
+  Mac wheel
 - Use a directory-style sidecar so native libraries do not unpack on every
   start
 - Keep installed code and models read-only and mutable runtime state in the

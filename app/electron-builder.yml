@@ -48,7 +48,6 @@ mac:
   target:
     - target: dmg
       arch:
-        - x64
         - arm64
 nsis:
   oneClick: true

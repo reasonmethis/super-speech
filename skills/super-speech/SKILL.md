@@ -68,25 +68,28 @@ Both use `~/.super-speech/` for the queue, status, logs, and models. Do not use 
 Resolve the engine once per reply. On Windows, prefer the desktop manifest and otherwise use the fixed headless location:
 
 ```powershell
-$runtime = Join-Path $env:USERPROFILE '.super-speech'
+$runtime = if ($env:SUPER_SPEECH_HOME) { $env:SUPER_SPEECH_HOME } else { Join-Path $env:USERPROFILE '.super-speech' }
 $manifest = Join-Path $runtime 'install.json'
-$engine = if (Test-Path -LiteralPath $manifest) {
-  (Get-Content -Raw -LiteralPath $manifest | ConvertFrom-Json).engine_path
-} else {
-  Join-Path $runtime 'engine\Scripts\super-speech-engine.exe'
+$engine = $null
+if (Test-Path -LiteralPath $manifest) {
+  $desktopEngine = (Get-Content -Raw -LiteralPath $manifest | ConvertFrom-Json).engine_path
+  if ($desktopEngine -and (Test-Path -LiteralPath $desktopEngine)) { $engine = $desktopEngine }
 }
-if (-not (Test-Path -LiteralPath $engine)) { throw 'Super Speech is not installed. Follow SETUP.md.' }
+$headlessEngine = Join-Path $runtime 'engine\Scripts\super-speech-engine.exe'
+if (-not $engine -and (Test-Path -LiteralPath $headlessEngine)) { $engine = $headlessEngine }
+if (-not $engine -or -not (Test-Path -LiteralPath $engine)) { throw 'Super Speech is not installed. Follow SETUP.md.' }
 ```
 
 On macOS, prefer the desktop manifest and otherwise use the headless virtual environment:
 
 ```bash
 RUNTIME="${SUPER_SPEECH_HOME:-$HOME/.super-speech}"
+ENGINE=""
 if [ -f "$RUNTIME/install.json" ]; then
-  ENGINE="$(plutil -extract engine_path raw "$RUNTIME/install.json")"
-else
-  ENGINE="$RUNTIME/engine/bin/super-speech-engine"
+  DESKTOP_ENGINE="$(plutil -extract engine_path raw "$RUNTIME/install.json" 2>/dev/null || true)"
+  [ -x "$DESKTOP_ENGINE" ] && ENGINE="$DESKTOP_ENGINE"
 fi
+[ -n "$ENGINE" ] || ENGINE="$RUNTIME/engine/bin/super-speech-engine"
 test -x "$ENGINE" || { echo "Super Speech is not installed. Follow SETUP.md." >&2; exit 1; }
 ```
 

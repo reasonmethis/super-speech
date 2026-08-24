@@ -25,8 +25,9 @@ corresponding `.codex` or `.claude` directory already exists. Updates replace a
 previously managed skill only when the user has not modified it.
 
 The Windows x64 package is verified. Electron and the process boundary are
-designed for macOS, but macOS sidecars must be built on each target architecture
-and have not yet been tested on Apple Silicon hardware.
+designed for macOS, but the pinned ONNX Runtime currently limits the Python
+engine to Apple Silicon on macOS 14 or newer. That bundle has not yet been
+tested on Apple Silicon hardware.
 
 ## Use
 

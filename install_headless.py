@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import platform
 import shutil
 import subprocess
+import sys
 import venv
 from pathlib import Path
 
@@ -39,6 +41,16 @@ def install_agent_skills() -> list[Path]:
 
 
 def main() -> None:
+    if not (3, 11) <= sys.version_info[:2] < (3, 14):
+        raise SystemExit("Headless Super Speech requires Python 3.11, 3.12, or 3.13")
+    if sys.platform == "darwin":
+        mac_version = platform.mac_ver()[0]
+        mac_major = int(mac_version.split(".", 1)[0]) if mac_version else 0
+        if platform.machine() != "arm64" or mac_major < 14:
+            raise SystemExit(
+                "Headless Super Speech currently requires Apple Silicon and macOS 14 or newer"
+            )
+
     runtime = runtime_directory()
     environment = runtime / "engine"
     if not virtualenv_python(environment).is_file():

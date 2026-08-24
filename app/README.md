@@ -61,7 +61,7 @@ freezes the engine, builds Electron, and creates a current-user NSIS installer.
 The package contains the engine, model, voices, agent skill, third-party
 notices, and corresponding Super Speech engine source.
 
-Electron Builder is configured for macOS x64 and arm64 DMGs, but each native
-sidecar must be built on its target platform. Windows x64 is the currently
-verified release target. Public releases still require code signing, and macOS
-requires nested signing and notarization.
+Electron Builder is configured for a macOS arm64 DMG, but the native sidecar
+must be built on Apple Silicon running macOS 14 or newer. Windows x64 is the
+currently verified release target. Public releases still require code signing,
+and macOS requires hardware smoke testing, nested signing, and notarization.
