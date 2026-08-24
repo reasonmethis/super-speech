@@ -268,17 +268,15 @@ body[data-state="playing"] .ring-two {
 body[data-state="idle"] .playback-button,
 body[data-state="ready"] .playback-button,
 body[data-state="loading"] .playback-button {
-  border-color: rgba(232, 229, 237, 0.95);
-  background: #fff;
-  box-shadow:
-    0 15px 40px color-mix(in srgb, var(--carnival-indigo) 24%, transparent),
-    inset 0 1px 0 #fff;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
 }
 
 body[data-state="idle"] .playback-button::after,
 body[data-state="ready"] .playback-button::after,
 body[data-state="loading"] .playback-button::after {
-  border-color: color-mix(in srgb, var(--carnival-teal) 22%, transparent);
+  display: none;
 }
 
 body[data-state="loading"] .playback-icon {
@@ -301,28 +299,17 @@ body[data-state="paused"] .playback-button {
   width: 36px;
 }
 
-.playback-icon .carnival-mark {
-  width: 50px;
-}
-
 .playback-icon .solid {
   fill: #fff;
 }
 
-.playback-icon .carnival-teal {
-  fill: var(--carnival-teal);
-}
-
-.playback-icon .carnival-orange {
-  fill: var(--carnival-orange);
-}
-
-.playback-icon .carnival-raspberry {
-  fill: var(--carnival-raspberry);
-}
-
-.playback-icon .carnival-indigo {
-  fill: var(--carnival-indigo);
+body[data-state="idle"] .playback-icon,
+body[data-state="ready"] .playback-icon,
+body[data-state="loading"] .playback-icon,
+.playback-icon .idle-icon {
+  width: 112px;
+  height: 112px;
+  filter: none;
 }
 
 .playback-icon path:not(.solid) {
@@ -491,6 +478,15 @@ body[data-state="paused"] .playback-button {
 
 .queue-item.is-expandable {
   cursor: pointer;
+}
+
+.queue-item.is-current {
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, rgba(255, 255, 255, 0.025));
+}
+
+.queue-item.is-current .queue-order {
+  color: var(--accent-bright);
 }
 
 .queue-item.is-expandable:hover,

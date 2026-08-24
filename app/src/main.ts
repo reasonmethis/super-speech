@@ -142,7 +142,7 @@ function playbackIconMarkup(status: RuntimeStatus): string {
   if (status.state === "stopped") {
     return '<svg viewBox="0 0 32 32"><path d="M16 8v9m0 6v1"/></svg>';
   }
-  return '<svg class="carnival-mark" viewBox="0 0 32 32"><rect class="carnival-teal" x="4" y="13" width="4" height="6" rx="2"/><rect class="carnival-orange" x="10" y="11" width="4" height="10" rx="2"/><rect class="carnival-raspberry" x="16" y="9" width="4" height="14" rx="2"/><rect class="carnival-indigo" x="22" y="6" width="4" height="20" rx="2"/></svg>';
+  return '<img class="idle-icon" src="./icon.svg" alt="">';
 }
 
 function render(status: RuntimeStatus): void {
@@ -186,8 +186,10 @@ function render(status: RuntimeStatus): void {
     piecePill.classList.add("is-hidden");
   }
 
-  queueCount.textContent = String(status.queue_count);
-  renderQueue(status.queue, status.queue_count);
+  const queueItems = status.current ? [status.current, ...status.queue] : status.queue;
+  const activeQueueCount = status.queue_count + (status.current ? 1 : 0);
+  queueCount.textContent = String(activeQueueCount);
+  renderQueue(queueItems, activeQueueCount, status.current?.id ?? null);
   runtimeState.textContent = !status.installed
     ? "Installation incomplete"
     : status.engine_running
@@ -197,7 +199,7 @@ function render(status: RuntimeStatus): void {
         : "Engine starting";
 }
 
-function renderQueue(items: QueueItem[], total: number): void {
+function renderQueue(items: QueueItem[], total: number, currentItemId: string | null): void {
   queueList.replaceChildren();
   if (!items.some((item) => item.id === expandedQueueItemId)) {
     expandedQueueItemId = null;
@@ -214,11 +216,18 @@ function renderQueue(items: QueueItem[], total: number): void {
     const row = document.createElement("button");
     row.className = "queue-item";
     row.type = "button";
+    const isCurrent = item.id === currentItemId;
     const isExpanded = item.id === expandedQueueItemId;
+    if (isCurrent) {
+      row.classList.add("is-current");
+      row.setAttribute("aria-current", "true");
+    }
 
     const order = document.createElement("span");
     order.className = "queue-order";
-    order.textContent = String(index + 1).padStart(2, "0");
+    order.textContent = isCurrent
+      ? "NOW"
+      : String(index + (currentItemId ? 0 : 1)).padStart(2, "0");
 
     const copy = document.createElement("div");
     copy.className = "queue-copy";
@@ -237,7 +246,7 @@ function renderQueue(items: QueueItem[], total: number): void {
       row.setAttribute("aria-expanded", String(isExpanded));
       row.addEventListener("click", () => {
         expandedQueueItemId = expandedQueueItemId === item.id ? null : item.id;
-        renderQueue(items, total);
+        renderQueue(items, total, currentItemId);
       });
     }
   }
