@@ -328,6 +328,12 @@ body[data-state="loading"] .playback-icon,
   text-align: center;
 }
 
+body[data-state="idle"] .playback-copy,
+body[data-state="ready"] .playback-copy,
+body[data-state="loading"] .playback-copy {
+  padding-top: 36px;
+}
+
 .section-kicker {
   margin: 0 0 6px;
   color: var(--accent-bright);
@@ -589,16 +595,8 @@ footer {
   flex: 0 0 20px;
   align-items: center;
   justify-content: center;
-  gap: 8px;
   color: #555263;
   font-size: 9px;
-}
-
-.footer-separator {
-  width: 2px;
-  height: 2px;
-  border-radius: 50%;
-  background: #4a4757;
 }
 
 @keyframes breathe {

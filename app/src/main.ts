@@ -47,7 +47,6 @@ const piecePill = requiredElement<HTMLSpanElement>("piece-pill");
 const metadataRow = requiredElement<HTMLDivElement>("metadata-row");
 const queueCount = requiredElement<HTMLSpanElement>("queue-count");
 const queueList = requiredElement<HTMLDivElement>("queue-list");
-const runtimeState = requiredElement<HTMLSpanElement>("runtime-state");
 const desktopApi = window.superSpeech;
 
 let currentStatus = desktopApi ? INITIAL_STATUS : demoStatus;
@@ -171,12 +170,13 @@ function render(status: RuntimeStatus): void {
   playbackButton.setAttribute("aria-busy", String(commandPending || status.state === "loading"));
   playbackIcon.innerHTML = playbackIconMarkup(status);
 
-  metadataRow.classList.toggle("is-hidden", paused);
-  if (status.current && !paused) {
-    voiceLabel.textContent = formatVoice(status.current.voice);
+  const current = paused ? null : status.current;
+  metadataRow.classList.toggle("is-hidden", !current);
+  if (current) {
+    voiceLabel.textContent = formatVoice(current.voice);
     voicePill.classList.remove("is-hidden");
-    if (status.current.piece_count > 1) {
-      piecePill.textContent = `Part ${status.current.piece} of ${status.current.piece_count}`;
+    if (current.piece_count > 1) {
+      piecePill.textContent = `Part ${current.piece} of ${current.piece_count}`;
       piecePill.classList.remove("is-hidden");
     } else {
       piecePill.classList.add("is-hidden");
@@ -190,13 +190,6 @@ function render(status: RuntimeStatus): void {
   const activeQueueCount = status.queue_count + (status.current ? 1 : 0);
   queueCount.textContent = String(activeQueueCount);
   renderQueue(queueItems, activeQueueCount, status.current?.id ?? null);
-  runtimeState.textContent = !status.installed
-    ? "Installation incomplete"
-    : status.engine_running
-      ? "Engine managed by Super Speech"
-      : status.state === "stopped"
-        ? "Engine stopped"
-        : "Engine starting";
 }
 
 function renderQueue(items: QueueItem[], total: number, currentItemId: string | null): void {
@@ -268,7 +261,8 @@ async function refreshStatus(): Promise<void> {
     render(await desktopApi.getStatus());
   } catch (error) {
     console.error("Could not read Super Speech status", error);
-    runtimeState.textContent = "Controller disconnected";
+    statusDot.className = "status-dot state-stopped";
+    statusLabel.textContent = "Disconnected";
   }
 }
 
