@@ -16,6 +16,8 @@ work session without having to reconstruct the product decisions.
 - [x] Self-contained Windows installer with the frozen engine, model, and voices
 - [x] First-launch Codex and Claude skill installation without overwriting custom skills
 - [x] Packaged-app and frozen-engine smoke tests against isolated runtime homes
+- [x] One self-starting engine CLI shared by desktop and headless installations
+- [x] Minimal headless installer with no repository path file
 - [ ] Test the macOS bundle on Apple Silicon hardware
 
 ## P0: one-click public installation
@@ -52,8 +54,7 @@ work session without having to reconstruct the product decisions.
   more meaning to the filename
 - Record the source app, source task, queued timestamp, voice, requested gap,
   and original text for every chunk
-- Keep `speak.sh` compatible for existing agents while adding optional source
-  metadata flags
+- Add optional source metadata flags to `super-speech-engine speak`
 - Show a recognizable source-app icon only when the source is known
 - Decide how much source history remains local and add a clear privacy control
 

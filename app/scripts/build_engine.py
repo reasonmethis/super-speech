@@ -62,7 +62,7 @@ def main() -> None:
             "sounddevice",
             "--copy-metadata",
             "onnxruntime",
-            str(REPO_ROOT / "drainer-kokoro.py"),
+            str(REPO_ROOT / "super_speech_engine.py"),
         ],
         cwd=REPO_ROOT,
         check=True,

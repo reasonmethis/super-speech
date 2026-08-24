@@ -9,21 +9,26 @@ Super Speech uses an Electron desktop app with a separate frozen Python speech
 engine.
 
 - The Python engine owns synthesis, queue order, playback, the current sample
-  cursor, and the atomic `status.json` snapshot
+  cursor, daemon startup, playback commands, and the atomic `status.json`
+  snapshot
 - Electron main owns the window, tray, installer, agent integration, and engine
   supervision
 - The renderer displays status and sends a narrow set of commands through a
   sandboxed preload bridge
-- Queue files are the headless ingestion contract, so agents do not need a web
-  server or a second playback state machine
-- The persistent `PAUSE` file is the shared pause contract, including across
-  engine restarts
+- `super-speech-engine` is the public contract for the app, skills, and headless
+  users. Its `speak` command starts the one engine process and reserves queue
+  numbers atomically
+- Runtime files remain a private, local protocol between engine processes. No
+  web server or second playback state machine is needed
 
 The installer places the directory-style frozen engine, Kokoro model, and
 voices outside `app.asar`. Mutable queue, signal, status, and log files stay in
-`~/.super-speech/`. Electron starts only an engine it owns. If a compatible
-legacy engine is already alive, Electron adopts its status and leaves that
-process running when the app exits.
+`~/.super-speech/`. An engine lock prevents the app and headless CLI from
+starting competing processes. Electron stops only a child process it owns.
+
+The headless installer creates a private Python environment and installs the
+same module that is frozen into the desktop sidecar. The app is UI and
+supervision on top of the engine, not a second drainer.
 
 ## Options considered
 
@@ -63,10 +68,10 @@ runtime sizes.
 
 ## Protocol growth
 
-Version zero uses the atomic status file and persistent pause signal.
-Interactive queue selection will require a small versioned command protocol.
-Do not introduce HTTP, WebSocket, or a general service framework until those
-commands need behavior that atomic files cannot express safely.
+Version zero uses CLI commands plus the atomic status file. Interactive queue
+selection should extend that CLI with explicit chunk identifiers. Do not
+introduce HTTP, WebSocket, or a general service framework until those commands
+need behavior that the local process protocol cannot express safely.
 
 ## Distribution boundaries
 

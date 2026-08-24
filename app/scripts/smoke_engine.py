@@ -32,7 +32,7 @@ def main() -> None:
         subprocess.run(
             [
                 str(ENGINE),
-                "--enqueue",
+                "speak",
                 "The frozen Super Speech engine is complete and working.",
                 "--voice",
                 "af_heart",
@@ -42,38 +42,30 @@ def main() -> None:
             env=environment,
             check=True,
         )
-        creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-        process = subprocess.Popen(
-            [str(ENGINE)],
-            env=environment,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            creationflags=creation_flags,
-            start_new_session=sys.platform != "win32",
-        )
         spoken = runtime / "spoken" / "001-af_heart-g0-say.txt"
         deadline = time.monotonic() + 45
-        while time.monotonic() < deadline and process.poll() is None:
+        while time.monotonic() < deadline:
             if spoken.is_file():
                 break
             time.sleep(0.25)
 
-        (runtime / "INTERRUPT").touch()
-        try:
-            stdout, stderr = process.communicate(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            stdout, stderr = process.communicate()
-            raise RuntimeError("frozen engine did not stop after INTERRUPT")
-
-        if process.returncode != 0 or not spoken.is_file():
-            raise RuntimeError(
-                f"frozen engine smoke test failed ({process.returncode})\n{stdout}\n{stderr}"
+        if not spoken.is_file():
+            raise RuntimeError("frozen engine did not drain its self-started queue")
+        subprocess.run([str(ENGINE), "interrupt"], env=environment, check=True)
+        stopped_deadline = time.monotonic() + 10
+        while time.monotonic() < stopped_deadline:
+            status = subprocess.run(
+                [str(ENGINE), "status"],
+                env=environment,
+                check=True,
+                capture_output=True,
+                text=True,
             )
-        print(stdout, end="")
-        if stderr:
-            print(stderr, file=sys.stderr, end="")
+            if '"state": "stopped"' in status.stdout:
+                break
+            time.sleep(0.25)
+        else:
+            raise RuntimeError("frozen engine did not stop after interrupt")
 
 
 if __name__ == "__main__":

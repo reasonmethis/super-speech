@@ -6,23 +6,23 @@ or per-word billing.
 
 This README is the canonical project entry point. The narrower documents cover
 [desktop architecture](ARCHITECTURE.md), [app development](app/README.md), the
-[product backlog](BACKLOG.md), and [legacy source setup](SETUP.md).
+[product backlog](BACKLOG.md), and [headless setup](SETUP.md).
 
 ## Install
 
-On Windows, run `Super-Speech-Win-x64-0.1.0-Setup.exe`. The installer includes:
+On Windows, run `Super-Speech-Win-x64-0.2.0-Setup.exe`. The installer includes:
 
 - the Electron tray app and status window
 - a frozen Python speech engine
 - the Kokoro v1.0 model and all bundled voices
 - ONNX Runtime, eSpeak NG, phonemization, and audio libraries
-- compact Super Speech skills for existing Codex and Claude installations
+- the canonical Super Speech skill for existing Codex and Claude installations
 
 The installed app does not need Python, Node.js, Git Bash, Rust, this repository,
 or a model download. First launch starts the engine and writes its local paths to
 `~/.super-speech/install.json`. It installs the agent skill only when the
-corresponding `.codex` or `.claude` directory already exists, and it never
-overwrites an existing Super Speech skill.
+corresponding `.codex` or `.claude` directory already exists. Updates replace a
+previously managed skill only when the user has not modified it.
 
 The Windows x64 package is verified. Electron and the process boundary are
 designed for macOS, but macOS sidecars must be built on each target architecture
@@ -34,10 +34,11 @@ Ask your agent:
 
 > Use super-speech for your replies until I tell you otherwise
 
-The agent launches Super Speech quietly and queues each spoken chunk through the
-installed engine. The desktop window and tray menu can pause immediately at the
-current audio sample and resume from that exact point. The window also shows the
-current voice, current text, and a scrollable upcoming queue.
+The agent invokes `super-speech-engine speak`, which starts the installed engine
+when needed and queues each spoken chunk. The desktop window and tray menu
+control that same engine and can pause immediately at the current audio sample,
+then resume from that exact point. The window also shows the current voice,
+current text, and a scrollable upcoming queue.
 
 Mutable state stays in `~/.super-speech/`. The installed model and engine are
 read-only application resources.
@@ -56,8 +57,16 @@ npm run package:win
 The package command installs pinned build dependencies, verifies or stages the
 model files by SHA-256, freezes the engine, builds Electron, and creates the NSIS
 installer. See [app/README.md](app/README.md) for focused build and smoke-test
-commands. Developers who intentionally want the older repository-driven Python
-workflow can use [SETUP.md](SETUP.md).
+commands. Users who do not want Electron can install the same engine and skill
+without the app by following [SETUP.md](SETUP.md).
+
+## Headless installation
+
+Run `python install_headless.py` from the repository root. This creates a
+private Python environment under `~/.super-speech/`, installs only the engine
+and its runtime dependencies, downloads verified model assets, and installs the
+same agent skill used by the desktop app. It does not retain a path to the
+repository or maintain a second drainer implementation.
 
 ## Licensing
 

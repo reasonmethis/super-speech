@@ -8,6 +8,7 @@ import {
   Tray,
 } from "electron";
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   closeSync,
   copyFileSync,
@@ -58,6 +59,11 @@ interface EngineLaunch {
   args: string[];
 }
 
+interface AgentSkillInstall {
+  paths: string[];
+  hash: string | null;
+}
+
 function runtimeDir(): string {
   return process.env.SUPER_SPEECH_HOME ?? path.join(homedir(), ".super-speech");
 }
@@ -101,7 +107,7 @@ function engineLaunch(): EngineLaunch | null {
     return { command: bundledEngine, args: [] };
   }
   const python = process.env.SUPER_SPEECH_PYTHON;
-  const sourceEngine = path.join(app.getAppPath(), "..", "drainer-kokoro.py");
+  const sourceEngine = path.join(app.getAppPath(), "..", "super_speech_engine.py");
   return python && existsSync(sourceEngine)
     ? { command: python, args: [sourceEngine] }
     : null;
@@ -129,7 +135,7 @@ function processExists(processId: number | null | undefined): boolean {
 
 function engineIsRunning(base: string, status: EngineStatus | null): boolean {
   return (
-    heartbeatIsFresh(path.join(base, "drainer.alive")) ||
+    heartbeatIsFresh(path.join(base, "engine.alive")) ||
     Boolean(
       status &&
       Date.now() / 1000 - status.updated_at < 300 &&
@@ -198,32 +204,42 @@ function getStatus(): RuntimeStatus {
   };
 }
 
-function clearTransientSignals(base: string): void {
-  for (const name of ["STOP", "INTERRUPT", "SKIP", "CLEAR"]) {
-    const signal = path.join(base, name);
-    if (existsSync(signal)) {
-      unlinkSync(signal);
-    }
-  }
-}
-
 function packagedSkillPath(): string {
   return app.isPackaged
     ? path.join(process.resourcesPath, "integrations", "super-speech", "SKILL.md")
-    : path.join(app.getAppPath(), "resources", "agent-skill", "SKILL.md");
+    : path.join(app.getAppPath(), "..", "skills", "super-speech", "SKILL.md");
 }
 
-function installAgentSkills(): string[] {
+function fileHash(filePath: string): string {
+  return createHash("sha256").update(readFileSync(filePath)).digest("hex");
+}
+
+function previousAgentSkillHash(base: string): string | null {
+  try {
+    const manifest = JSON.parse(
+      readFileSync(path.join(base, "install.json"), "utf8"),
+    ) as { agent_skill_hash?: unknown };
+    return typeof manifest.agent_skill_hash === "string"
+      ? manifest.agent_skill_hash
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function installAgentSkills(base: string): AgentSkillInstall {
   const agentHome = process.env.SUPER_SPEECH_AGENT_HOME;
   if ((!app.isPackaged && !agentHome) || process.env.SUPER_SPEECH_SKIP_SKILL_INSTALL) {
-    return [];
+    return { paths: [], hash: null };
   }
   const source = packagedSkillPath();
   if (!existsSync(source)) {
-    return [];
+    return { paths: [], hash: null };
   }
 
   const home = agentHome ?? homedir();
+  const sourceHash = fileHash(source);
+  const previousHash = previousAgentSkillHash(base);
   const installed: string[] = [];
   for (const agentDirectory of [".codex", ".claude"]) {
     const agentRoot = path.join(home, agentDirectory);
@@ -232,19 +248,19 @@ function installAgentSkills(): string[] {
     }
     const targetDirectory = path.join(agentRoot, "skills", "super-speech");
     const target = path.join(targetDirectory, "SKILL.md");
-    if (!existsSync(target)) {
+    if (!existsSync(target) || (previousHash && fileHash(target) === previousHash)) {
       mkdirSync(targetDirectory, { recursive: true });
       copyFileSync(source, target);
     }
     installed.push(target);
   }
-  return installed;
+  return { paths: installed, hash: sourceHash };
 }
 
 function writeInstallManifest(
   base: string,
   launch: EngineLaunch | null,
-  agentSkills: string[],
+  agentSkills: AgentSkillInstall,
 ): void {
   writeFileSync(
     path.join(base, "install.json"),
@@ -255,7 +271,8 @@ function writeInstallManifest(
         engine_path: launch?.args.length === 0 ? launch.command : null,
         runtime_home: base,
         model_directory: modelDirectory(),
-        agent_skills: agentSkills,
+        agent_skills: agentSkills.paths,
+        agent_skill_hash: agentSkills.hash,
       },
       null,
       2,
@@ -270,7 +287,7 @@ function startEngine(): void {
   mkdirSync(path.join(base, "spoken"), { recursive: true });
   mkdirSync(path.join(base, "failed"), { recursive: true });
   const launch = engineLaunch();
-  writeInstallManifest(base, launch, installAgentSkills());
+  writeInstallManifest(base, launch, installAgentSkills(base));
 
   if (engineIsRunning(base, readEngineStatus(base))) {
     engineStartFailed = false;
@@ -284,10 +301,9 @@ function startEngine(): void {
     return;
   }
 
-  clearTransientSignals(base);
   const logDescriptor = openSync(path.join(base, "engine.log"), "a");
   try {
-    ownedEngine = spawn(launch.command, launch.args, {
+    ownedEngine = spawn(launch.command, [...launch.args, "serve"], {
       env: {
         ...process.env,
         SUPER_SPEECH_HOME: base,
@@ -320,7 +336,7 @@ function stopOwnedEngine(): void {
   }
   ownedEngine.kill();
   ownedEngine = null;
-  const heartbeat = path.join(runtimeDir(), "drainer.alive");
+  const heartbeat = path.join(runtimeDir(), "engine.alive");
   if (existsSync(heartbeat)) {
     unlinkSync(heartbeat);
   }

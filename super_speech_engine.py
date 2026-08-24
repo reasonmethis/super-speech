@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""
-Auto-podcast drainer (Kokoro) — background-worker streaming buffer.
+"""Local Super Speech engine and command-line interface.
 
 A background synth WORKER thread synthesizes queued chunks continuously and
 banks the rendered audio in a bounded buffer. The MAIN thread consumes that
 buffer, playing each piece through the OS audio driver via sounddevice
-(non-blocking) and staying responsive to control signals every ~50 ms.
+(non-blocking) and staying responsive to control signals every ~20 ms.
 
 Long chunks are split at sentence boundaries into pieces of at most
 SPLIT_CHARS characters; each piece is synthesized and banked separately, so a
@@ -17,7 +16,9 @@ gap applies only before a chunk's first piece. This is what makes the
 queue gap-proof even when a short chunk is followed by a much longer one —
 the synth-ahead cushion only needs to cover one SENTENCE, not one chunk.
 
-Signal files in BASE control runtime:
+The CLI is the public control surface. It owns daemon startup, queue numbering,
+and playback signals so desktop and headless installations use identical
+behavior. Signal files in BASE are the engine's private process protocol:
   PAUSE      - pause immediately; keep the current sample position until removed
   STOP       - finish the current chunk, then exit cleanly
   INTERRUPT  - stop playback immediately and exit
@@ -37,14 +38,18 @@ Env:
 """
 import argparse
 import glob
+import hashlib
 import json
 import os
 import queue
 import re
+import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from pathlib import Path
+from typing import BinaryIO
 
 from pauseable_audio import PauseableAudio
 
@@ -67,14 +72,30 @@ INTERRUPT = BASE / "INTERRUPT"
 SKIP = BASE / "SKIP"
 CLEAR = BASE / "CLEAR"
 WARMUP = BASE / "WARMUP"
-HEARTBEAT = BASE / "drainer.alive"  # touched while alive; ensure-drainer.sh reads its mtime
+HEARTBEAT = BASE / "engine.alive"
 STATUS = BASE / "status.json"
+INSTANCE_LOCK = BASE / "engine.lock"
 
-MODEL_DIR = Path(
-    os.environ.get("SUPER_SPEECH_MODEL_DIR") or (BASE / "models" / "kokoro")
-)
+
+def default_model_directory() -> Path:
+    """Return the bundled model directory or the headless runtime location."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent.parent / "models" / "kokoro"
+    return BASE / "models" / "kokoro"
+
+
+MODEL_DIR = Path(os.environ.get("SUPER_SPEECH_MODEL_DIR") or default_model_directory())
 MODEL_PATH = MODEL_DIR / "kokoro-v1.0.onnx"
 VOICES_PATH = MODEL_DIR / "voices-v1.0.bin"
+
+MODEL_RELEASE_ROOT = (
+    "https://github.com/thewh1teagle/kokoro-onnx/releases/download/"
+    "model-files-v1.0"
+)
+MODEL_ARTIFACTS = {
+    "kokoro-v1.0.onnx": "7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5",
+    "voices-v1.0.bin": "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d",
+}
 
 DEFAULT_VOICE = "af_bella"
 AVAILABLE_VOICES: set[str] = set()  # populated in main() once kokoro loads
@@ -86,7 +107,141 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
-ENGINE_VERSION = "0.2.0"
+ENGINE_VERSION = "0.3.0"
+
+
+class EngineInstanceLock:
+    """Hold the one-byte process lock that makes the engine single-instance."""
+
+    def __init__(self) -> None:
+        self._file: BinaryIO | None = None
+
+    def acquire(self) -> bool:
+        BASE.mkdir(parents=True, exist_ok=True)
+        lock_file = INSTANCE_LOCK.open("a+b")
+        if lock_file.seek(0, os.SEEK_END) == 0:
+            lock_file.write(b"0")
+            lock_file.flush()
+        lock_file.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            lock_file.close()
+            return False
+        self._file = lock_file
+        return True
+
+    def release(self) -> None:
+        if self._file is None:
+            return
+        self._file.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(self._file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._file.close()
+            self._file = None
+
+
+def engine_is_running() -> bool:
+    """Return whether another process currently owns the engine lock."""
+    probe = EngineInstanceLock()
+    if not probe.acquire():
+        return True
+    probe.release()
+    return False
+
+
+def engine_command(*arguments: str) -> list[str]:
+    if getattr(sys, "frozen", False):
+        return [sys.executable, *arguments]
+    return [sys.executable, str(Path(__file__).resolve()), *arguments]
+
+
+def start_engine() -> None:
+    """Start the same engine executable detached and wait for its process lock."""
+    if engine_is_running():
+        return
+    if not MODEL_PATH.is_file() or not VOICES_PATH.is_file():
+        raise RuntimeError(
+            f"missing Kokoro models at {MODEL_DIR}; run 'super-speech-engine setup'"
+        )
+
+    BASE.mkdir(parents=True, exist_ok=True)
+    with LOG.open("a", encoding="utf-8") as engine_log:
+        options: dict[str, object] = {
+            "cwd": str(BASE),
+            "stdin": subprocess.DEVNULL,
+            "stdout": engine_log,
+            "stderr": engine_log,
+        }
+        if os.name == "nt":
+            options["creationflags"] = (
+                subprocess.CREATE_NEW_PROCESS_GROUP
+                | subprocess.DETACHED_PROCESS
+                | subprocess.CREATE_NO_WINDOW
+            )
+        else:
+            options["start_new_session"] = True
+        process = subprocess.Popen(engine_command("serve"), **options)
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if engine_is_running():
+            return
+        if process.poll() is not None:
+            break
+        time.sleep(0.05)
+    raise RuntimeError(f"engine failed to start; inspect {LOG}")
+
+
+def file_hash(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def install_models(destination: Path = MODEL_DIR) -> None:
+    """Download and verify the two model artifacts needed by the engine."""
+    destination.mkdir(parents=True, exist_ok=True)
+    for name, expected_hash in MODEL_ARTIFACTS.items():
+        target = destination / name
+        if target.is_file() and file_hash(target) == expected_hash:
+            print(f"verified {target}")
+            continue
+
+        partial = target.with_suffix(f"{target.suffix}.partial")
+        partial.unlink(missing_ok=True)
+        try:
+            with urllib.request.urlopen(f"{MODEL_RELEASE_ROOT}/{name}") as response:
+                with partial.open("wb") as output:
+                    while block := response.read(1024 * 1024):
+                        output.write(block)
+            actual_hash = file_hash(partial)
+            if actual_hash != expected_hash:
+                raise RuntimeError(
+                    f"hash mismatch for {name}: expected {expected_hash}, got {actual_hash}"
+                )
+            os.replace(partial, target)
+        except Exception:
+            partial.unlink(missing_ok=True)
+            raise
+        print(f"installed {target}")
 
 
 def enqueue_text(text: str, voice: str, gap_ms: int | None = None) -> Path:
@@ -136,8 +291,7 @@ _last_hb = 0.0
 
 
 def heartbeat(force: bool = False) -> None:
-    """Touch the liveness file so ensure-drainer.sh can detect us cheaply.
-    Throttled to ~1/s; force=True before a long blocking synth keeps it fresh."""
+    """Publish cheap liveness while the engine may be busy synthesizing."""
     global _last_hb
     now = time.time()
     if force or now - _last_hb >= 1.0:
@@ -564,7 +718,7 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
     return "done"
 
 
-def main() -> None:
+def run_engine_loop() -> None:
     QUEUE.mkdir(parents=True, exist_ok=True)
     SPOKEN.mkdir(parents=True, exist_ok=True)
     st = State()
@@ -720,23 +874,98 @@ def main() -> None:
             pass
 
 
+def clear_transient_signals() -> None:
+    for signal in (STOP, INTERRUPT, SKIP, CLEAR, WARMUP):
+        signal.unlink(missing_ok=True)
+
+
+def serve() -> None:
+    """Run the single engine process until a stop command or interruption."""
+    instance_lock = EngineInstanceLock()
+    if not instance_lock.acquire():
+        return
+    try:
+        clear_transient_signals()
+        run_engine_loop()
+    finally:
+        instance_lock.release()
+
+
+def send_control(signal: Path) -> None:
+    if not engine_is_running():
+        raise RuntimeError("engine is not running")
+    signal.touch()
+
+
+def resume() -> None:
+    PAUSE.unlink(missing_ok=True)
+
+
+def print_status() -> None:
+    if STATUS.is_file():
+        print(STATUS.read_text(encoding="utf-8"))
+        return
+    print(
+        json.dumps(
+            {
+                "version": 1,
+                "state": "stopped",
+                "updated_at": 0,
+                "engine_pid": None,
+                "current": None,
+                "queue_count": len(list(QUEUE.glob("*.txt"))),
+                "queue": [],
+            }
+        )
+    )
+
+
 def cli(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="super-speech-engine")
     parser.add_argument("--version", action="version", version=ENGINE_VERSION)
-    parser.add_argument("--enqueue", metavar="TEXT", help="queue one chunk and exit")
-    parser.add_argument("--voice", default="af_heart", help="Kokoro voice ID")
-    parser.add_argument("--gap-ms", type=int, help="pre-speech gap from 0 to 1500 ms")
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    commands.add_parser("serve", help="run the speech engine")
+    speak = commands.add_parser("speak", help="start the engine and queue one chunk")
+    speak.add_argument("text", help="text to speak")
+    speak.add_argument("--voice", default="af_heart", help="Kokoro voice ID")
+    speak.add_argument("--gap-ms", type=int, help="pre-speech gap from 0 to 1500 ms")
+    setup = commands.add_parser("setup", help="download verified Kokoro models")
+    setup.add_argument("--model-dir", type=Path, default=MODEL_DIR)
+    commands.add_parser("status", help="print the current runtime status")
+    commands.add_parser("pause", help="pause at the current audio sample")
+    commands.add_parser("resume", help="resume from the current audio sample")
+    commands.add_parser("skip", help="skip the current chunk")
+    commands.add_parser("clear", help="clear queued chunks after the current chunk")
+    commands.add_parser("stop", help="finish the current chunk and stop")
+    commands.add_parser("interrupt", help="stop playback and the engine immediately")
+
     args = parser.parse_args(argv)
-    if args.enqueue is None:
-        if args.gap_ms is not None or args.voice != "af_heart":
-            parser.error("--voice and --gap-ms require --enqueue")
-        main()
-        return 0
     try:
-        queued = enqueue_text(args.enqueue, args.voice, args.gap_ms)
+        if args.command == "serve":
+            serve()
+        elif args.command == "speak":
+            start_engine()
+            print(enqueue_text(args.text, args.voice, args.gap_ms))
+        elif args.command == "setup":
+            install_models(args.model_dir)
+        elif args.command == "status":
+            print_status()
+        elif args.command == "pause":
+            BASE.mkdir(parents=True, exist_ok=True)
+            PAUSE.touch()
+        elif args.command == "resume":
+            resume()
+        else:
+            signal = {
+                "skip": SKIP,
+                "clear": CLEAR,
+                "stop": STOP,
+                "interrupt": INTERRUPT,
+            }[args.command]
+            send_control(signal)
     except (RuntimeError, ValueError) as error:
         parser.error(str(error))
-    print(queued)
     return 0
 
 

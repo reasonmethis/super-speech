@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 *.log
+*.egg-info/
 
 app/node_modules/
 app/dist/

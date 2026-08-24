@@ -14,13 +14,13 @@ class CallbackStop(Exception):
     pass
 
 
-def load_drainer(module_name: str):
-    module_path = Path(__file__).parents[1] / "drainer-kokoro.py"
+def load_engine(module_name: str):
+    module_path = Path(__file__).parents[1] / "super_speech_engine.py"
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     assert spec and spec.loader
-    drainer = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(drainer)
-    return drainer
+    engine = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(engine)
+    return engine
 
 
 def test_pause_keeps_the_next_sample_position() -> None:
@@ -60,28 +60,28 @@ def test_callback_stops_after_the_last_sample() -> None:
 
 
 def test_status_exposes_pause_current_chunk_and_queue(tmp_path: Path) -> None:
-    drainer = load_drainer("drainer_kokoro")
+    engine = load_engine("super_speech_engine_status")
 
-    drainer.QUEUE = tmp_path / "queue"
-    drainer.STATUS = tmp_path / "status.json"
-    drainer.PAUSE = tmp_path / "PAUSE"
-    drainer.QUEUE.mkdir()
-    drainer.PAUSE.touch()
-    (drainer.QUEUE / "001-af_heart-say.txt").write_text("Current words", encoding="utf-8")
+    engine.QUEUE = tmp_path / "queue"
+    engine.STATUS = tmp_path / "status.json"
+    engine.PAUSE = tmp_path / "PAUSE"
+    engine.QUEUE.mkdir()
+    engine.PAUSE.touch()
+    (engine.QUEUE / "001-af_heart-say.txt").write_text("Current words", encoding="utf-8")
     for number in range(2, 7):
-        (drainer.QUEUE / f"{number:03}-bm_fable-say.txt").write_text(
+        (engine.QUEUE / f"{number:03}-bm_fable-say.txt").write_text(
             f"Queued words {number}", encoding="utf-8"
         )
 
-    state = drainer.State()
+    state = engine.State()
     state.playing = "001-af_heart-say.txt"
     state.current_text = "Current words"
     state.current_voice = "af_heart"
     state.current_piece = 1
     state.current_piece_count = 2
 
-    drainer.publish_status("playing", state, force=True)
-    status = json.loads(drainer.STATUS.read_text(encoding="utf-8"))
+    engine.publish_status("playing", state, force=True)
+    status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
     assert status["state"] == "paused"
     assert status["current"]["text"] == "Current words"
@@ -93,15 +93,15 @@ def test_status_exposes_pause_current_chunk_and_queue(tmp_path: Path) -> None:
 
 
 def test_enqueue_text_reserves_the_next_queue_number(tmp_path: Path) -> None:
-    drainer = load_drainer("drainer_kokoro_enqueue")
+    engine = load_engine("super_speech_engine_enqueue")
 
-    drainer.QUEUE = tmp_path / "queue"
-    drainer.SPOKEN = tmp_path / "spoken"
-    drainer.QUEUE.mkdir()
-    drainer.SPOKEN.mkdir()
-    (drainer.SPOKEN / "007-af_heart-say.txt").write_text("Earlier", encoding="utf-8")
+    engine.QUEUE = tmp_path / "queue"
+    engine.SPOKEN = tmp_path / "spoken"
+    engine.QUEUE.mkdir()
+    engine.SPOKEN.mkdir()
+    (engine.SPOKEN / "007-af_heart-say.txt").write_text("Earlier", encoding="utf-8")
 
-    queued = drainer.enqueue_text("New words", "bm_fable", 650)
+    queued = engine.enqueue_text("New words", "bm_fable", 650)
 
     assert queued.name == "008-bm_fable-g650-say.txt"
     assert queued.read_text(encoding="utf-8") == "New words"
@@ -114,9 +114,40 @@ def test_enqueue_text_reserves_the_next_queue_number(tmp_path: Path) -> None:
 def test_enqueue_text_rejects_invalid_metadata(
     tmp_path: Path, voice: str, gap_ms: int | None
 ) -> None:
-    drainer = load_drainer("drainer_kokoro_invalid")
-    drainer.QUEUE = tmp_path / "queue"
-    drainer.SPOKEN = tmp_path / "spoken"
+    engine = load_engine("super_speech_engine_invalid")
+    engine.QUEUE = tmp_path / "queue"
+    engine.SPOKEN = tmp_path / "spoken"
 
     with pytest.raises(ValueError):
-        drainer.enqueue_text("New words", voice, gap_ms)
+        engine.enqueue_text("New words", voice, gap_ms)
+
+
+def test_speak_command_starts_engine_before_queueing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    engine = load_engine("super_speech_engine_cli")
+    queued = tmp_path / "001-af_heart-g300-say.txt"
+    calls: list[object] = []
+
+    monkeypatch.setattr(engine, "start_engine", lambda: calls.append("start"))
+
+    def enqueue(text: str, voice: str, gap_ms: int | None) -> Path:
+        calls.append((text, voice, gap_ms))
+        return queued
+
+    monkeypatch.setattr(engine, "enqueue_text", enqueue)
+
+    assert engine.cli(["speak", "Hello there", "--gap-ms", "300"]) == 0
+    assert calls == ["start", ("Hello there", "af_heart", 300)]
+    assert capsys.readouterr().out.strip() == str(queued)
+
+
+def test_pause_and_resume_commands_share_the_runtime_signal(tmp_path: Path) -> None:
+    engine = load_engine("super_speech_engine_pause")
+    engine.BASE = tmp_path
+    engine.PAUSE = tmp_path / "PAUSE"
+
+    assert engine.cli(["pause"]) == 0
+    assert engine.PAUSE.is_file()
+    assert engine.cli(["resume"]) == 0
+    assert not engine.PAUSE.exists()

@@ -23,15 +23,15 @@ extraResources:
     to: LICENSE.txt
   - from: ../THIRD_PARTY_NOTICES.md
     to: THIRD_PARTY_NOTICES.md
-  - from: ../drainer-kokoro.py
-    to: source/drainer-kokoro.py
+  - from: ../super_speech_engine.py
+    to: source/super_speech_engine.py
   - from: ../pauseable_audio.py
     to: source/pauseable_audio.py
   - from: ../requirements-runtime.txt
     to: source/requirements-runtime.txt
   - from: scripts/build_engine.py
     to: source/build_engine.py
-  - from: resources/agent-skill
+  - from: ../skills/super-speech
     to: integrations/super-speech
 win:
   icon: build/icon.ico

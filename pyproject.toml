@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "super-speech"
+version = "0.3.0"
+description = "Local Kokoro speech engine for desktop and headless use"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dynamic = ["dependencies"]
+
+[project.scripts]
+super-speech-engine = "super_speech_engine:cli"
+
+[tool.setuptools]
+py-modules = ["super_speech_engine", "pauseable_audio"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements-runtime.txt"] }
