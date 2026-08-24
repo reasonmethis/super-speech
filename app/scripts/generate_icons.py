@@ -38,12 +38,13 @@ def four_bars(
     maximum_height: int,
     *,
     baseline: int | None = None,
+    horizontal_offset: int = 0,
 ) -> tuple[Bar, ...]:
     count = 4
     width = 36
     gap = 28
     total_width = count * width + (count - 1) * gap
-    left = (CANVAS_SIZE - total_width) // 2
+    left = (CANVAS_SIZE - total_width) // 2 + horizontal_offset
     bars = []
     for index in range(count):
         height = round(
@@ -97,7 +98,7 @@ C3_VARIANT = IconVariant(
     "c3-carnival",
     "C3  Carnival",
     "Teal, orange, raspberry, indigo",
-    four_bars(72, 228),
+    four_bars(72, 228, horizontal_offset=-18),
     ((0, 154, 145), (245, 112, 51), (205, 55, 125), (65, 83, 190)),
 )
 
@@ -117,7 +118,7 @@ VARIANTS = (
     C3_VARIANT,
     C4_VARIANT,
 )
-SELECTED_VARIANT = A4_VARIANT
+SELECTED_VARIANT = C3_VARIANT
 
 
 def purple_icon_svg(variant: IconVariant) -> str:

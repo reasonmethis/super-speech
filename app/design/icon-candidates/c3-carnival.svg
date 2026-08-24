@@ -10,9 +10,9 @@
   <circle cx="256" cy="256" r="220" fill="#FFFFFF" filter="url(#badgeShadow)"/>
   <circle cx="256" cy="256" r="218" fill="none" stroke="#E8E5ED" stroke-width="4"/>
   <g filter="url(#barShadow)">
-    <rect x="142" y="220" width="36" height="72" rx="18" fill="#009A91"/>
-    <rect x="206" y="194" width="36" height="124" rx="18" fill="#F57033"/>
-    <rect x="270" y="168" width="36" height="176" rx="18" fill="#CD377D"/>
-    <rect x="334" y="142" width="36" height="228" rx="18" fill="#4153BE"/>
+    <rect x="124" y="220" width="36" height="72" rx="18" fill="#009A91"/>
+    <rect x="188" y="194" width="36" height="124" rx="18" fill="#F57033"/>
+    <rect x="252" y="168" width="36" height="176" rx="18" fill="#CD377D"/>
+    <rect x="316" y="142" width="36" height="228" rx="18" fill="#4153BE"/>
   </g>
 </svg>
