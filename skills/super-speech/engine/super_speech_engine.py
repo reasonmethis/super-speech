@@ -112,7 +112,7 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
-ENGINE_VERSION = "0.3.0"
+ENGINE_VERSION = "0.4.0"
 STATUS_VERSION = 3
 
 
