@@ -7,7 +7,7 @@ export type RuntimeState =
   | "setup_required"
   | "stopped";
 
-export const ENGINE_STATUS_VERSION = 3 as const;
+export const ENGINE_STATUS_VERSION = 4 as const;
 
 export interface QueueItem {
   id: string;
@@ -169,10 +169,16 @@ function timelineItem(
 export function timelineItems(
   status: Pick<EngineStatus, "current" | "queue" | "history">,
 ): TimelineItem[] {
+  const activeIds = new Set([
+    ...(status.current ? [status.current.id] : []),
+    ...status.queue.map(({ id }) => id),
+  ]);
   return [
     ...(status.current ? [timelineItem(status.current, "current", null)] : []),
     ...status.queue.map((item, index) => timelineItem(item, "upcoming", index + 1)),
-    ...status.history.map((item) => timelineItem(item, "history", null)),
+    ...status.history
+      .filter(({ id }) => !activeIds.has(id))
+      .map((item) => timelineItem(item, "history", null)),
   ];
 }
 

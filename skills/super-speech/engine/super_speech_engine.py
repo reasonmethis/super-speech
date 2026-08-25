@@ -112,8 +112,8 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
-ENGINE_VERSION = "0.4.1"
-STATUS_VERSION = 3
+ENGINE_VERSION = "0.4.2"
+STATUS_VERSION = 4
 
 
 class EngineInstanceLock:
@@ -321,14 +321,21 @@ def install_models(destination: Path = MODEL_DIR) -> None:
         print(f"installed {target}")
 
 
+def chunk_sequence(path: Path) -> int | None:
+    """Return the leading queue sequence, including legacy suffixed IDs."""
+    prefix = path.name.split("-", 1)[0]
+    match = re.match(r"\d+", prefix)
+    return int(match.group()) if match else None
+
+
 def _next_chunk_number() -> int:
     QUEUE.mkdir(parents=True, exist_ok=True)
     SPOKEN.mkdir(parents=True, exist_ok=True)
     existing = [*QUEUE.glob("*.txt"), *SPOKEN.glob("*.txt")]
     numbers = [
-        int(path.name.split("-", 1)[0])
+        sequence
         for path in existing
-        if path.name.split("-", 1)[0].isdigit()
+        if (sequence := chunk_sequence(path)) is not None
     ]
     numbers.extend(
         int(path.stem) for path in QUEUE.glob("*.reserve") if path.stem.isdigit()
@@ -381,9 +388,14 @@ def enqueue_text(text: str, voice: str, gap_ms: int | None = None) -> Path:
     return _reserve_queue_file(f"{voice}{gap}-say.txt", text)
 
 
-def chunk_sort_key(path: Path) -> tuple[int, str]:
-    prefix = path.name.split("-", 1)[0]
-    return (int(prefix) if prefix.isdigit() else sys.maxsize, path.name)
+def chunk_sort_key(path: Path) -> tuple[bool, int, str]:
+    sequence = chunk_sequence(path)
+    return (sequence is None, sequence or 0, path.name)
+
+
+def history_sort_key(path: Path) -> tuple[bool, int, str]:
+    sequence = chunk_sequence(path)
+    return (sequence is not None, sequence or 0, path.name)
 
 
 def log(msg: str) -> None:
@@ -685,7 +697,9 @@ def history_snapshot() -> tuple[int, list[dict[str, object]]]:
     global _history_dirty, _history_count, _history_items
     with _history_lock:
         if _history_dirty:
-            history_files = sorted(SPOKEN.glob("*.txt"), key=chunk_sort_key, reverse=True)
+            history_files = sorted(
+                SPOKEN.glob("*.txt"), key=history_sort_key, reverse=True
+            )
             items: list[dict[str, object]] = []
             for path in history_files[:HISTORY_LIMIT]:
                 try:
@@ -763,6 +777,8 @@ def publish_status(
             ),
         }
 
+    if playing and playback_state in {"idle", "ready"}:
+        playback_state = "playing"
     if PAUSE.exists() and playback_state in {"idle", "playing", "ready"}:
         playback_state = "paused"
     history_count, history_items = history_snapshot()
@@ -794,12 +810,20 @@ def _find_chunk(directory: Path, chunk_id: str) -> Path | None:
     return next((path for path in directory.glob("*.txt") if path.stem == chunk_id), None)
 
 
-def _copy_history_to_queue(source: Path) -> Path:
+def _queue_history_replay(source: Path) -> Path:
+    """Copy an archived item into the queue without creating another history ID."""
+    target = QUEUE / source.name
     try:
-        filename_tail = source.name.split("-", 1)[1]
-    except IndexError as error:
-        raise ValueError(f"invalid archived chunk filename: {source.name}") from error
-    return _reserve_queue_file(filename_tail, source.read_text(encoding="utf-8"))
+        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return target
+    try:
+        with os.fdopen(descriptor, "wb") as replay:
+            replay.write(source.read_bytes())
+    except OSError:
+        target.unlink(missing_ok=True)
+        raise
+    return target
 
 
 def _discard_buffer(buf: "queue.Queue") -> int:
@@ -837,7 +861,7 @@ def process_play_request(buf: "queue.Queue", st: State) -> str | None:
         replayed_from = _find_chunk(SPOKEN, chunk_id)
         if replayed_from is not None:
             try:
-                target = _copy_history_to_queue(replayed_from)
+                target = _queue_history_replay(replayed_from)
             except (OSError, RuntimeError, ValueError) as error:
                 log(f"could not replay {chunk_id}: {error}")
                 publish_play_ack(request_id, error=f"could not replay {chunk_id}")

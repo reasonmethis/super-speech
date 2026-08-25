@@ -50,6 +50,15 @@ def wait_for_file(path: Path, timeout: float = 45.0) -> None:
     raise RuntimeError(f"timed out waiting for {path.name}")
 
 
+def wait_for_replay(path: Path, previous_mtime: int, timeout: float = 45.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.is_file() and path.stat().st_mtime_ns > previous_mtime:
+            return
+        time.sleep(0.1)
+    raise RuntimeError(f"timed out waiting for replay of {path.name}")
+
+
 def stop_engine(environment: dict[str, str]) -> None:
     subprocess.run(
         [str(ENGINE), "interrupt"],
@@ -105,6 +114,8 @@ def main() -> None:
             )
             spoken = runtime / "spoken" / "001-af_heart-g0-say.txt"
             wait_for_file(spoken)
+            original_text = spoken.read_text(encoding="utf-8")
+            original_mtime = spoken.stat().st_mtime_ns
             replay_result = subprocess.run(
                 [str(ENGINE), "play", spoken.stem],
                 env=environment,
@@ -113,14 +124,15 @@ def main() -> None:
                 text=True,
             )
             replay_id = json.loads(replay_result.stdout).get("id")
-            if not isinstance(replay_id, str):
+            if replay_id != spoken.stem:
                 raise RuntimeError(
                     "frozen engine returned an invalid replay acknowledgement"
                 )
-            replayed = runtime / "spoken" / f"{replay_id}.txt"
-            wait_for_file(replayed)
-            if spoken.read_text(encoding="utf-8") != replayed.read_text(encoding="utf-8"):
+            wait_for_replay(spoken, original_mtime)
+            if spoken.read_text(encoding="utf-8") != original_text:
                 raise RuntimeError("frozen engine replay changed the archived text")
+            if len(list((runtime / "spoken").glob("*.txt"))) != 1:
+                raise RuntimeError("frozen engine replay duplicated the history entry")
         finally:
             stop_engine(environment)
 

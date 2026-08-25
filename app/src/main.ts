@@ -28,7 +28,7 @@ const demoStatus: RuntimeStatus = {
     {
       id: "015-bm_fable-say",
       filename: "015-bm_fable-say.txt",
-      text: "Click this chunk to play it now. Use its arrow to expand or collapse the complete text.",
+      text: "Click this speech item to play it now. Use its arrow to expand or collapse the complete text.",
       voice: "bm_fable",
     },
     {
@@ -64,7 +64,6 @@ const playbackTitle = requiredElement<HTMLHeadingElement>("playback-title");
 const currentText = requiredElement<HTMLParagraphElement>("current-text");
 const voicePill = requiredElement<HTMLSpanElement>("voice-pill");
 const voiceLabel = requiredElement<HTMLSpanElement>("voice-label");
-const piecePill = requiredElement<HTMLSpanElement>("piece-pill");
 const metadataRow = requiredElement<HTMLDivElement>("metadata-row");
 const queueCount = requiredElement<HTMLSpanElement>("queue-count");
 const clearQueueButton = requiredElement<HTMLButtonElement>("clear-queue-button");
@@ -132,9 +131,9 @@ function itemReference(item: TimelineItem): string {
     return "current speech";
   }
   if (item.kind === "upcoming") {
-    return `waiting chunk ${item.position}, ${summary}`;
+    return `waiting speech ${item.position}, ${summary}`;
   }
-  return `history chunk, ${summary}`;
+  return `history speech, ${summary}`;
 }
 
 function selectionWasApplied(status: RuntimeStatus, selection: PendingSelection): boolean {
@@ -308,15 +307,8 @@ function render(status: RuntimeStatus): void {
   if (current) {
     voiceLabel.textContent = formatVoice(current.voice);
     voicePill.classList.remove("is-hidden");
-    if (current.piece_count > 1) {
-      piecePill.textContent = `Part ${current.piece} of ${current.piece_count}`;
-      piecePill.classList.remove("is-hidden");
-    } else {
-      piecePill.classList.add("is-hidden");
-    }
   } else {
     voicePill.classList.add("is-hidden");
-    piecePill.classList.add("is-hidden");
   }
 
   queueCount.textContent = `${status.queue_count} waiting`;
@@ -329,7 +321,7 @@ function render(status: RuntimeStatus): void {
       ? "Clearing waiting speech"
       : clearFailed
         ? "Retry clearing waiting speech"
-        : `Clear ${status.queue_count} waiting ${status.queue_count === 1 ? "chunk" : "chunks"}; current chunk and playback state will not change`,
+        : `Clear ${status.queue_count} waiting speech ${status.queue_count === 1 ? "item" : "items"}; current speech and playback state will not change`,
   );
   clearQueueButton.textContent = clearPending
     ? "Clearing..."
@@ -424,7 +416,7 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     disclosure.type = "button";
     disclosure.setAttribute("aria-expanded", String(isExpanded));
     const accessibleText = document.createElement("div");
-    accessibleText.id = `chunk-full-${item.id}`;
+    accessibleText.id = `speech-full-${item.id}`;
     accessibleText.className = "sr-only queue-full-text";
     accessibleText.hidden = !isExpanded;
     accessibleText.setAttribute("role", "region");

@@ -70,7 +70,7 @@ ENGINE="$SKILL/runtime/venv/bin/super-speech-engine"
 "$ENGINE" status
 ```
 
-Confirm that the chunk moves from the skill's `runtime/queue/` to
+Confirm that the speech item moves from the skill's `runtime/queue/` to
 `runtime/spoken/` and that audio is audible. If playback fails, inspect
 `runtime/log.txt`, fix the reported dependency, model, or audio-device error,
 and retry the same `speak` command.
@@ -80,13 +80,13 @@ and retry the same `speak` command.
 The skill prefers a valid desktop engine manifest when the app is installed.
 Otherwise it uses the engine inside its own `runtime/venv/`. The two modes use
 the same commands and engine implementation, but keep separate runtime state.
-Queued headless chunks do not migrate into the desktop app.
+Queued headless items do not migrate into the desktop app.
 
 Each runtime allows one engine process to hold its lock. If an older process is
 still running during an upgrade, stop it before verification, then invoke
 `speak`; the new CLI starts the installed engine automatically.
 
-## Select or replay a chunk
+## Select or replay a speech item
 
 Run `super-speech-engine status` and use an exact `id` from `current`, `queue`,
 or the bounded `history` list:
@@ -96,12 +96,12 @@ or the bounded `history` list:
 ```
 
 The same command works in desktop and headless installations. Selecting an
-upcoming chunk starts it immediately and leaves the interrupted chunk queued.
-Selecting a history entry creates a new queued replay without changing the
-remaining queue or the original archive. Selection is distinct from pause and
-resume: pause preserves the exact audio sample, while a preempted chunk later
-restarts from its beginning. The command waits for engine acknowledgement and
-prints the exact resulting queue ID as JSON.
+upcoming item starts it immediately and leaves the interrupted item queued.
+Selecting a history entry queues a working copy under the same ID without
+changing the remaining queue, the original archive, or the number of History
+rows. Selection is distinct from pause and resume: pause preserves the exact
+audio sample, while a preempted item later restarts from its beginning. The
+command waits for engine acknowledgement and prints the resulting ID as JSON.
 
-History is an archive, not a completion log. It can contain chunks that
+History is an archive, not a completion log. It can contain items that
 finished, were skipped, or were cleared before playback.

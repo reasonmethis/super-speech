@@ -103,3 +103,22 @@ test("orders the timeline as current, upcoming, then history", () => {
     ],
   );
 });
+
+test("shows an archived replay only in its active timeline position", () => {
+  const replay = {
+    id: "007-bm_fable-say",
+    filename: "007-bm_fable-say.txt",
+    text: "Replay me",
+    voice: "bm_fable",
+    piece: 1,
+    piece_count: 1,
+    elapsed_seconds: 0,
+  };
+
+  assert.deepEqual(
+    timelineItems({ current: replay, queue: [], history: [replay] }).map(
+      ({ id, kind }) => ({ id, kind }),
+    ),
+    [{ id: replay.id, kind: "current" }],
+  );
+});

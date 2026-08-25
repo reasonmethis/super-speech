@@ -71,21 +71,26 @@ runtime sizes.
 
 ## Playback protocol
 
-`super-speech-engine status` publishes a version 3 snapshot with the current
-chunk, the complete upcoming queue, and up to 50 newest archived chunks. Every
-entry has an opaque `id`. The total `history_count` can exceed the bounded
+`super-speech-engine status` publishes a version 4 snapshot with the current
+speech item, the complete upcoming queue, and up to 50 newest archived items. A
+speech item is one `speak` invocation, one timeline row, and one replay target.
+Sentence pieces are an internal synthesis and buffering detail, not separate
+history entries. The current item remains active while the engine waits for its
+next rendered piece. Every entry has an opaque `id`. The total `history_count`
+can exceed the bounded
 `history` array.
-The archive currently includes completed, skipped, and cleared chunks, so the
+The archive currently includes completed, skipped, and cleared items, so the
 UI calls it History rather than claiming every entry played to completion.
 
 `super-speech-engine play <id>` is the one selection command. The engine, not
 Electron, validates the identifier and owns every queue or archive mutation:
 
-- selecting the current chunk resumes it from the same sample when paused
-- selecting an upcoming chunk preempts the current output, plays the selection,
-  then later restarts the interrupted chunk from its beginning
-- selecting an archived chunk copies it to a new queue entry, preserving both
-  the original archive and the untouched upcoming queue
+- selecting the current item resumes it from the same sample when paused
+- selecting an upcoming item preempts the current output, plays the selection,
+  then later restarts the interrupted item from its beginning
+- selecting an archived item queues a working copy under the same ID, preserving
+  the original archive and the untouched upcoming queue without adding another
+  History row when replay finishes
 
 Selection invalidates rendered pieces that no longer match the chosen order.
 Each selection uses an atomic request file and a private acknowledgement that

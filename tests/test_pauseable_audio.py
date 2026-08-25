@@ -122,12 +122,36 @@ def test_status_exposes_pause_current_chunk_and_queue(tmp_path: Path) -> None:
     assert status["history"] == []
 
 
+def test_status_stays_playing_while_the_current_item_waits_for_its_next_piece(
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_status_between_pieces")
+    configure_runtime(engine, tmp_path)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    current.write_text("Two sentences. Still one speech item.", encoding="utf-8")
+    state = engine.State()
+    state.playing = current.name
+    state.current_text = current.read_text(encoding="utf-8")
+    state.current_voice = "af_heart"
+    state.current_piece = 1
+    state.current_piece_count = 2
+
+    engine.publish_status("idle", state, force=True)
+    status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
+
+    assert status["state"] == "playing"
+    assert status["current"]["id"] == current.stem
+
+
 def test_status_command_retries_a_transient_windows_read_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     engine = load_engine("super_speech_engine_status_retry")
     configure_runtime(engine, tmp_path)
-    engine.STATUS.write_text('{"version": 3, "state": "idle"}', encoding="utf-8")
+    engine.STATUS.write_text(
+        json.dumps({"version": engine.STATUS_VERSION, "state": "idle"}),
+        encoding="utf-8",
+    )
     original_read_text = Path.read_text
     attempts = 0
 
@@ -340,7 +364,10 @@ def test_start_engine_rejects_the_previous_selection_protocol(
     )
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
 
-    with pytest.raises(RuntimeError, match="unsupported protocol version 2"):
+    with pytest.raises(
+        RuntimeError,
+        match=rf"unsupported protocol version {engine.STATUS_VERSION - 1}",
+    ):
         engine.start_engine()
 
 
@@ -469,7 +496,7 @@ def test_selecting_upcoming_chunk_preempts_without_archiving_current(
     assert acceptance["id"] == selected.stem
 
 
-def test_replaying_history_copies_it_to_a_new_selected_queue_entry(
+def test_replaying_history_reuses_its_id_without_duplicating_history(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     engine = load_engine("super_speech_engine_play_history")
@@ -479,13 +506,16 @@ def test_replaying_history_copies_it_to_a_new_selected_queue_entry(
     archived.write_text("Say this again", encoding="utf-8")
     state = engine.State()
 
-    engine.request_play(archived.stem)
+    request_id = engine.request_play(archived.stem)
     assert engine.process_play_request(queue.Queue(), state) == "select"
 
-    replay = engine.QUEUE / "008-bm_fable-g350-say.txt"
+    replay = engine.QUEUE / archived.name
     assert archived.read_text(encoding="utf-8") == "Say this again"
     assert replay.read_text(encoding="utf-8") == "Say this again"
     assert engine.claim_next_queued_chunk(state) == replay
+    assert engine.wait_for_play_ack(request_id, timeout=0.1)["id"] == archived.stem
+    assert engine.archive(replay)
+    assert [path.name for path in engine.SPOKEN.glob("*.txt")] == [archived.name]
 
 
 def test_play_ack_reports_a_missing_chunk(
@@ -594,11 +624,10 @@ def test_engine_loop_replays_history_before_the_existing_queue(
 
     engine.run_engine_loop()
 
-    replay = engine.SPOKEN / "008-bm_fable-say.txt"
     assert played_samples == [8, 1]
     assert archived.read_text(encoding="utf-8") == "Replay me"
-    assert replay.read_text(encoding="utf-8") == "Replay me"
     assert (engine.SPOKEN / queued.name).read_text(encoding="utf-8") == "First queued"
+    assert len(list(engine.SPOKEN.glob("*.txt"))) == 2
     assert not list(engine.QUEUE.glob("*.txt"))
 
 
@@ -843,6 +872,27 @@ def test_status_exposes_bounded_recent_history(tmp_path: Path) -> None:
     assert status["version"] == engine.STATUS_VERSION
     assert status["history_count"] == 3
     assert [item["text"] for item in status["history"]] == ["History 3", "History 2"]
+
+
+def test_history_orders_legacy_suffixed_ids_by_their_leading_sequence(
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_history_legacy_order")
+    configure_runtime(engine, tmp_path)
+    for name in (
+        "8552a-af_bella-say.txt",
+        "10223-af_heart-say.txt",
+        "10224-af_heart-say.txt",
+    ):
+        (engine.SPOKEN / name).write_text(name, encoding="utf-8")
+
+    _, history = engine.history_snapshot()
+
+    assert [item["id"].split("-", 1)[0] for item in history] == [
+        "10224",
+        "10223",
+        "8552a",
+    ]
 
 
 def test_history_snapshot_refreshes_only_after_an_archive_move(tmp_path: Path) -> None:
