@@ -7,7 +7,7 @@ export type RuntimeState =
   | "setup_required"
   | "stopped";
 
-export const ENGINE_STATUS_VERSION = 4 as const;
+export const ENGINE_STATUS_VERSION = 5 as const;
 
 export interface QueueItem {
   id: string;
@@ -182,10 +182,34 @@ export function timelineItems(
   ];
 }
 
+export function moveQueueItemBefore<T extends { id: string }>(
+  items: readonly T[],
+  id: string,
+  beforeId: string | null,
+): T[] {
+  const source = items.find((item) => item.id === id);
+  if (!source || beforeId === id) {
+    return [...items];
+  }
+  const reordered = items.filter((item) => item.id !== id);
+  if (beforeId === null) {
+    reordered.push(source);
+    return reordered;
+  }
+  const destination = reordered.findIndex((item) => item.id === beforeId);
+  if (destination < 0) {
+    return [...items];
+  }
+  reordered.splice(destination, 0, source);
+  return reordered;
+}
+
 export interface DesktopApi {
   getStatus(): Promise<RuntimeStatus>;
   setPaused(paused: boolean): Promise<RuntimeStatus>;
   playChunk(id: string): Promise<PlayAcceptance>;
+  moveQueueItem(id: string, beforeId: string | null): Promise<void>;
+  archiveQueueItem(id: string): Promise<void>;
   clearQueue(): Promise<void>;
   openSetup(): Promise<void>;
   minimize(): Promise<void>;
@@ -203,6 +227,8 @@ export const IPC_CHANNELS = {
   getStatus: "runtime:get-status",
   setPaused: "runtime:set-paused",
   playChunk: "runtime:play-chunk",
+  moveQueueItem: "runtime:move-queue-item",
+  archiveQueueItem: "runtime:archive-queue-item",
   clearQueue: "runtime:clear-queue",
   openSetup: "app:open-setup",
   minimize: "window:minimize",

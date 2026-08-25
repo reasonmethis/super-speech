@@ -71,7 +71,7 @@ runtime sizes.
 
 ## Playback protocol
 
-`super-speech-engine status` publishes a version 4 snapshot with the current
+`super-speech-engine status` publishes a version 5 snapshot with the current
 speech item, the complete upcoming queue, and up to 50 newest archived items. A
 speech item is one `speak` invocation, one timeline row, and one replay target.
 Sentence pieces are an internal synthesis and buffering detail, not separate
@@ -98,6 +98,14 @@ reports the exact resulting queue ID or an engine rejection. If several
 requests arrive before one poll, the engine rejects the superseded requests
 and accepts the newest one, so every CLI caller terminates. No HTTP, WebSocket,
 second queue, or renderer playback state machine is needed.
+
+Queue order is stored separately from the opaque chunk filenames. The engine
+filters that saved order against live queue files and appends new arrivals, so
+dragging never renames an ID and concurrent `speak` calls remain safe.
+`move <id> [before-id]` changes that order, while `archive <id>` moves one
+waiting item into History. Both use unique request files and exact
+acknowledgements. The engine invalidates buffered waiting audio after either
+mutation while preserving every rendered piece of the current item.
 
 ## Distribution boundaries
 

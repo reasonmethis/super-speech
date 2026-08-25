@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   ENGINE_STATUS_VERSION,
+  moveQueueItemBefore,
   parseEngineStatus,
   parseEngineProcessStatus,
   parsePlayAcceptance,
@@ -120,5 +121,22 @@ test("shows an archived replay only in its active timeline position", () => {
       ({ id, kind }) => ({ id, kind }),
     ),
     [{ id: replay.id, kind: "current" }],
+  );
+});
+
+test("moves a queue item before a stable ID or to the end", () => {
+  const items = [{ id: "one" }, { id: "two" }, { id: "three" }];
+
+  assert.deepEqual(
+    moveQueueItemBefore(items, "three", "one").map(({ id }) => id),
+    ["three", "one", "two"],
+  );
+  assert.deepEqual(
+    moveQueueItemBefore(items, "one", null).map(({ id }) => id),
+    ["two", "three", "one"],
+  );
+  assert.deepEqual(
+    moveQueueItemBefore(items, "two", "missing").map(({ id }) => id),
+    ["one", "two", "three"],
   );
 });

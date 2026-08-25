@@ -105,3 +105,15 @@ command waits for engine acknowledgement and prints the resulting ID as JSON.
 
 History is an archive, not a completion log. It can contain items that
 finished, were skipped, or were cleared before playback.
+
+Use exact `queue` IDs to reorder or archive waiting items:
+
+```powershell
+& $engine move '016-af_bella-say' '015-bm_fable-say'
+& $engine move '015-bm_fable-say'
+& $engine archive '016-af_bella-say'
+```
+
+The first command inserts one item before another. Omitting the second ID moves
+the item to the end. `archive` moves only that waiting item into History. These
+commands never rename IDs or change current playback.

@@ -201,6 +201,8 @@ The CLI owns playback controls. Do not create or remove runtime files directly:
 | `pause` | Pause immediately at the current audio sample |
 | `resume` | Resume from the same sample |
 | `play <id>` | Play an exact `current`, `queue`, or `history` ID from `status` |
+| `move <id> [before-id]` | Reorder a waiting item; omit `before-id` to move it last |
+| `archive <id>` | Move one waiting item into History |
 | `skip` | Archive the current chunk and continue |
 | `clear` | Archive every queued chunk except the one currently playing |
 | `stop` | Finish the current chunk and stop the engine |

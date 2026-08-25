@@ -7,7 +7,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-
+from typing import Any, Callable
 
 APP_DIR = Path(__file__).resolve().parents[1]
 ENGINE = APP_DIR / "build-resources" / "engine" / (
@@ -59,6 +59,31 @@ def wait_for_replay(path: Path, previous_mtime: int, timeout: float = 45.0) -> N
     raise RuntimeError(f"timed out waiting for replay of {path.name}")
 
 
+def read_status(environment: dict[str, str]) -> dict[str, Any]:
+    result = subprocess.run(
+        [str(ENGINE), "status"],
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def wait_for_status(
+    environment: dict[str, str],
+    predicate: Callable[[dict[str, Any]], bool],
+    timeout: float = 45.0,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = read_status(environment)
+        if predicate(status):
+            return status
+        time.sleep(0.1)
+    raise RuntimeError("timed out waiting for frozen engine status")
+
+
 def stop_engine(environment: dict[str, str]) -> None:
     subprocess.run(
         [str(ENGINE), "interrupt"],
@@ -69,14 +94,7 @@ def stop_engine(environment: dict[str, str]) -> None:
     )
     stopped_deadline = time.monotonic() + 10
     while time.monotonic() < stopped_deadline:
-        status_result = subprocess.run(
-            [str(ENGINE), "status"],
-            env=environment,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        status = json.loads(status_result.stdout)
+        status = read_status(environment)
         engine_pid = status.get("engine_pid")
         if status.get("state") == "stopped" and not process_exists(engine_pid):
             return
@@ -133,6 +151,58 @@ def main() -> None:
                 raise RuntimeError("frozen engine replay changed the archived text")
             if len(list((runtime / "spoken").glob("*.txt"))) != 1:
                 raise RuntimeError("frozen engine replay duplicated the history entry")
+
+            subprocess.run([str(ENGINE), "pause"], env=environment, check=True)
+            for text in ("Queue first.", "Queue second.", "Queue third."):
+                subprocess.run(
+                    [
+                        str(ENGINE),
+                        "speak",
+                        text,
+                        "--voice",
+                        "af_heart",
+                        "--gap-ms",
+                        "0",
+                    ],
+                    env=environment,
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                )
+            queued_status = wait_for_status(
+                environment,
+                lambda status: status.get("current") is not None
+                and status.get("queue_count", 0) >= 2,
+            )
+            queue_items = queued_status["queue"]
+            source_id = queue_items[-1]["id"]
+            before_id = queue_items[0]["id"]
+            subprocess.run(
+                [str(ENGINE), "move", source_id, before_id],
+                env=environment,
+                check=True,
+            )
+            moved_status = wait_for_status(
+                environment,
+                lambda status: status.get("queue")
+                and status["queue"][0].get("id") == source_id,
+            )
+            if moved_status["queue"][0]["id"] != source_id:
+                raise RuntimeError("frozen engine did not persist queue order")
+
+            subprocess.run(
+                [str(ENGINE), "archive", source_id],
+                env=environment,
+                check=True,
+            )
+            wait_for_status(
+                environment,
+                lambda status: all(
+                    item.get("id") != source_id for item in status.get("queue", [])
+                )
+                and any(
+                    item.get("id") == source_id for item in status.get("history", [])
+                ),
+            )
         finally:
             stop_engine(environment)
 

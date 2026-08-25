@@ -45,9 +45,9 @@ work session without having to reconstruct the product decisions.
 - [x] Keep the current chunk and sample position when the user only pauses
 - Add previous and next controls using the identifier-based selection command
 - [x] Add replay through the same identifier-based selection command
-- Add remove controls
+- [x] Add per-item move-to-History controls
 - [x] Add clear controls to the desktop UI
-- Add drag-to-reorder controls
+- [x] Add mouse and keyboard queue reordering
 - Show when each chunk was queued, when it started, and when it finished
 - Preserve enough rendered audio history to make replay instant
 - Record completed, skipped, and cleared outcomes before labeling history as played

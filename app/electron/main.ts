@@ -262,6 +262,14 @@ async function playChunk(id: string): Promise<PlayAcceptance> {
   return acceptance;
 }
 
+async function moveQueueItem(id: string, beforeId: string | null): Promise<void> {
+  await runEngineCommand("move", id, ...(beforeId ? [beforeId] : []));
+}
+
+async function archiveQueueItem(id: string): Promise<void> {
+  await runEngineCommand("archive", id);
+}
+
 async function clearQueue(): Promise<void> {
   await runEngineCommand("clear");
 }
@@ -571,6 +579,13 @@ function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.getStatus, getStatus);
   ipcMain.handle(IPC_CHANNELS.setPaused, (_event, paused: boolean) => setPaused(paused));
   ipcMain.handle(IPC_CHANNELS.playChunk, (_event, id: string) => playChunk(id));
+  ipcMain.handle(
+    IPC_CHANNELS.moveQueueItem,
+    (_event, id: string, beforeId: string | null) => moveQueueItem(id, beforeId),
+  );
+  ipcMain.handle(IPC_CHANNELS.archiveQueueItem, (_event, id: string) =>
+    archiveQueueItem(id)
+  );
   ipcMain.handle(IPC_CHANNELS.clearQueue, clearQueue);
   ipcMain.handle(IPC_CHANNELS.openSetup, () => shell.openExternal(SETUP_URL));
   ipcMain.handle(IPC_CHANNELS.minimize, (event) => {

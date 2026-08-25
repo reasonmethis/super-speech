@@ -476,11 +476,11 @@ body[data-state="loading"] .playback-copy {
 .clear-queue-button {
   height: 25px;
   padding: 0 9px;
-  border: 1px solid transparent;
+  border: 1px solid var(--line);
   border-radius: 9px;
-  color: #8d899a;
-  background: transparent;
-  font-size: 10px;
+  color: #aaa7b6;
+  background: rgba(255, 255, 255, 0.035);
+  font-size: 11px;
   cursor: pointer;
 }
 
@@ -519,6 +519,26 @@ body[data-state="loading"] .playback-copy {
   scrollbar-width: thin;
 }
 
+.history-drop-shelf {
+  display: none;
+  min-height: 34px;
+  flex: 0 0 34px;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed color-mix(in srgb, var(--accent) 50%, transparent);
+  border-radius: 10px;
+  color: var(--accent-bright);
+  background: color-mix(in srgb, var(--accent) 12%, #111019);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.queue-list.is-queue-dragging .history-drop-shelf {
+  display: flex;
+}
+
 .queue-list.has-more {
   mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 12px), transparent 100%);
 }
@@ -537,6 +557,7 @@ body[data-state="loading"] .playback-copy {
 }
 
 .queue-item {
+  position: relative;
   display: grid;
   width: 100%;
   min-height: 51px;
@@ -548,6 +569,10 @@ body[data-state="loading"] .playback-copy {
   color: inherit;
   flex: 0 0 auto;
   transition: border-color 140ms ease, background 140ms ease;
+}
+
+.queue-item.is-upcoming {
+  grid-template-columns: 26px minmax(0, 1fr) 32px 38px;
 }
 
 .queue-item.is-current {
@@ -577,7 +602,38 @@ body[data-state="loading"] .playback-copy {
   border-color: color-mix(in srgb, var(--carnival-orange) 46%, transparent);
 }
 
+.queue-item.is-mutating {
+  border-color: color-mix(in srgb, var(--accent) 44%, transparent);
+}
+
+.queue-item.is-dragging {
+  opacity: 0.48;
+}
+
+.queue-item.drop-before::before,
+.queue-item.drop-after::after {
+  position: absolute;
+  right: 6px;
+  left: 6px;
+  z-index: 2;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--accent-bright);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 65%, transparent);
+  content: "";
+}
+
+.queue-item.drop-before::before {
+  top: -5px;
+}
+
+.queue-item.drop-after::after {
+  bottom: -5px;
+}
+
 .queue-play,
+.queue-drag-handle,
+.queue-remove,
 .queue-disclosure {
   padding: 0;
   border: 0;
@@ -603,6 +659,68 @@ body[data-state="loading"] .playback-copy {
 
 .queue-play[aria-disabled="true"] {
   cursor: default;
+}
+
+.queue-drag-handle,
+.queue-remove {
+  display: grid;
+  min-width: 0;
+  place-items: start center;
+  padding-top: 17px;
+  cursor: pointer;
+}
+
+.queue-drag-handle {
+  cursor: grab;
+}
+
+.queue-drag-handle:active {
+  cursor: grabbing;
+}
+
+.queue-drag-handle span {
+  width: 10px;
+  height: 18px;
+  background-image: radial-gradient(circle, #777386 1.25px, transparent 1.5px);
+  background-position: 0 0;
+  background-size: 5px 5px;
+}
+
+.queue-remove span {
+  position: relative;
+  width: 12px;
+  height: 12px;
+}
+
+.queue-remove span::before,
+.queue-remove span::after {
+  position: absolute;
+  top: 5px;
+  left: 1px;
+  width: 10px;
+  height: 1.5px;
+  border-radius: 999px;
+  background: #858194;
+  content: "";
+}
+
+.queue-remove span::before {
+  transform: rotate(45deg);
+}
+
+.queue-remove span::after {
+  transform: rotate(-45deg);
+}
+
+.queue-drag-handle:hover,
+.queue-remove:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.queue-drag-handle:disabled,
+.queue-remove:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 
 .queue-disclosure {
@@ -674,6 +792,21 @@ body[data-state="loading"] .playback-copy {
   font-weight: 650;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.history-drop-target {
+  min-height: 22px;
+  padding: 3px 5px;
+  border-radius: 8px;
+}
+
+.history-drop-target.is-history-drop,
+.queue-item.is-history.is-history-drop {
+  color: var(--accent-bright);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  outline: 1px dashed color-mix(in srgb, var(--accent) 52%, transparent);
+  outline-offset: -1px;
 }
 
 .timeline-divider::after {

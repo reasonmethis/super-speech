@@ -2,6 +2,7 @@ import "./styles.css";
 import {
   ENGINE_STATUS_VERSION,
   INITIAL_STATUS,
+  moveQueueItemBefore,
   timelineItems,
   type RuntimeStatus,
   type TimelineItem,
@@ -78,6 +79,11 @@ interface PendingSelection {
   timeoutId: number;
 }
 
+interface PendingQueueMutation {
+  action: "move" | "archive";
+  id: string;
+}
+
 let currentStatus = desktopApi ? INITIAL_STATUS : demoStatus;
 let commandPending = false;
 let pendingSelection: PendingSelection | null = null;
@@ -88,6 +94,9 @@ let clearBaselineIds = new Set<string>();
 let clearTimeoutId: number | null = null;
 let expandedItemId: string | null = null;
 let renderedTimelineKey: string | null = null;
+let pendingQueueMutation: PendingQueueMutation | null = null;
+let failedQueueMutationId: string | null = null;
+let draggedQueueItemId: string | null = null;
 
 function requiredElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -110,6 +119,14 @@ function formatVoice(voice: string): string {
 }
 
 function timelineAction(item: TimelineItem, pending: boolean, failed: boolean): string {
+  if (pendingQueueMutation?.id === item.id) {
+    return pendingQueueMutation.action === "archive"
+      ? "Moving to History..."
+      : "Moving...";
+  }
+  if (failedQueueMutationId === item.id) {
+    return "Could not move / Try again";
+  }
   if (pending) {
     return pendingSelection?.acceptedAt ? "Selected / Up next" : "Starting...";
   }
@@ -313,7 +330,8 @@ function render(status: RuntimeStatus): void {
 
   queueCount.textContent = `${status.queue_count} waiting`;
   clearQueueButton.classList.toggle("is-hidden", status.queue_count === 0);
-  clearQueueButton.setAttribute("aria-disabled", String(clearPending));
+  clearQueueButton.disabled = clearPending || pendingQueueMutation !== null;
+  clearQueueButton.setAttribute("aria-disabled", String(clearQueueButton.disabled));
   clearQueueButton.setAttribute("aria-busy", String(clearPending));
   clearQueueButton.setAttribute(
     "aria-label",
@@ -326,9 +344,134 @@ function render(status: RuntimeStatus): void {
   clearQueueButton.textContent = clearPending
     ? "Clearing..."
     : clearFailed
-      ? "Retry clear"
-      : "Clear";
+      ? "Retry clear all"
+      : "Clear all";
   renderTimeline(timelineItems(status), status.history_count);
+}
+
+function clearQueueDropIndicators(): void {
+  for (const element of queueList.querySelectorAll(
+    ".drop-before, .drop-after, .is-history-drop",
+  )) {
+    element.classList.remove("drop-before", "drop-after", "is-history-drop");
+  }
+}
+
+function beginQueueDrag(event: DragEvent, id: string, row: HTMLElement): void {
+  if (pendingQueueMutation || clearPending) {
+    event.preventDefault();
+    return;
+  }
+  draggedQueueItemId = id;
+  queueList.classList.add("is-queue-dragging");
+  row.classList.add("is-dragging");
+  event.dataTransfer?.setData("text/plain", id);
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = "move";
+  }
+}
+
+function endQueueDrag(): void {
+  draggedQueueItemId = null;
+  queueList.classList.remove("is-queue-dragging");
+  clearQueueDropIndicators();
+  for (const row of queueList.querySelectorAll(".is-dragging")) {
+    row.classList.remove("is-dragging");
+  }
+}
+
+function dragLeftElement(event: DragEvent, element: HTMLElement): boolean {
+  return !(
+    event.relatedTarget instanceof Node && element.contains(event.relatedTarget)
+  );
+}
+
+function configureQueueDropTarget(row: HTMLElement, targetId: string): void {
+  row.addEventListener("dragover", (event) => {
+    if (!draggedQueueItemId || pendingQueueMutation) {
+      return;
+    }
+    event.preventDefault();
+    clearQueueDropIndicators();
+    const bounds = row.getBoundingClientRect();
+    row.classList.add(
+      event.clientY < bounds.top + bounds.height / 2
+        ? "drop-before"
+        : "drop-after",
+    );
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "move";
+    }
+  });
+  row.addEventListener("dragleave", (event) => {
+    if (dragLeftElement(event, row)) {
+      row.classList.remove("drop-before", "drop-after");
+    }
+  });
+  row.addEventListener("drop", (event) => {
+    if (!draggedQueueItemId) {
+      return;
+    }
+    event.preventDefault();
+    const bounds = row.getBoundingClientRect();
+    const after = event.clientY >= bounds.top + bounds.height / 2;
+    const ids = currentStatus.queue.map(({ id }) => id);
+    const targetIndex = ids.indexOf(targetId);
+    const beforeId = after ? (ids[targetIndex + 1] ?? null) : targetId;
+    const sourceId = draggedQueueItemId;
+    endQueueDrag();
+    void moveWaitingItem(sourceId, beforeId);
+  });
+}
+
+function configureHistoryDropTarget(element: HTMLElement): void {
+  element.addEventListener("dragover", (event) => {
+    if (!draggedQueueItemId || pendingQueueMutation) {
+      return;
+    }
+    event.preventDefault();
+    clearQueueDropIndicators();
+    element.classList.add("is-history-drop");
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "move";
+    }
+  });
+  element.addEventListener("dragleave", (event) => {
+    if (dragLeftElement(event, element)) {
+      element.classList.remove("is-history-drop");
+    }
+  });
+  element.addEventListener("drop", (event) => {
+    if (!draggedQueueItemId) {
+      return;
+    }
+    event.preventDefault();
+    const sourceId = draggedQueueItemId;
+    endQueueDrag();
+    void archiveWaitingItem(sourceId);
+  });
+}
+
+function handleQueueReorderKey(event: KeyboardEvent, id: string): void {
+  const ids = currentStatus.queue.map((item) => item.id);
+  const index = ids.indexOf(id);
+  if (index < 0 || pendingQueueMutation || clearPending) {
+    return;
+  }
+  let beforeId: string | null | undefined;
+  if (event.key === "ArrowUp" && index > 0) {
+    beforeId = ids[index - 1];
+  } else if (event.key === "ArrowDown" && index < ids.length - 1) {
+    beforeId = ids[index + 2] ?? null;
+  } else if (event.key === "Home" && index > 0) {
+    beforeId = ids[0];
+  } else if (event.key === "End" && index < ids.length - 1) {
+    beforeId = null;
+  }
+  if (beforeId !== undefined) {
+    event.preventDefault();
+    void moveWaitingItem(id, beforeId);
+  }
 }
 
 function renderTimeline(items: TimelineItem[], historyTotal: number): void {
@@ -337,6 +480,13 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
   }
   if (!items.some((item) => item.id === failedChunkId)) {
     failedChunkId = null;
+  }
+  if (
+    !items.some(
+      (item) => item.kind === "upcoming" && item.id === failedQueueMutationId,
+    )
+  ) {
+    failedQueueMutationId = null;
   }
   // Preserve row nodes across polling so hover, focus, expansion, and in-progress clicks survive
   const timelineKey = JSON.stringify([
@@ -355,7 +505,12 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     ? document.activeElement.closest<HTMLElement>(".queue-item")
     : null;
   const focusedItemId = focusedControl?.dataset.itemId;
-  const focusedDisclosure = document.activeElement?.classList.contains("queue-disclosure");
+  const focusedControlClass = [
+    "queue-drag-handle",
+    "queue-play",
+    "queue-remove",
+    "queue-disclosure",
+  ].find((className) => document.activeElement?.classList.contains(className));
   queueList.replaceChildren();
   if (items.length === 0) {
     const empty = document.createElement("div");
@@ -367,27 +522,65 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
   }
 
   const visibleHistory = items.filter(({ kind }) => kind === "history").length;
+  const hasUpcoming = items.some(({ kind }) => kind === "upcoming");
+  if (hasUpcoming) {
+    const historyDropShelf = document.createElement("div");
+    historyDropShelf.className = "history-drop-shelf history-drop-target";
+    historyDropShelf.textContent = "Drop in History";
+    configureHistoryDropTarget(historyDropShelf);
+    queueList.append(historyDropShelf);
+  }
   let historyDividerAdded = false;
+  const appendHistoryDivider = (): void => {
+    historyDividerAdded = true;
+    const divider = document.createElement("div");
+    divider.className = "timeline-divider history-drop-target";
+    const historyCount = visibleHistory < historyTotal
+      ? `${visibleHistory} of ${historyTotal}`
+      : String(historyTotal);
+    divider.innerHTML = `<span>History</span><span>${historyCount}</span>`;
+    configureHistoryDropTarget(divider);
+    queueList.append(divider);
+  };
   for (const item of items) {
     if (item.kind === "history" && !historyDividerAdded) {
-      historyDividerAdded = true;
-      const divider = document.createElement("div");
-      divider.className = "timeline-divider";
-      const historyCount = visibleHistory < historyTotal
-        ? `${visibleHistory} of ${historyTotal}`
-        : String(historyTotal);
-      divider.innerHTML = `<span>History</span><span>${historyCount}</span>`;
-      queueList.append(divider);
+      appendHistoryDivider();
     }
 
     const row = document.createElement("div");
     row.className = "queue-item";
     row.dataset.itemId = item.id;
     const isCurrent = item.kind === "current";
+    const isUpcoming = item.kind === "upcoming";
     const isExpanded = item.id === expandedItemId;
+    row.classList.add(`is-${item.kind}`);
     if (isCurrent) {
-      row.classList.add("is-current");
       row.setAttribute("aria-current", "true");
+    }
+
+    const rowControls: HTMLElement[] = [];
+    if (isUpcoming) {
+      const dragHandle = document.createElement("button");
+      dragHandle.className = "queue-drag-handle";
+      dragHandle.type = "button";
+      dragHandle.draggable = true;
+      dragHandle.title = "Drag to reorder";
+      dragHandle.setAttribute(
+        "aria-label",
+        `Reorder ${itemReference(item)}. Drag, or use the arrow keys`,
+      );
+      dragHandle.innerHTML = '<span aria-hidden="true"></span>';
+      dragHandle.addEventListener("dragstart", (event) => {
+        beginQueueDrag(event, item.id, row);
+      });
+      dragHandle.addEventListener("dragend", endQueueDrag);
+      dragHandle.addEventListener("keydown", (event) => {
+        handleQueueReorderKey(event, item.id);
+      });
+      rowControls.push(dragHandle);
+      configureQueueDropTarget(row, item.id);
+    } else if (item.kind === "history") {
+      configureHistoryDropTarget(row);
     }
 
     const play = document.createElement("button");
@@ -438,17 +631,32 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     });
 
     play.addEventListener("click", () => void playTimelineItem(item));
+    rowControls.push(play);
+    if (isUpcoming) {
+      const remove = document.createElement("button");
+      remove.className = "queue-remove";
+      remove.type = "button";
+      remove.title = "Move to History";
+      remove.setAttribute("aria-label", `Move ${itemReference(item)} to History`);
+      remove.innerHTML = '<span aria-hidden="true"></span>';
+      remove.addEventListener("click", () => void archiveWaitingItem(item.id));
+      rowControls.push(remove);
+    }
+    rowControls.push(disclosure, accessibleText);
     row.classList.toggle("is-expanded", isExpanded);
-    row.append(play, disclosure, accessibleText);
+    row.append(...rowControls);
     queueList.append(row);
+  }
+  if (hasUpcoming && !historyDividerAdded) {
+    appendHistoryDivider();
   }
   queueList.scrollTop = previousScrollTop;
   updateTimelineRows(items);
   updateTimelineFade();
   if (focusedItemId) {
     const row = queueList.querySelector<HTMLElement>(`[data-item-id="${focusedItemId}"]`);
-    const preferred = focusedDisclosure
-      ? row?.querySelector<HTMLButtonElement>(".queue-disclosure")
+    const preferred = focusedControlClass
+      ? row?.querySelector<HTMLButtonElement>(`.${focusedControlClass}`)
       : row?.querySelector<HTMLButtonElement>(".queue-play");
     const fallback = row?.querySelector<HTMLButtonElement>(".queue-disclosure");
     (preferred?.disabled ? fallback : preferred)?.focus({ preventScroll: true });
@@ -459,6 +667,7 @@ function updateTimelineRows(items: TimelineItem[]): void {
   const itemById = new Map(items.map((item) => [item.id, item]));
   const pendingId = pendingSelection?.sourceId ?? null;
   const commandInFlight = pendingSelection !== null && pendingSelection.acceptedAt === null;
+  const queueCommandInFlight = pendingQueueMutation !== null;
   for (const row of queueList.querySelectorAll<HTMLElement>(".queue-item")) {
     const item = itemById.get(row.dataset.itemId ?? "");
     if (!item) {
@@ -468,10 +677,15 @@ function updateTimelineRows(items: TimelineItem[]): void {
     const selected = pending && !commandInFlight;
     const failed = item.id === failedChunkId;
     row.classList.toggle("is-pending", pending);
-    row.classList.toggle("is-error", failed);
+    row.classList.toggle("is-mutating", pendingQueueMutation?.id === item.id);
+    row.classList.toggle(
+      "is-error",
+      failed || failedQueueMutationId === item.id,
+    );
     const play = row.querySelector<HTMLButtonElement>(".queue-play");
     if (play) {
-      play.disabled = item.kind === "current" || commandInFlight;
+      play.disabled =
+        item.kind === "current" || commandInFlight || queueCommandInFlight;
       play.setAttribute("aria-disabled", String(play.disabled));
       play.setAttribute("aria-busy", String(pending && commandInFlight));
       play.setAttribute(
@@ -479,6 +693,22 @@ function updateTimelineRows(items: TimelineItem[]): void {
         selected
           ? `Selected and up next: ${itemReference(item)}. Activate to select again`
           : playActionLabel(item),
+      );
+    }
+    const dragHandle = row.querySelector<HTMLButtonElement>(".queue-drag-handle");
+    if (dragHandle) {
+      dragHandle.disabled = queueCommandInFlight || clearPending;
+      dragHandle.draggable = !dragHandle.disabled;
+    }
+    const remove = row.querySelector<HTMLButtonElement>(".queue-remove");
+    if (remove) {
+      remove.disabled = queueCommandInFlight || clearPending;
+      remove.setAttribute(
+        "aria-busy",
+        String(
+          pendingQueueMutation?.action === "archive" &&
+            pendingQueueMutation.id === item.id,
+        ),
       );
     }
     const meta = row.querySelector<HTMLElement>(".queue-meta");
@@ -515,6 +745,7 @@ function setExpandedItem(id: string | null): void {
 async function playTimelineItem(item: TimelineItem): Promise<void> {
   if (
     item.kind === "current" ||
+    pendingQueueMutation !== null ||
     (pendingSelection !== null && pendingSelection.acceptedAt === null)
   ) {
     return;
@@ -569,6 +800,78 @@ async function playTimelineItem(item: TimelineItem): Promise<void> {
   }
 }
 
+async function moveWaitingItem(id: string, beforeId: string | null): Promise<void> {
+  if (pendingQueueMutation || clearPending) {
+    return;
+  }
+  const reordered = moveQueueItemBefore(currentStatus.queue, id, beforeId);
+  const previousIds = currentStatus.queue.map((item) => item.id);
+  if (reordered.every((item, index) => item.id === previousIds[index])) {
+    return;
+  }
+  pendingQueueMutation = { action: "move", id };
+  failedQueueMutationId = null;
+  commandStatus.textContent = "";
+  render(currentStatus);
+  try {
+    if (desktopApi) {
+      await desktopApi.moveQueueItem(id, beforeId);
+    } else {
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+    }
+    currentStatus = { ...currentStatus, queue: reordered };
+    pendingQueueMutation = null;
+    render(currentStatus);
+    void refreshStatus();
+  } catch (error) {
+    console.error("Could not reorder waiting speech", error);
+    pendingQueueMutation = null;
+    failedQueueMutationId = id;
+    commandStatus.textContent = "Could not reorder waiting speech. Try again.";
+    render(currentStatus);
+  }
+}
+
+async function archiveWaitingItem(id: string): Promise<void> {
+  if (pendingQueueMutation || clearPending) {
+    return;
+  }
+  const item = currentStatus.queue.find((queued) => queued.id === id);
+  if (!item) {
+    return;
+  }
+  pendingQueueMutation = { action: "archive", id };
+  failedQueueMutationId = null;
+  commandStatus.textContent = "";
+  render(currentStatus);
+  try {
+    if (desktopApi) {
+      await desktopApi.archiveQueueItem(id);
+    } else {
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+    }
+    const alreadyInHistory = currentStatus.history.some((entry) => entry.id === id);
+    currentStatus = {
+      ...currentStatus,
+      queue_count: Math.max(0, currentStatus.queue_count - 1),
+      queue: currentStatus.queue.filter((queued) => queued.id !== id),
+      history_count: alreadyInHistory
+        ? currentStatus.history_count
+        : currentStatus.history_count + 1,
+      history: [item, ...currentStatus.history.filter((entry) => entry.id !== id)].slice(0, 50),
+    };
+    pendingQueueMutation = null;
+    render(currentStatus);
+    void refreshStatus();
+  } catch (error) {
+    console.error("Could not move waiting speech to History", error);
+    pendingQueueMutation = null;
+    failedQueueMutationId = id;
+    commandStatus.textContent = "Could not move waiting speech to History. Try again.";
+    render(currentStatus);
+  }
+}
+
 async function refreshStatus(): Promise<void> {
   if (!desktopApi) {
     render(currentStatus);
@@ -617,7 +920,7 @@ playbackButton.addEventListener("click", async () => {
 });
 
 clearQueueButton.addEventListener("click", async () => {
-  if (clearPending || currentStatus.queue_count === 0) {
+  if (clearPending || pendingQueueMutation || currentStatus.queue_count === 0) {
     return;
   }
   clearPending = true;
