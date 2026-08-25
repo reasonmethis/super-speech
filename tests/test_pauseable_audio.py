@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import queue
 import sys
 from pathlib import Path
 
@@ -25,6 +26,20 @@ def load_engine(module_name: str):
     engine = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(engine)
     return engine
+
+
+def configure_runtime(engine, tmp_path: Path) -> None:
+    engine.BASE = tmp_path
+    engine.QUEUE = tmp_path / "queue"
+    engine.SPOKEN = tmp_path / "spoken"
+    engine.FAILED = tmp_path / "failed"
+    engine.LOG = tmp_path / "log.txt"
+    engine.PAUSE = tmp_path / "PAUSE"
+    engine.STOP = tmp_path / "STOP"
+    engine.PLAY = tmp_path / "PLAY.json"
+    engine.STATUS = tmp_path / "status.json"
+    engine.QUEUE.mkdir()
+    engine.SPOKEN.mkdir()
 
 
 def test_pause_keeps_the_next_sample_position() -> None:
@@ -66,10 +81,7 @@ def test_callback_stops_after_the_last_sample() -> None:
 def test_status_exposes_pause_current_chunk_and_queue(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_status")
 
-    engine.QUEUE = tmp_path / "queue"
-    engine.STATUS = tmp_path / "status.json"
-    engine.PAUSE = tmp_path / "PAUSE"
-    engine.QUEUE.mkdir()
+    configure_runtime(engine, tmp_path)
     engine.PAUSE.touch()
     (engine.QUEUE / "001-af_heart-say.txt").write_text("Current words", encoding="utf-8")
     full_queue_text = "Queued words " * 40
@@ -96,21 +108,31 @@ def test_status_exposes_pause_current_chunk_and_queue(tmp_path: Path) -> None:
     assert len(status["queue"]) == 5
     assert status["queue"][0]["text"] == full_queue_text.strip()
     assert status["queue"][-1]["text"] == "Queued words 6"
+    assert status["version"] == 2
+    assert status["history_count"] == 0
+    assert status["history"] == []
 
 
 def test_enqueue_text_reserves_the_next_queue_number(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_enqueue")
 
-    engine.QUEUE = tmp_path / "queue"
-    engine.SPOKEN = tmp_path / "spoken"
-    engine.QUEUE.mkdir()
-    engine.SPOKEN.mkdir()
+    configure_runtime(engine, tmp_path)
     (engine.SPOKEN / "007-af_heart-say.txt").write_text("Earlier", encoding="utf-8")
 
     queued = engine.enqueue_text("New words", "bm_fable", 650)
 
     assert queued.name == "008-bm_fable-g650-say.txt"
     assert queued.read_text(encoding="utf-8") == "New words"
+
+
+def test_enqueue_text_skips_a_number_reserved_by_another_writer(tmp_path: Path) -> None:
+    engine = load_engine("super_speech_engine_enqueue_race")
+    configure_runtime(engine, tmp_path)
+    (engine.QUEUE / "001.reserve").touch()
+
+    queued = engine.enqueue_text("New words", "af_heart")
+
+    assert queued.name == "002-af_heart-say.txt"
 
 
 @pytest.mark.parametrize(
@@ -121,8 +143,7 @@ def test_enqueue_text_rejects_invalid_metadata(
     tmp_path: Path, voice: str, gap_ms: int | None
 ) -> None:
     engine = load_engine("super_speech_engine_invalid")
-    engine.QUEUE = tmp_path / "queue"
-    engine.SPOKEN = tmp_path / "spoken"
+    configure_runtime(engine, tmp_path)
 
     with pytest.raises(ValueError):
         engine.enqueue_text("New words", voice, gap_ms)
@@ -148,12 +169,267 @@ def test_speak_command_starts_engine_before_queueing(
     assert capsys.readouterr().out.strip() == str(queued)
 
 
+def test_start_engine_waits_for_fresh_status_after_startup_cleanup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_start_ready")
+    configure_runtime(engine, tmp_path)
+    engine.MODEL_PATH = tmp_path / "model.onnx"
+    engine.VOICES_PATH = tmp_path / "voices.bin"
+    engine.MODEL_PATH.touch()
+    engine.VOICES_PATH.touch()
+    fake_pid = 4321
+    engine.STATUS.write_text(
+        json.dumps({"engine_pid": fake_pid, "updated_at": 0}), encoding="utf-8"
+    )
+    running_checks = 0
+    sleeps = 0
+
+    def engine_running() -> bool:
+        nonlocal running_checks
+        running_checks += 1
+        return running_checks > 1
+
+    class FakeProcess:
+        pid = fake_pid
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    def publish_ready(_seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        engine.STATUS.write_text(
+            json.dumps({"engine_pid": fake_pid, "updated_at": engine.time.time() + 1}),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(engine, "engine_is_running", engine_running)
+    monkeypatch.setattr(engine.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+    monkeypatch.setattr(engine.time, "sleep", publish_ready)
+
+    engine.start_engine()
+
+    assert sleeps == 1
+
+
 def test_pause_and_resume_commands_share_the_runtime_signal(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_pause")
-    engine.BASE = tmp_path
-    engine.PAUSE = tmp_path / "PAUSE"
+    configure_runtime(engine, tmp_path)
 
     assert engine.cli(["pause"]) == 0
     assert engine.PAUSE.is_file()
     assert engine.cli(["resume"]) == 0
     assert not engine.PAUSE.exists()
+
+
+def test_play_payload_is_last_write_wins_without_unlinking_a_new_request(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_play_signal")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+
+    engine.request_play("001-af_heart-say")
+    claimed = engine.claim_play_request()
+    assert claimed is not None
+    engine.request_play("002-bm_fable-say")
+
+    first = json.loads(claimed.read_text(encoding="utf-8"))
+    claimed.unlink()
+    assert first == {"id": "001-af_heart-say"}
+    assert engine.take_play_request() == "002-bm_fable-say"
+    assert engine.take_play_request() is None
+
+
+def test_play_command_starts_engine_then_publishes_the_requested_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_play_cli")
+    configure_runtime(engine, tmp_path)
+    calls: list[object] = []
+    monkeypatch.setattr(engine, "start_engine", lambda: calls.append("start"))
+    monkeypatch.setattr(engine, "request_play", lambda chunk_id: calls.append(chunk_id))
+
+    assert engine.cli(["play", "007-bm_fable-say"]) == 0
+    assert calls == ["start", "007-bm_fable-say"]
+
+
+def test_play_request_rejects_a_non_id_before_touching_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_play_invalid")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+
+    with pytest.raises(ValueError):
+        engine.request_play("../spoken/007")
+
+    assert not engine.PLAY.exists()
+
+
+def test_playing_current_chunk_resumes_without_reordering(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_play_current")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    current.write_text("Current", encoding="utf-8")
+    engine.PAUSE.touch()
+    engine.STOP.touch()
+    buffered: queue.Queue = queue.Queue()
+    buffered.put("banked piece")
+    state = engine.State()
+    state.playing = current.name
+    state.claimed.add(current.name)
+    state.saw_stop = True
+
+    engine.request_play(current.stem)
+    assert engine.process_play_request(buffered, state) is None
+
+    assert not engine.PAUSE.exists()
+    assert not engine.STOP.exists()
+    assert not state.saw_stop
+    assert state.claimed == {current.name}
+    assert buffered.get_nowait() == "banked piece"
+
+
+def test_selecting_upcoming_chunk_preempts_without_archiving_current(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_play_upcoming")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    selected = engine.QUEUE / "003-bm_fable-say.txt"
+    current.write_text("Current", encoding="utf-8")
+    selected.write_text("Selected", encoding="utf-8")
+    buffered: queue.Queue = queue.Queue()
+    buffered.put("banked piece")
+    state = engine.State()
+    state.playing = current.name
+    state.claimed.update({current.name, selected.name})
+
+    engine.request_play(selected.stem)
+    assert engine.process_play_request(buffered, state) == "select"
+
+    assert current.is_file()
+    assert not (engine.SPOKEN / current.name).exists()
+    assert state.claimed == set()
+    assert state.preferred_name == selected.name
+    assert state.selected_name == selected.name
+    assert buffered.empty()
+
+    assert engine.finish_chunk_playback(current, "select", False, state)
+    assert state.playing is None
+    assert current.is_file()
+    assert not (engine.SPOKEN / current.name).exists()
+    assert engine.claim_next_queued_chunk(state) == selected
+    state.claimed.discard(selected.name)
+    assert engine.claim_next_queued_chunk(state) == current
+
+
+def test_replaying_history_copies_it_to_a_new_selected_queue_entry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_play_history")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    archived = engine.SPOKEN / "007-bm_fable-g350-say.txt"
+    archived.write_text("Say this again", encoding="utf-8")
+    state = engine.State()
+
+    engine.request_play(archived.stem)
+    assert engine.process_play_request(queue.Queue(), state) == "select"
+
+    replay = engine.QUEUE / "008-bm_fable-g350-say.txt"
+    assert archived.read_text(encoding="utf-8") == "Say this again"
+    assert replay.read_text(encoding="utf-8") == "Say this again"
+    assert state.preferred_name == replay.name
+    assert state.selected_name == replay.name
+
+
+def test_idle_selection_replaces_worker_claims_and_becomes_next(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_play_idle_claimed")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    earlier = engine.QUEUE / "001-af_heart-say.txt"
+    selected = engine.QUEUE / "002-bm_fable-say.txt"
+    earlier.write_text("Earlier", encoding="utf-8")
+    selected.write_text("Selected", encoding="utf-8")
+    state = engine.State()
+    state.claimed.add(earlier.name)
+
+    engine.request_play(selected.stem)
+    assert engine.process_play_request(queue.Queue(), state) == "select"
+
+    assert state.playing is None
+    assert state.claimed == set()
+    assert engine.claim_next_queued_chunk(state) == selected
+
+
+def test_selection_interrupts_an_inter_chunk_gap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_play_gap")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    selected = engine.QUEUE / "002-bm_fable-say.txt"
+    selected.write_text("Selected", encoding="utf-8")
+    state = engine.State()
+
+    engine.request_play(selected.stem)
+
+    assert engine.gap_wait(1.0, queue.Queue(), state) == "select"
+    assert state.preferred_name == selected.name
+
+
+def test_failed_archive_keeps_chunk_claimed_instead_of_repeating(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_archive_failure")
+    configure_runtime(engine, tmp_path)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    current.write_text("Current", encoding="utf-8")
+    state = engine.State()
+    state.playing = current.name
+    state.claimed.add(current.name)
+    monkeypatch.setattr(engine, "archive", lambda path: False)
+    monkeypatch.setattr(engine, "archive_failed", lambda path: False)
+
+    assert engine.finish_chunk_playback(current, "done", True, state)
+
+    assert state.playing is None
+    assert state.claimed == {current.name}
+    assert engine.claim_next_queued_chunk(state) is None
+
+
+def test_startup_cleanup_removes_stale_play_request(tmp_path: Path) -> None:
+    engine = load_engine("super_speech_engine_clear_play")
+    configure_runtime(engine, tmp_path)
+    engine.PLAY.write_text('{"id":"001-af_heart-say"}', encoding="utf-8")
+
+    engine.clear_transient_signals()
+
+    assert not engine.PLAY.exists()
+
+
+def test_status_exposes_bounded_recent_history(tmp_path: Path) -> None:
+    engine = load_engine("super_speech_engine_history_status")
+    configure_runtime(engine, tmp_path)
+    engine.HISTORY_LIMIT = 2
+    for number in (1, 2, 3):
+        (engine.SPOKEN / f"{number:03d}-af_heart-say.txt").write_text(
+            f"History {number}", encoding="utf-8"
+        )
+
+    engine.publish_status("idle", engine.State(), force=True)
+    status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
+
+    assert status["version"] == 2
+    assert status["history_count"] == 3
+    assert [item["text"] for item in status["history"]] == ["History 3", "History 2"]

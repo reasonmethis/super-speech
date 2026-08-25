@@ -26,6 +26,8 @@ behavior. Signal files in BASE are the engine's private process protocol:
                continue with next
   CLEAR      - drop the buffer and every non-playing queued chunk (-> spoken/);
                never truncates the currently playing chunk
+  PLAY.json  - select a queued or recent chunk by ID; selecting another chunk
+               preempts the current one without marking it spoken
   WARMUP     - synthesize a throwaway phrase to pay the first-inference cost
 
 Env:
@@ -71,6 +73,7 @@ PAUSE = BASE / "PAUSE"
 INTERRUPT = BASE / "INTERRUPT"
 SKIP = BASE / "SKIP"
 CLEAR = BASE / "CLEAR"
+PLAY = BASE / "PLAY.json"
 WARMUP = BASE / "WARMUP"
 HEARTBEAT = BASE / "engine.alive"
 STATUS = BASE / "status.json"
@@ -103,6 +106,7 @@ POLL_INTERVAL = 0.2   # idle poll cadence
 SIGNAL_TICK = 0.02    # match the output block for responsive playback controls
 CHUNK_GAP_S = 0.2     # silence before each chunk (natural rhythm); override per-file with -gMMM-
 BUFFER_MAX = 8        # pieces of pre-rendered audio the worker may bank ahead
+HISTORY_LIMIT = 50    # recent spoken entries published to desktop clients
 SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
@@ -181,6 +185,7 @@ def start_engine() -> None:
         )
 
     BASE.mkdir(parents=True, exist_ok=True)
+    launch_started_at = time.time()
     with LOG.open("a", encoding="utf-8") as engine_log:
         options: dict[str, object] = {
             "cwd": str(BASE),
@@ -201,8 +206,18 @@ def start_engine() -> None:
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         if engine_is_running():
-            return
+            try:
+                status = json.loads(STATUS.read_text(encoding="utf-8"))
+            except (OSError, ValueError, json.JSONDecodeError):
+                status = {}
+            updated_at = status.get("updated_at")
+            if status.get("engine_pid") == process.pid and isinstance(
+                updated_at, (int, float)
+            ) and updated_at >= launch_started_at:
+                return
         if process.poll() is not None:
+            if engine_is_running():
+                return
             break
         time.sleep(0.05)
     raise RuntimeError(f"engine failed to start; inspect {LOG}")
@@ -244,6 +259,52 @@ def install_models(destination: Path = MODEL_DIR) -> None:
         print(f"installed {target}")
 
 
+def _next_chunk_number() -> int:
+    QUEUE.mkdir(parents=True, exist_ok=True)
+    SPOKEN.mkdir(parents=True, exist_ok=True)
+    existing = [*QUEUE.glob("*.txt"), *SPOKEN.glob("*.txt")]
+    numbers = [
+        int(path.name.split("-", 1)[0])
+        for path in existing
+        if path.name.split("-", 1)[0].isdigit()
+    ]
+    numbers.extend(
+        int(path.stem) for path in QUEUE.glob("*.reserve") if path.stem.isdigit()
+    )
+    return max(numbers, default=0) + 1
+
+
+def _reserve_queue_file(filename_tail: str, text: str) -> Path:
+    number = _next_chunk_number()
+    for candidate in range(number, number + 100):
+        reservation = QUEUE / f"{candidate:03d}.reserve"
+        try:
+            reservation_descriptor = os.open(
+                reservation, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+            )
+        except FileExistsError:
+            continue
+        os.close(reservation_descriptor)
+        path = QUEUE / f"{candidate:03d}-{filename_tail}"
+        try:
+            try:
+                descriptor = os.open(
+                    path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+                )
+            except FileExistsError:
+                continue
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as chunk:
+                    chunk.write(text)
+                return path
+            except Exception:
+                path.unlink(missing_ok=True)
+                raise
+        finally:
+            reservation.unlink(missing_ok=True)
+    raise RuntimeError("could not reserve a speech queue number")
+
+
 def enqueue_text(text: str, voice: str, gap_ms: int | None = None) -> Path:
     """Atomically append one chunk to the shared speech queue."""
     text = text.strip()
@@ -254,26 +315,13 @@ def enqueue_text(text: str, voice: str, gap_ms: int | None = None) -> Path:
     if gap_ms is not None and not 0 <= gap_ms <= 1500:
         raise ValueError("gap must be between 0 and 1500 milliseconds")
 
-    QUEUE.mkdir(parents=True, exist_ok=True)
-    SPOKEN.mkdir(parents=True, exist_ok=True)
-    existing = [*QUEUE.glob("*.txt"), *SPOKEN.glob("*.txt")]
-    numbers = [
-        int(path.name.split("-", 1)[0])
-        for path in existing
-        if path.name.split("-", 1)[0].isdigit()
-    ]
-    number = max(numbers, default=0) + 1
     gap = f"-g{gap_ms}" if gap_ms is not None else ""
-    for candidate in range(number, number + 100):
-        path = QUEUE / f"{candidate:03d}-{voice}{gap}-say.txt"
-        try:
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            continue
-        with os.fdopen(descriptor, "w", encoding="utf-8") as chunk:
-            chunk.write(text)
-        return path
-    raise RuntimeError("could not reserve a speech queue number")
+    return _reserve_queue_file(f"{voice}{gap}-say.txt", text)
+
+
+def chunk_sort_key(path: Path) -> tuple[int, str]:
+    prefix = path.name.split("-", 1)[0]
+    return (int(prefix) if prefix.isdigit() else sys.maxsize, path.name)
 
 
 def log(msg: str) -> None:
@@ -366,20 +414,82 @@ def consume(signal: Path) -> bool:
     return True
 
 
-def archive(path: Path) -> None:
+def request_play(chunk_id: str) -> None:
+    """Atomically publish the latest requested chunk ID for the engine."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", chunk_id):
+        raise ValueError("chunk ID contains invalid characters")
+    if not engine_is_running():
+        raise RuntimeError("engine is not running")
+
+    BASE.mkdir(parents=True, exist_ok=True)
+    temp_path = PLAY.with_name(
+        f"{PLAY.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp"
+    )
     try:
-        os.replace(str(path), str(SPOKEN / path.name))
-    except OSError:
-        pass  # already moved (e.g. by CLEAR) — harmless
+        temp_path.write_text(json.dumps({"id": chunk_id}), encoding="utf-8")
+        os.replace(temp_path, PLAY)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
-def archive_failed(path: Path) -> None:
+def claim_play_request() -> Path | None:
+    """Atomically detach one request so a newer writer cannot be unlinked."""
+    claimed = PLAY.with_name(
+        f"{PLAY.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.claim"
+    )
+    try:
+        os.replace(PLAY, claimed)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        log(f"could not claim play request: {error}")
+        return None
+    return claimed
+
+
+def take_play_request() -> str | None:
+    claimed = claim_play_request()
+    if claimed is None:
+        return None
+    try:
+        payload = json.loads(claimed.read_text(encoding="utf-8"))
+        chunk_id = payload.get("id")
+        if not isinstance(chunk_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9_-]+", chunk_id
+        ):
+            raise ValueError("invalid chunk ID")
+        return chunk_id
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        log(f"invalid play request: {error}")
+        return None
+    finally:
+        claimed.unlink(missing_ok=True)
+
+
+def archive(path: Path) -> bool:
+    destination = SPOKEN / path.name
+    try:
+        SPOKEN.mkdir(parents=True, exist_ok=True)
+        os.replace(str(path), str(destination))
+        return True
+    except FileNotFoundError as error:
+        if not path.exists() and destination.exists():
+            return True
+        log(f"archive error {path.name}: {error}")
+    except OSError as error:
+        log(f"archive error {path.name}: {error}")
+    return False
+
+
+def archive_failed(path: Path) -> bool:
     """Move a chunk that couldn't be synthesized into failed/ so the queue doesn't loop on it."""
     try:
         FAILED.mkdir(parents=True, exist_ok=True)
         os.replace(str(path), str(FAILED / path.name))
+        return True
     except OSError as e:
         log(f"archive_failed error {path.name}: {e}")
+        return False
 
 
 def warmup(kokoro) -> None:
@@ -405,6 +515,8 @@ class State:
         self.current_piece = 0
         self.current_piece_count = 0
         self.skip_name: str | None = None  # skipped chunk whose banked pieces must be dropped
+        self.preferred_name: str | None = None  # next chunk the worker should claim
+        self.selected_name: str | None = None  # selected chunk skips the normal queue gap once
         self.stop = threading.Event()    # tell the worker to exit
         self.saw_stop = False            # latched STOP — finish current chunk, then exit
 
@@ -434,7 +546,9 @@ def publish_status(
         current_piece_count = st.current_piece_count
 
     queue_files = [
-        path for path in sorted(QUEUE.glob("*.txt")) if path.name != playing
+        path
+        for path in sorted(QUEUE.glob("*.txt"), key=chunk_sort_key)
+        if path.name != playing
     ]
     queue_items = []
     for path in queue_files:
@@ -469,14 +583,32 @@ def publish_status(
 
     if PAUSE.exists() and playback_state in {"idle", "playing", "ready"}:
         playback_state = "paused"
+    history_files = sorted(SPOKEN.glob("*.txt"), key=chunk_sort_key, reverse=True)
+    history_items = []
+    for path in history_files[:HISTORY_LIMIT]:
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        history_items.append(
+            {
+                "id": path.stem,
+                "filename": path.name,
+                "text": text,
+                "voice": voice_from_name(path.name),
+            }
+        )
+
     payload = {
-        "version": 1,
+        "version": 2,
         "state": playback_state,
         "updated_at": now,
         "engine_pid": os.getpid(),
         "current": current,
         "queue_count": len(queue_files),
         "queue": queue_items,
+        "history_count": len(history_files),
+        "history": history_items,
     }
     temp_path = STATUS.with_name(f"{STATUS.name}.{os.getpid()}.tmp")
     try:
@@ -490,11 +622,79 @@ def publish_status(
             pass
 
 
-def drop_to_spoken(path: Path) -> None:
+def _find_chunk(directory: Path, chunk_id: str) -> Path | None:
+    return next((path for path in directory.glob("*.txt") if path.stem == chunk_id), None)
+
+
+def _copy_history_to_queue(source: Path) -> Path:
     try:
-        os.replace(str(path), str(SPOKEN / path.name))
-    except OSError:
-        pass
+        filename_tail = source.name.split("-", 1)[1]
+    except IndexError as error:
+        raise ValueError(f"invalid archived chunk filename: {source.name}") from error
+    return _reserve_queue_file(filename_tail, source.read_text(encoding="utf-8"))
+
+
+def _discard_buffer(buf: "queue.Queue") -> int:
+    discarded = 0
+    while True:
+        try:
+            buf.get_nowait()
+            discarded += 1
+        except queue.Empty:
+            return discarded
+
+
+def process_play_request(buf: "queue.Queue", st: State) -> str | None:
+    """Resolve one selected ID and return ``select`` when playback must yield."""
+    chunk_id = take_play_request()
+    if chunk_id is None:
+        return None
+
+    with st.lock:
+        playing = st.playing
+    if playing and Path(playing).stem == chunk_id:
+        STOP.unlink(missing_ok=True)
+        PAUSE.unlink(missing_ok=True)
+        with st.lock:
+            st.saw_stop = False
+        log(f"PLAY current {chunk_id}; resumed")
+        return None
+
+    target = _find_chunk(QUEUE, chunk_id)
+    replayed_from: Path | None = None
+    if target is None:
+        replayed_from = _find_chunk(SPOKEN, chunk_id)
+        if replayed_from is not None:
+            try:
+                target = _copy_history_to_queue(replayed_from)
+            except (OSError, RuntimeError, ValueError) as error:
+                log(f"could not replay {chunk_id}: {error}")
+                return None
+    if target is None:
+        log(f"PLAY ignored; chunk not found: {chunk_id}")
+        return None
+
+    STOP.unlink(missing_ok=True)
+    PAUSE.unlink(missing_ok=True)
+    with st.lock:
+        discarded = _discard_buffer(buf)
+        st.claimed.clear()
+        st.preferred_name = target.name
+        st.selected_name = target.name
+        st.skip_name = None
+        st.saw_stop = False
+    if replayed_from is None:
+        log(f"PLAY selected {target.name}; discarded {discarded} banked piece(s)")
+    else:
+        log(
+            f"PLAY replay {replayed_from.name} as {target.name}; "
+            f"discarded {discarded} banked piece(s)"
+        )
+    return "select"
+
+
+def drop_to_spoken(path: Path) -> bool:
+    return archive(path) or archive_failed(path)
 
 
 def do_clear(buf: "queue.Queue", st: State) -> None:
@@ -503,6 +703,7 @@ def do_clear(buf: "queue.Queue", st: State) -> None:
     truncates mid-chunk."""
     with st.lock:
         keep = []
+        blocked: set[str] = set()
         n = 0
         while True:
             try:
@@ -512,22 +713,53 @@ def do_clear(buf: "queue.Queue", st: State) -> None:
             if st.playing and entry[0].name == st.playing:
                 keep.append(entry)
             else:
-                drop_to_spoken(entry[0])
-                n += 1
+                if drop_to_spoken(entry[0]):
+                    n += 1
+                else:
+                    blocked.add(entry[0].name)
         for entry in keep:
             buf.put_nowait(entry)
         for f in glob.glob(str(QUEUE / "*.txt")):
             if os.path.basename(f) == st.playing:
                 continue
-            drop_to_spoken(Path(f))
-            n += 1
-        st.claimed = {st.playing} if st.playing else set()
+            path = Path(f)
+            if drop_to_spoken(path):
+                n += 1
+            else:
+                blocked.add(path.name)
+        st.claimed = blocked | ({st.playing} if st.playing else set())
+        st.preferred_name = None
+        st.selected_name = None
     log(f"CLEAR; dropped {n} buffered/queued chunk(s)")
 
 
 def _claimed(st: State, name: str) -> bool:
     with st.lock:
         return (name in st.claimed or name == st.playing) and st.skip_name != name
+
+
+def claim_next_queued_chunk(st: State) -> Path | None:
+    with st.lock:
+        candidates = sorted(QUEUE.glob("*.txt"), key=chunk_sort_key)
+        if st.preferred_name:
+            preferred = next(
+                (path for path in candidates if path.name == st.preferred_name),
+                None,
+            )
+            if preferred is not None:
+                candidates.remove(preferred)
+                candidates.insert(0, preferred)
+            else:
+                st.preferred_name = None
+                st.selected_name = None
+        for path in candidates:
+            if path.name in st.claimed or path.name == st.playing:
+                continue
+            st.claimed.add(path.name)
+            if path.name == st.preferred_name:
+                st.preferred_name = None
+            return path
+    return None
 
 
 def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
@@ -538,15 +770,7 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
     while not st.stop.is_set():
         if consume(WARMUP):
             warmup(kokoro)
-        nxt: Path | None = None
-        with st.lock:
-            for f in sorted(glob.glob(str(QUEUE / "*.txt"))):
-                name = os.path.basename(f)
-                if name in st.claimed or name == st.playing:
-                    continue
-                nxt = Path(f)
-                st.claimed.add(name)
-                break
+        nxt = claim_next_queued_chunk(st)
         if nxt is None:
             heartbeat()
             time.sleep(POLL_INTERVAL)
@@ -560,9 +784,9 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
             continue
         if not text:
             log(f"empty {nxt.name}, archiving")
-            archive(nxt)
-            with st.lock:
-                st.claimed.discard(nxt.name)
+            if archive(nxt):
+                with st.lock:
+                    st.claimed.discard(nxt.name)
             continue
         voice = voice_from_name(nxt.name)
         pieces = split_text(text, SPLIT_CHARS)
@@ -577,9 +801,9 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
             except Exception as e:
                 log(f"synth error {nxt.name}[{idx}] (voice={voice}): {e}")
                 if delivered == 0:
-                    archive_failed(nxt)
-                    with st.lock:
-                        st.claimed.discard(nxt.name)
+                    if archive_failed(nxt):
+                        with st.lock:
+                            st.claimed.discard(nxt.name)
                     break
                 # Mid-chunk failure: deliver an empty terminal piece so the
                 # consumer still archives and releases the chunk.
@@ -614,6 +838,8 @@ def gap_wait(seconds: float, buf: "queue.Queue", st: State) -> str | None:
     remaining = seconds
     last_tick = time.monotonic()
     while remaining > 0:
+        if process_play_request(buf, st) == "select":
+            return "select"
         if consume(INTERRUPT):
             return "interrupt"
         if consume(SKIP):
@@ -675,6 +901,9 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
             if consume(INTERRUPT):
                 stream.abort()
                 return "interrupt"
+            if process_play_request(buf, st) == "select":
+                stream.abort()
+                return "select"
             if consume(SKIP):
                 stream.abort()
                 return "skip"
@@ -716,6 +945,26 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
         + (f" UNDERRUN +{lag:.1f}s" if lag > 0.5 else "")
     )
     return "done"
+
+
+def finish_chunk_playback(path: Path, outcome: str, last: bool, st: State) -> bool:
+    """Release a completed or interrupted chunk and report whether state changed."""
+    if outcome == "done" and not last:
+        return False
+    released = outcome == "select" or archive(path)
+    if not released:
+        released = archive_failed(path)
+    with st.lock:
+        if released:
+            st.claimed.discard(path.name)
+        st.playing = None
+        st.current_text = None
+        st.current_voice = None
+        st.current_piece = 0
+        st.current_piece_count = 0
+        if outcome == "skip":
+            st.skip_name = path.name
+    return True
 
 
 def run_engine_loop() -> None:
@@ -777,6 +1026,7 @@ def run_engine_loop() -> None:
             if consume(INTERRUPT):
                 log("INTERRUPT (idle); exiting")
                 return
+            process_play_request(buf, st)
             if consume(CLEAR):
                 do_clear(buf, st)
             if not st.saw_stop and STOP.exists():
@@ -806,20 +1056,27 @@ def run_engine_loop() -> None:
                         return
                 continue
 
-            # Drop banked pieces of a chunk that was skipped mid-play.
+            # Drop pieces invalidated while the worker was handing them off
             with st.lock:
-                stale = st.skip_name == path.name
+                stale = st.skip_name == path.name or path.name not in st.claimed
+                selected = not stale and first and st.selected_name == path.name
+                if selected:
+                    st.selected_name = None
                 if first and st.skip_name and not stale:
                     st.skip_name = None
             if stale:
                 continue
 
-            if first and not session_first:
+            if first and not session_first and not selected:
                 g = gap_from_name(path.name)
                 outcome = gap_wait(g if g is not None else CHUNK_GAP_S, buf, st)
                 if outcome == "interrupt":
                     log("INTERRUPT (gap); exiting")
                     return
+                if outcome == "select":
+                    with st.lock:
+                        st.claimed.discard(path.name)
+                    continue
                 if outcome == "skip":
                     archive(path)
                     with st.lock:
@@ -842,17 +1099,7 @@ def run_engine_loop() -> None:
             outcome = play_one(sd, np, path, audio, sr,
                                "chunk" if first else "piece", buf, st)
 
-            if outcome != "done" or last:
-                archive(path)
-                with st.lock:
-                    st.claimed.discard(path.name)
-                    st.playing = None
-                    st.current_text = None
-                    st.current_voice = None
-                    st.current_piece = 0
-                    st.current_piece_count = 0
-                    if outcome == "skip":
-                        st.skip_name = path.name
+            if finish_chunk_playback(path, outcome, last, st):
                 publish_status("idle", st, force=True)
 
             if outcome == "interrupt":
@@ -875,7 +1122,7 @@ def run_engine_loop() -> None:
 
 
 def clear_transient_signals() -> None:
-    for signal in (STOP, INTERRUPT, SKIP, CLEAR, WARMUP):
+    for signal in (STOP, INTERRUPT, SKIP, CLEAR, PLAY, WARMUP):
         signal.unlink(missing_ok=True)
 
 
@@ -908,13 +1155,15 @@ def print_status() -> None:
     print(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "state": "stopped",
                 "updated_at": 0,
                 "engine_pid": None,
                 "current": None,
                 "queue_count": len(list(QUEUE.glob("*.txt"))),
                 "queue": [],
+                "history_count": len(list(SPOKEN.glob("*.txt"))),
+                "history": [],
             }
         )
     )
@@ -935,6 +1184,8 @@ def cli(argv: list[str] | None = None) -> int:
     commands.add_parser("status", help="print the current runtime status")
     commands.add_parser("pause", help="pause at the current audio sample")
     commands.add_parser("resume", help="resume from the current audio sample")
+    play = commands.add_parser("play", help="play a queued or recent chunk by ID")
+    play.add_argument("chunk_id", help="chunk ID from status output")
     commands.add_parser("skip", help="skip the current chunk")
     commands.add_parser("clear", help="clear queued chunks after the current chunk")
     commands.add_parser("stop", help="finish the current chunk and stop")
@@ -956,6 +1207,9 @@ def cli(argv: list[str] | None = None) -> int:
             PAUSE.touch()
         elif args.command == "resume":
             resume()
+        elif args.command == "play":
+            start_engine()
+            request_play(args.chunk_id)
         else:
             signal = {
                 "skip": SKIP,
