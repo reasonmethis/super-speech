@@ -587,22 +587,18 @@ body[data-state="loading"] .playback-copy {
   border-color: color-mix(in srgb, var(--carnival-orange) 46%, transparent);
 }
 
-.queue-item.is-dragging {
+.queue-item.is-drag-source {
+  border-color: color-mix(in srgb, var(--accent) 46%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, rgba(255, 255, 255, 0.025));
+}
+
+.queue-item.queue-drag-ghost {
   position: fixed;
   z-index: 20;
   pointer-events: none;
-  opacity: 0.98;
+  opacity: 0.92;
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4),
     0 0 0 1px color-mix(in srgb, var(--accent) 46%, transparent);
-}
-
-.queue-drag-placeholder {
-  width: 100%;
-  flex: 0 0 auto;
-  border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
-  border-radius: 13px;
-  background: color-mix(in srgb, var(--accent) 7%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 .queue-play,

@@ -9,7 +9,7 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
-    "test": "node --test --experimental-strip-types src/runtime.test.ts",
+    "test": "node --test --experimental-strip-types src/runtime.test.ts src/queue-drag-model.test.ts",
     "test:drag": "npm run build && node scripts/smoke_drag.mjs",
     "resources": "node scripts/prepare_resources.mjs",
     "prebuild": "npm run check",

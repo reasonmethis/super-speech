@@ -40,9 +40,11 @@ The app reads and writes the shared runtime under `~/.super-speech/`. Set
 paths can be overridden with `SUPER_SPEECH_ENGINE_PATH` and
 `SUPER_SPEECH_MODEL_DIR`.
 
-`npm test` covers status ownership and current/upcoming/history timeline order
-without starting Electron or touching an audio device. Renderer screenshots can
-use the browser-only demo status produced when the preload bridge is absent.
+`npm test` covers status ownership, timeline order, and drag-state transitions
+without starting Electron or touching an audio device. It exercises every queue
+position plus adversarial cancellation and stale-pointer sequences. Renderer
+screenshots can use the browser-only demo status produced when the preload
+bridge is absent.
 
 Run the Electron mouse test after changing queue interactions:
 
@@ -50,11 +52,10 @@ Run the Electron mouse test after changing queue interactions:
 npm run test:drag
 ```
 
-It uses real pointer input to move a card into the first visual position and
-drop it into History. While the pointer is down, it verifies that the card
-follows the pointer and the neighboring card moves out of its place. The test
-runs against a temporary runtime with silent audio and verifies the result in
-both the renderer and the engine queue.
+It uses real pointer input to reorder and archive cards, then checks cancellation
+when the pointer loses its primary button, the window loses focus, or polling
+replaces the timeline. The test runs against a temporary runtime with silent
+audio and verifies the result in both the renderer and the engine queue.
 
 ## Engine verification
 

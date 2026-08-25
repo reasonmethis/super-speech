@@ -7,6 +7,13 @@ import {
   type RuntimeStatus,
   type TimelineItem,
 } from "./runtime";
+import {
+  isHistoryDropArea,
+  queueDropBeforeId,
+  startQueueDrag,
+  transitionQueueDrag,
+  type QueueDragState,
+} from "./queue-drag-model";
 
 const demoStatus: RuntimeStatus = {
   version: ENGINE_STATUS_VERSION,
@@ -84,20 +91,13 @@ interface PendingQueueMutation {
   id: string;
 }
 
-type QueueDropIntent = "move" | "archive";
-
 interface QueuePointerDrag {
-  pointerId: number;
-  sourceId: string;
-  row: HTMLElement;
-  handle: HTMLButtonElement;
+  state: QueueDragState;
   startX: number;
   startY: number;
   pointerOffsetX: number;
   pointerOffsetY: number;
   width: number;
-  placeholder: HTMLElement | null;
-  intent: QueueDropIntent | null;
 }
 
 let currentStatus = desktopApi ? INITIAL_STATUS : demoStatus;
@@ -112,6 +112,7 @@ let expandedItemId: string | null = null;
 let renderedTimelineKey: string | null = null;
 let pendingQueueMutation: PendingQueueMutation | null = null;
 let failedQueueMutationId: string | null = null;
+let queueMutationGeneration = 0;
 let queuePointerDrag: QueuePointerDrag | null = null;
 
 const QUEUE_DRAG_THRESHOLD = 5;
@@ -328,7 +329,7 @@ function render(status: RuntimeStatus): void {
   };
   playbackButton.dataset.action = action;
   playbackButton.setAttribute("aria-label", actionLabels[action]);
-  playbackButton.disabled = commandPending || action === "ready";
+  playbackButton.disabled = commandPending || pendingQueueMutation !== null || action === "ready";
   playbackButton.setAttribute("aria-busy", String(commandPending || status.state === "loading"));
   playbackIcon.innerHTML = playbackIconMarkup(status);
 
@@ -343,7 +344,7 @@ function render(status: RuntimeStatus): void {
 
   queueCount.textContent = `${status.queue_count} waiting`;
   clearQueueButton.classList.toggle("is-hidden", status.queue_count === 0);
-  clearQueueButton.disabled = clearPending || pendingQueueMutation !== null;
+  clearQueueButton.disabled = commandPending || clearPending || pendingQueueMutation !== null;
   clearQueueButton.setAttribute("aria-disabled", String(clearQueueButton.disabled));
   clearQueueButton.setAttribute("aria-busy", String(clearPending));
   clearQueueButton.setAttribute(
@@ -377,90 +378,126 @@ function beginQueuePointerDrag(
   if (
     event.button !== 0 ||
     !event.isPrimary ||
+    commandPending ||
     pendingQueueMutation ||
     clearPending
   ) {
     return;
   }
 
+  cancelQueuePointerDrag();
   event.preventDefault();
   const bounds = row.getBoundingClientRect();
+  const visualOrder = [...currentStatus.queue].reverse().map(({ id }) => id);
+  const state = startQueueDrag(event.pointerId, id, visualOrder);
+  if (!state) {
+    return;
+  }
   handle.focus({ preventScroll: true });
-  handle.setPointerCapture(event.pointerId);
+  queueList.setPointerCapture(event.pointerId);
   queuePointerDrag = {
-    pointerId: event.pointerId,
-    sourceId: id,
-    row,
-    handle,
+    state,
     startX: event.clientX,
     startY: event.clientY,
     pointerOffsetX: event.clientX - bounds.left,
     pointerOffsetY: event.clientY - bounds.top,
     width: bounds.width,
-    placeholder: null,
-    intent: null,
   };
 }
 
-function activateQueuePointerDrag(drag: QueuePointerDrag): void {
-  const bounds = drag.row.getBoundingClientRect();
-  const placeholder = document.createElement("div");
-  placeholder.className = "queue-drag-placeholder";
-  placeholder.style.height = `${bounds.height}px`;
-  placeholder.setAttribute("aria-hidden", "true");
-  drag.row.before(placeholder);
-  drag.placeholder = placeholder;
-  queueList.classList.add("is-queue-dragging");
-  drag.row.classList.add("is-dragging");
-  drag.row.style.left = `${bounds.left}px`;
-  drag.row.style.top = `${bounds.top}px`;
-  drag.row.style.width = `${bounds.width}px`;
-  drag.row.style.height = `${bounds.height}px`;
+function upcomingRow(id: string): HTMLElement | null {
+  return [...queueList.querySelectorAll<HTMLElement>(".queue-item.is-upcoming")]
+    .find((row) => row.dataset.itemId === id) ?? null;
 }
 
-function clearQueueDragVisuals(drag: QueuePointerDrag): void {
-  drag.placeholder?.remove();
-  drag.placeholder = null;
-  drag.row.classList.remove("is-dragging");
-  drag.row.style.removeProperty("left");
-  drag.row.style.removeProperty("top");
-  drag.row.style.removeProperty("width");
-  drag.row.style.removeProperty("height");
+function activeDragGhost(): HTMLElement | null {
+  return document.querySelector<HTMLElement>(".queue-drag-ghost");
+}
+
+function activateQueuePointerDrag(drag: QueuePointerDrag): boolean {
+  const row = upcomingRow(drag.state.sourceId);
+  if (!row) {
+    return false;
+  }
+  const bounds = row.getBoundingClientRect();
+  const ghost = row.cloneNode(true) as HTMLElement;
+  ghost.classList.add("queue-drag-ghost");
+  ghost.setAttribute("aria-hidden", "true");
+  for (const element of ghost.querySelectorAll<HTMLElement>(
+    "[id], [aria-controls], [aria-labelledby], [aria-describedby]",
+  )) {
+    element.removeAttribute("id");
+    element.removeAttribute("aria-controls");
+    element.removeAttribute("aria-labelledby");
+    element.removeAttribute("aria-describedby");
+  }
+  for (const button of ghost.querySelectorAll<HTMLButtonElement>("button")) {
+    button.disabled = true;
+    button.tabIndex = -1;
+  }
+  ghost.style.left = `${bounds.left}px`;
+  ghost.style.top = `${bounds.top}px`;
+  ghost.style.width = `${bounds.width}px`;
+  ghost.style.height = `${bounds.height}px`;
+  document.body.append(ghost);
+  queueList.classList.add("is-queue-dragging");
+  row.classList.add("is-drag-source");
+  return true;
+}
+
+function clearQueueDragVisuals(): void {
+  for (const ghost of document.querySelectorAll(".queue-drag-ghost")) {
+    ghost.remove();
+  }
+  for (const row of queueList.querySelectorAll(".is-drag-source")) {
+    row.classList.remove("is-drag-source");
+  }
   queueList.classList.remove("is-queue-dragging");
   clearHistoryDropIndicator();
 }
 
-function placeQueueDragPlaceholder(drag: QueuePointerDrag, clientY: number): void {
-  const placeholder = drag.placeholder;
-  if (!placeholder) {
+function releaseQueuePointer(pointerId: number): void {
+  try {
+    if (queueList.hasPointerCapture(pointerId)) {
+      queueList.releasePointerCapture(pointerId);
+    }
+  } finally {
+    clearQueueDragVisuals();
+  }
+}
+
+function applyQueueVisualOrder(
+  visualOrder: readonly string[],
+  animate = true,
+): void {
+  const rows = [...queueList.querySelectorAll<HTMLElement>(".queue-item.is-upcoming")];
+  for (const row of rows) {
+    for (const animation of row.getAnimations()) {
+      animation.cancel();
+    }
+  }
+  const currentOrder = rows.map((row) => row.dataset.itemId ?? "");
+  if (visualOrder.every((id, index) => id === currentOrder[index])) {
     return;
   }
-  const rows = [
-    ...queueList.querySelectorAll<HTMLElement>(".queue-item.is-upcoming"),
-  ].filter((row) => row !== drag.row);
-  const before = rows.find((row) => {
-    const bounds = row.getBoundingClientRect();
-    return clientY < bounds.top + bounds.height / 2;
-  });
-  const destination = before ?? queueList.querySelector<HTMLElement>(
+  const rowsById = new Map(rows.map((row) => [row.dataset.itemId ?? "", row]));
+  const previousTops = new Map(rows.map((row) => [row, row.getBoundingClientRect().top]));
+  const anchor = queueList.querySelector<HTMLElement>(
     ".queue-item.is-current, .timeline-divider",
   );
-  if (placeholder.nextElementSibling === destination) {
-    return;
+  for (const id of visualOrder) {
+    const row = rowsById.get(id);
+    if (row) {
+      queueList.insertBefore(row, anchor);
+    }
   }
-
-  const previousTops = new Map(rows.map((row) => [row, row.offsetTop]));
-  queueList.insertBefore(placeholder, destination);
-  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+  if (!animate || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
     return;
   }
   for (const row of rows) {
-    const distance = (previousTops.get(row) ?? row.offsetTop) - row.offsetTop;
+    const distance = (previousTops.get(row) ?? 0) - row.getBoundingClientRect().top;
     if (distance === 0) {
       continue;
-    }
-    for (const animation of row.getAnimations()) {
-      animation.cancel();
     }
     row.animate(
       [{ transform: `translateY(${distance}px)` }, { transform: "translateY(0)" }],
@@ -471,11 +508,15 @@ function placeQueueDragPlaceholder(drag: QueuePointerDrag, clientY: number): voi
 
 function updateQueuePointerDrag(event: PointerEvent): void {
   const drag = queuePointerDrag;
-  if (!drag || event.pointerId !== drag.pointerId) {
+  if (!drag || event.pointerId !== drag.state.pointerId) {
+    return;
+  }
+  if ((event.buttons & 1) === 0) {
+    cancelQueuePointerDrag();
     return;
   }
   event.preventDefault();
-  if (!drag.placeholder) {
+  if (drag.state.phase === "armed") {
     const distance = Math.hypot(
       event.clientX - drag.startX,
       event.clientY - drag.startY,
@@ -483,7 +524,10 @@ function updateQueuePointerDrag(event: PointerEvent): void {
     if (distance < QUEUE_DRAG_THRESHOLD) {
       return;
     }
-    activateQueuePointerDrag(drag);
+    if (!activateQueuePointerDrag(drag)) {
+      cancelQueuePointerDrag();
+      return;
+    }
   }
 
   const listBounds = queueList.getBoundingClientRect();
@@ -491,68 +535,138 @@ function updateQueuePointerDrag(event: PointerEvent): void {
     Math.max(event.clientX - drag.pointerOffsetX, listBounds.left),
     listBounds.right - drag.width,
   );
-  drag.row.style.left = `${left}px`;
-  drag.row.style.top = `${event.clientY - drag.pointerOffsetY}px`;
+  const ghost = activeDragGhost();
+  if (!ghost) {
+    cancelQueuePointerDrag();
+    return;
+  }
+  ghost.style.left = `${left}px`;
+  ghost.style.top = `${event.clientY - drag.pointerOffsetY}px`;
 
   clearHistoryDropIndicator();
   const pointed = document.elementFromPoint(event.clientX, event.clientY);
   const historyTarget = pointed instanceof Element
     ? pointed.closest<HTMLElement>(".history-drop-target, .queue-item.is-history")
     : null;
-  if (historyTarget && queueList.contains(historyTarget)) {
-    historyTarget.classList.add("is-history-drop");
-    drag.intent = "archive";
+  const historyDivider = queueList.querySelector<HTMLElement>(
+    ".timeline-divider.history-drop-target",
+  );
+  const overHistory = historyTarget && queueList.contains(historyTarget)
+    ? historyTarget
+    : historyDivider && isHistoryDropArea(
+        listBounds,
+        historyDivider.getBoundingClientRect().top,
+        event.clientX,
+        event.clientY,
+      )
+      ? historyDivider
+      : null;
+  if (overHistory) {
+    overHistory.classList.add("is-history-drop");
+    const transition = transitionQueueDrag(drag.state, {
+      type: "preview-history",
+      pointerId: event.pointerId,
+    });
+    if (transition.state) {
+      drag.state = transition.state;
+    }
+    if (transition.visualOrder) {
+      applyQueueVisualOrder(transition.visualOrder);
+    }
     return;
   }
 
-  drag.intent = "move";
-  placeQueueDragPlaceholder(drag, event.clientY);
+  const rows = [...queueList.querySelectorAll<HTMLElement>(".queue-item.is-upcoming")];
+  const beforeId = queueDropBeforeId(
+    drag.state.sourceId,
+    rows.map((row) => {
+      const bounds = row.getBoundingClientRect();
+      return {
+        id: row.dataset.itemId ?? "",
+        top: bounds.top,
+        height: bounds.height,
+      };
+    }),
+    event.clientY,
+  );
+  const transition = transitionQueueDrag(drag.state, {
+    type: "preview-queue",
+    pointerId: event.pointerId,
+    beforeId,
+  });
+  if (transition.state) {
+    drag.state = transition.state;
+  }
+  if (transition.visualOrder) {
+    applyQueueVisualOrder(transition.visualOrder);
+  }
 }
 
 function finishQueuePointerDrag(event: PointerEvent, commit: boolean): void {
   const drag = queuePointerDrag;
-  if (!drag || event.pointerId !== drag.pointerId) {
+  if (!drag || event.pointerId !== drag.state.pointerId) {
     return;
   }
-  const intent = drag.placeholder && commit ? drag.intent : null;
+  const transition = transitionQueueDrag(drag.state, {
+    type: "finish",
+    pointerId: event.pointerId,
+    commit,
+  });
   queuePointerDrag = null;
-  let beforeId: string | null = null;
-  if (intent === "move" && drag.placeholder) {
-    drag.placeholder.replaceWith(drag.row);
-    drag.placeholder = null;
-    const visualIds = [
-      ...queueList.querySelectorAll<HTMLElement>(".queue-item.is-upcoming"),
-    ].map((row) => row.dataset.itemId ?? "");
-    const playbackIds = visualIds.reverse();
-    beforeId = playbackIds[playbackIds.indexOf(drag.sourceId) + 1] ?? null;
+  let command = transition.command;
+  let projectionFailed = false;
+  try {
+    if (transition.visualOrder) {
+      applyQueueVisualOrder(transition.visualOrder, false);
+    }
+  } catch (error) {
+    console.error("Could not settle queue drag", error);
+    command = null;
+    projectionFailed = true;
+  } finally {
+    releaseQueuePointer(event.pointerId);
   }
-  if (drag.handle.hasPointerCapture(drag.pointerId)) {
-    drag.handle.releasePointerCapture(drag.pointerId);
+  if (projectionFailed) {
+    renderedTimelineKey = null;
+    render(currentStatus);
+    return;
   }
-  clearQueueDragVisuals(drag);
-  if (intent === "archive") {
-    void archiveWaitingItem(drag.sourceId);
-  } else if (intent === "move") {
-    void moveWaitingItem(drag.sourceId, beforeId);
+  if (command?.type === "archive") {
+    void archiveWaitingItem(command.id);
+  } else if (command?.type === "move") {
+    void moveWaitingItem(command.id, command.beforeId);
   }
 }
 
 function cancelQueuePointerDrag(): void {
   const drag = queuePointerDrag;
   if (!drag) {
+    clearQueueDragVisuals();
     return;
   }
+  const transition = transitionQueueDrag(drag.state, { type: "cancel" });
   queuePointerDrag = null;
-  if (drag.handle.hasPointerCapture(drag.pointerId)) {
-    drag.handle.releasePointerCapture(drag.pointerId);
+  let projectionFailed = false;
+  try {
+    if (transition.visualOrder) {
+      applyQueueVisualOrder(transition.visualOrder, false);
+    }
+  } catch (error) {
+    console.error("Could not cancel queue drag", error);
+    projectionFailed = true;
+  } finally {
+    releaseQueuePointer(drag.state.pointerId);
   }
-  clearQueueDragVisuals(drag);
+  if (projectionFailed) {
+    renderedTimelineKey = null;
+    render(currentStatus);
+  }
 }
 
 function handleQueueReorderKey(event: KeyboardEvent, id: string): void {
   const ids = currentStatus.queue.map((item) => item.id);
   const index = ids.indexOf(id);
-  if (index < 0 || pendingQueueMutation || clearPending) {
+  if (index < 0 || commandPending || pendingQueueMutation || clearPending) {
     return;
   }
   let beforeId: string | null | undefined;
@@ -595,6 +709,7 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     updateTimelineFade();
     return;
   }
+  cancelQueuePointerDrag();
   renderedTimelineKey = timelineKey;
 
   const previousScrollTop = queueList.scrollTop;
@@ -658,21 +773,6 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
         `Reorder ${itemReference(item)}. Drag, or use the arrow keys`,
       );
       dragHandle.innerHTML = '<span aria-hidden="true"></span>';
-      dragHandle.addEventListener("pointerdown", (event) => {
-        beginQueuePointerDrag(event, item.id, row, dragHandle);
-      });
-      dragHandle.addEventListener("pointermove", updateQueuePointerDrag);
-      dragHandle.addEventListener("pointerup", (event) => {
-        finishQueuePointerDrag(event, true);
-      });
-      dragHandle.addEventListener("pointercancel", (event) => {
-        finishQueuePointerDrag(event, false);
-      });
-      dragHandle.addEventListener("lostpointercapture", () => {
-        if (queuePointerDrag?.handle === dragHandle) {
-          cancelQueuePointerDrag();
-        }
-      });
       dragHandle.addEventListener("keydown", (event) => {
         handleQueueReorderKey(event, item.id);
       });
@@ -763,7 +863,7 @@ function updateTimelineRows(items: TimelineItem[]): void {
   const itemById = new Map(items.map((item) => [item.id, item]));
   const pendingId = pendingSelection?.sourceId ?? null;
   const commandInFlight = pendingSelection !== null && pendingSelection.acceptedAt === null;
-  const queueCommandInFlight = pendingQueueMutation !== null;
+  const queueCommandInFlight = commandPending || pendingQueueMutation !== null;
   for (const row of queueList.querySelectorAll<HTMLElement>(".queue-item")) {
     const item = itemById.get(row.dataset.itemId ?? "");
     if (!item) {
@@ -895,7 +995,7 @@ async function playTimelineItem(item: TimelineItem): Promise<void> {
 }
 
 async function moveWaitingItem(id: string, beforeId: string | null): Promise<void> {
-  if (pendingQueueMutation || clearPending) {
+  if (commandPending || pendingQueueMutation || clearPending) {
     return;
   }
   const reordered = moveQueueItemBefore(currentStatus.queue, id, beforeId);
@@ -904,6 +1004,7 @@ async function moveWaitingItem(id: string, beforeId: string | null): Promise<voi
     return;
   }
   const previousStatus = currentStatus;
+  queueMutationGeneration += 1;
   pendingQueueMutation = { action: "move", id };
   failedQueueMutationId = null;
   commandStatus.textContent = "";
@@ -929,7 +1030,7 @@ async function moveWaitingItem(id: string, beforeId: string | null): Promise<voi
 }
 
 async function archiveWaitingItem(id: string): Promise<void> {
-  if (pendingQueueMutation || clearPending) {
+  if (commandPending || pendingQueueMutation || clearPending) {
     return;
   }
   const item = currentStatus.queue.find((queued) => queued.id === id);
@@ -938,6 +1039,7 @@ async function archiveWaitingItem(id: string): Promise<void> {
   }
   const previousStatus = currentStatus;
   const alreadyInHistory = currentStatus.history.some((entry) => entry.id === id);
+  queueMutationGeneration += 1;
   pendingQueueMutation = { action: "archive", id };
   failedQueueMutationId = null;
   commandStatus.textContent = "";
@@ -977,8 +1079,13 @@ async function refreshStatus(): Promise<void> {
   }
   try {
     const mutationAtStart = pendingQueueMutation;
+    const queueGenerationAtStart = queueMutationGeneration;
     const status = await desktopApi.getStatus();
-    if (!mutationAtStart && !pendingQueueMutation) {
+    if (
+      !mutationAtStart &&
+      !pendingQueueMutation &&
+      queueGenerationAtStart === queueMutationGeneration
+    ) {
       render(status);
     }
   } catch (error) {
@@ -990,11 +1097,11 @@ async function refreshStatus(): Promise<void> {
 
 playbackButton.addEventListener("click", async () => {
   const action = playbackAction(currentStatus);
-  if (commandPending || action === "ready") {
+  if (commandPending || pendingQueueMutation || queuePointerDrag || action === "ready") {
     return;
   }
   commandPending = true;
-  playbackButton.disabled = true;
+  render(currentStatus);
   if (action === "setup") {
     try {
       await desktopApi?.openSetup();
@@ -1022,7 +1129,12 @@ playbackButton.addEventListener("click", async () => {
 });
 
 clearQueueButton.addEventListener("click", async () => {
-  if (clearPending || pendingQueueMutation || currentStatus.queue_count === 0) {
+  if (
+    commandPending ||
+    clearPending ||
+    pendingQueueMutation ||
+    currentStatus.queue_count === 0
+  ) {
     return;
   }
   clearPending = true;
@@ -1071,12 +1183,39 @@ requiredElement<HTMLButtonElement>("hide-button").addEventListener("click", () =
 });
 
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) {
+  if (document.hidden) {
+    cancelQueuePointerDrag();
+  } else {
     void refreshStatus();
   }
 });
 
+queueList.addEventListener("pointerdown", (event) => {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    return;
+  }
+  const handle = target.closest<HTMLButtonElement>(".queue-drag-handle");
+  const row = handle?.closest<HTMLElement>(".queue-item.is-upcoming");
+  const id = row?.dataset.itemId;
+  if (handle && row && id) {
+    beginQueuePointerDrag(event, id, row, handle);
+  }
+});
 queueList.addEventListener("scroll", updateTimelineFade, { passive: true });
+window.addEventListener("pointermove", updateQueuePointerDrag, true);
+window.addEventListener("pointerup", (event) => finishQueuePointerDrag(event, true), true);
+window.addEventListener("pointercancel", (event) => finishQueuePointerDrag(event, false), true);
+queueList.addEventListener("lostpointercapture", (event) => {
+  if (queuePointerDrag?.state.pointerId === event.pointerId) {
+    cancelQueuePointerDrag();
+  }
+});
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    cancelQueuePointerDrag();
+  }
+});
 window.addEventListener("blur", cancelQueuePointerDrag);
 
 render(currentStatus);

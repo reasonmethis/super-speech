@@ -87,6 +87,39 @@ async function drag(page, source, destination, inspect) {
   await page.mouse.move(to.x, to.y, { steps: 12 });
   await inspect?.({ from, to });
   await page.mouse.up();
+  assert.equal(await page.locator(".queue-drag-ghost").count(), 0);
+  assert.equal(await page.locator(".is-drag-source").count(), 0);
+  assert.equal(await page.locator(".queue-drag-placeholder").count(), 0);
+}
+
+async function beginDrag(page, handle, deltaY = -65) {
+  await waitFor(
+    () => handle.isEnabled(),
+    "Drag handle did not become enabled",
+  );
+  const bounds = await handle.boundingBox();
+  assert(bounds, "Drag handle must be visible");
+  const from = {
+    x: bounds.x + bounds.width / 2,
+    y: bounds.y + bounds.height / 2,
+  };
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(from.x, from.y + deltaY, { steps: 8 });
+  await waitFor(
+    async () => await page.locator(".queue-drag-ghost").count() === 1,
+    "The drag preview did not activate",
+  );
+}
+
+async function assertDragClean(page) {
+  assert.equal(await page.locator(".queue-drag-ghost").count(), 0);
+  assert.equal(await page.locator(".is-drag-source").count(), 0);
+  assert.equal(await page.locator(".queue-drag-placeholder").count(), 0);
+  const ids = await page.locator(".queue-item.is-upcoming").evaluateAll((items) =>
+    items.map((item) => item.getAttribute("data-item-id"))
+  );
+  assert.equal(new Set(ids).size, ids.length, "Waiting cards must have unique IDs");
 }
 
 try {
@@ -127,14 +160,14 @@ try {
     rows.nth(1).locator(".queue-drag-handle"),
     rows.nth(0),
     async ({ to }) => {
-      const dragged = await page.locator(`[data-item-id="${secondId}"]`).boundingBox();
+      const dragged = await page.locator(".queue-drag-ghost").boundingBox();
       const shifted = await page.locator(`[data-item-id="${firstId}"]`).boundingBox();
       assert(dragged && shifted, "Rows must stay visible while dragging");
-      assert.equal(await page.locator(".queue-drag-placeholder").count(), 1);
-      assert.equal(await page.locator(".drop-before, .drop-after").count(), 0);
+      assert.equal(await page.locator(".is-drag-source").count(), 1);
+      assert.equal(await page.locator(".queue-drag-placeholder").count(), 0);
       assert(
         Math.abs(dragged.y + dragged.height / 2 - to.y) < dragged.height / 2,
-        "The dragged row did not follow the pointer",
+        "The floating drag preview did not follow the pointer",
       );
       assert(
         shifted.y > firstStart.y + 20,
@@ -149,6 +182,35 @@ try {
   await waitFor(
     () => status().queue.at(-1)?.id === secondId,
     "The engine did not persist the mouse-driven reorder",
+  );
+  await waitFor(
+    async () => {
+      const visualOrder = await rows.evaluateAll((items) =>
+        items.map((item) => item.getAttribute("data-item-id"))
+      );
+      return visualOrder.join(",") === status().queue.map(({ id }) => id).reverse().join(",");
+    },
+    "The renderer did not reconcile to the persisted queue order",
+  );
+
+  await beginDrag(
+    page,
+    page.locator(`[data-item-id="${secondId}"] .queue-drag-handle`),
+    70,
+  );
+  runEngine("speak", "Drag refresh cancellation");
+  await waitFor(
+    async () =>
+      await page.locator(".queue-item.is-upcoming").count() === 3 &&
+      await page.locator(".queue-drag-ghost").count() === 0,
+    "A queue refresh did not cancel and clean the active drag",
+  );
+  await page.mouse.up();
+  await assertDragClean(page);
+  assert.equal(
+    await page.locator(`[data-item-id="${secondId}"].is-upcoming`).count(),
+    1,
+    "A queue refresh lost the dragged card",
   );
 
   await drag(
@@ -165,7 +227,58 @@ try {
     "The engine did not persist the mouse-driven archive",
   );
 
-  console.log("Super Speech real mouse drag smoke test passed");
+  const remainingRows = page.locator(".queue-item.is-upcoming");
+  await waitFor(
+    async () => {
+      const visualOrder = await remainingRows.evaluateAll((items) =>
+        items.map((item) => item.getAttribute("data-item-id"))
+      );
+      return visualOrder.join(",") === status().queue.map(({ id }) => id).reverse().join(",");
+    },
+    "The renderer did not reconcile to the persisted archive",
+  );
+  const orderBeforeBlur = await remainingRows.evaluateAll((items) =>
+    items.map((item) => item.getAttribute("data-item-id"))
+  );
+  await beginDrag(page, remainingRows.first().locator(".queue-drag-handle"), 70);
+  await page.evaluate(() => {
+    window.dispatchEvent(new PointerEvent("pointermove", {
+      pointerId: 1,
+      isPrimary: true,
+      buttons: 0,
+    }));
+  });
+  await waitFor(
+    async () => await page.locator(".queue-drag-ghost").count() === 0,
+    "A pointer move without the primary button left drag artifacts behind",
+  );
+  await page.mouse.up();
+  await assertDragClean(page);
+  assert.deepEqual(
+    await remainingRows.evaluateAll((items) =>
+      items.map((item) => item.getAttribute("data-item-id"))
+    ),
+    orderBeforeBlur,
+    "Losing the primary button changed the queue order",
+  );
+
+  await beginDrag(page, remainingRows.first().locator(".queue-drag-handle"), 70);
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await waitFor(
+    async () => await page.locator(".queue-drag-ghost").count() === 0,
+    "Window blur left drag artifacts behind",
+  );
+  await page.mouse.up();
+  await assertDragClean(page);
+  assert.deepEqual(
+    await remainingRows.evaluateAll((items) =>
+      items.map((item) => item.getAttribute("data-item-id"))
+    ),
+    orderBeforeBlur,
+    "Window blur changed the queue order",
+  );
+
+  console.log("Super Speech pointer drag and cancellation smoke test passed");
 } finally {
   await electronApp?.close().catch(() => undefined);
   try {
