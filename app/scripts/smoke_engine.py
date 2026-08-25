@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -13,6 +14,16 @@ ENGINE = APP_DIR / "build-resources" / "engine" / (
     "super-speech-engine.exe" if sys.platform == "win32" else "super-speech-engine"
 )
 MODELS = APP_DIR / "build-resources" / "models" / "kokoro"
+
+
+def process_exists(process_id: int | None) -> bool:
+    if not process_id:
+        return False
+    try:
+        os.kill(process_id, 0)
+    except OSError:
+        return False
+    return True
 
 
 def main() -> None:
@@ -54,14 +65,16 @@ def main() -> None:
         subprocess.run([str(ENGINE), "interrupt"], env=environment, check=True)
         stopped_deadline = time.monotonic() + 10
         while time.monotonic() < stopped_deadline:
-            status = subprocess.run(
+            status_result = subprocess.run(
                 [str(ENGINE), "status"],
                 env=environment,
                 check=True,
                 capture_output=True,
                 text=True,
             )
-            if '"state": "stopped"' in status.stdout:
+            status = json.loads(status_result.stdout)
+            engine_pid = status.get("engine_pid")
+            if status.get("state") == "stopped" and not process_exists(engine_pid):
                 break
             time.sleep(0.25)
         else:
