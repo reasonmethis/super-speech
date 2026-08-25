@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "vite",
     "test": "node --test --experimental-strip-types src/runtime.test.ts",
+    "test:drag": "npm run build && node scripts/smoke_drag.mjs",
     "resources": "node scripts/prepare_resources.mjs",
     "prebuild": "npm run check",
     "build": "vite build",
@@ -25,6 +26,7 @@
     "@types/node": "^22.10.2",
     "electron": "43.4.1",
     "electron-builder": "26.15.3",
+    "playwright-core": "^1.62.1",
     "typescript": "7.0.2",
     "vite": "8.2.2",
     "vite-plugin-electron": "1.1.1"

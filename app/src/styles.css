@@ -519,26 +519,6 @@ body[data-state="loading"] .playback-copy {
   scrollbar-width: thin;
 }
 
-.history-drop-shelf {
-  display: none;
-  min-height: 34px;
-  flex: 0 0 34px;
-  align-items: center;
-  justify-content: center;
-  border: 1px dashed color-mix(in srgb, var(--accent) 50%, transparent);
-  border-radius: 10px;
-  color: var(--accent-bright);
-  background: color-mix(in srgb, var(--accent) 12%, #111019);
-  font-size: 10px;
-  font-weight: 650;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.queue-list.is-queue-dragging .history-drop-shelf {
-  display: flex;
-}
-
 .queue-list.has-more {
   mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 12px), transparent 100%);
 }
@@ -672,6 +652,8 @@ body[data-state="loading"] .playback-copy {
 
 .queue-drag-handle {
   cursor: grab;
+  touch-action: none;
+  user-select: none;
 }
 
 .queue-drag-handle:active {

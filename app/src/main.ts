@@ -84,6 +84,21 @@ interface PendingQueueMutation {
   id: string;
 }
 
+type QueueDropIntent =
+  | { kind: "move"; beforeId: string | null }
+  | { kind: "archive" };
+
+interface QueuePointerDrag {
+  pointerId: number;
+  sourceId: string;
+  row: HTMLElement;
+  handle: HTMLButtonElement;
+  startX: number;
+  startY: number;
+  active: boolean;
+  intent: QueueDropIntent | null;
+}
+
 let currentStatus = desktopApi ? INITIAL_STATUS : demoStatus;
 let commandPending = false;
 let pendingSelection: PendingSelection | null = null;
@@ -96,7 +111,9 @@ let expandedItemId: string | null = null;
 let renderedTimelineKey: string | null = null;
 let pendingQueueMutation: PendingQueueMutation | null = null;
 let failedQueueMutationId: string | null = null;
-let draggedQueueItemId: string | null = null;
+let queuePointerDrag: QueuePointerDrag | null = null;
+
+const QUEUE_DRAG_THRESHOLD = 5;
 
 function requiredElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -357,22 +374,43 @@ function clearQueueDropIndicators(): void {
   }
 }
 
-function beginQueueDrag(event: DragEvent, id: string, row: HTMLElement): void {
-  if (pendingQueueMutation || clearPending) {
-    event.preventDefault();
+function beginQueuePointerDrag(
+  event: PointerEvent,
+  id: string,
+  row: HTMLElement,
+  handle: HTMLButtonElement,
+): void {
+  if (
+    event.button !== 0 ||
+    !event.isPrimary ||
+    pendingQueueMutation ||
+    clearPending
+  ) {
     return;
   }
-  draggedQueueItemId = id;
-  queueList.classList.add("is-queue-dragging");
-  row.classList.add("is-dragging");
-  event.dataTransfer?.setData("text/plain", id);
-  if (event.dataTransfer) {
-    event.dataTransfer.effectAllowed = "move";
-  }
+
+  event.preventDefault();
+  handle.focus({ preventScroll: true });
+  handle.setPointerCapture(event.pointerId);
+  queuePointerDrag = {
+    pointerId: event.pointerId,
+    sourceId: id,
+    row,
+    handle,
+    startX: event.clientX,
+    startY: event.clientY,
+    active: false,
+    intent: null,
+  };
 }
 
-function endQueueDrag(): void {
-  draggedQueueItemId = null;
+function activateQueuePointerDrag(drag: QueuePointerDrag): void {
+  drag.active = true;
+  queueList.classList.add("is-queue-dragging");
+  drag.row.classList.add("is-dragging");
+}
+
+function clearQueueDragVisuals(): void {
   queueList.classList.remove("is-queue-dragging");
   clearQueueDropIndicators();
   for (const row of queueList.querySelectorAll(".is-dragging")) {
@@ -380,76 +418,92 @@ function endQueueDrag(): void {
   }
 }
 
-function dragLeftElement(event: DragEvent, element: HTMLElement): boolean {
-  return !(
-    event.relatedTarget instanceof Node && element.contains(event.relatedTarget)
-  );
+function markQueueMove(beforeId: string | null): void {
+  const rows = [
+    ...queueList.querySelectorAll<HTMLElement>(".queue-item.is-upcoming"),
+  ];
+  const target = beforeId
+    ? rows.find((row) => row.dataset.itemId === beforeId)
+    : rows.at(-1);
+  target?.classList.add(beforeId ? "drop-before" : "drop-after");
 }
 
-function configureQueueDropTarget(row: HTMLElement, targetId: string): void {
-  row.addEventListener("dragover", (event) => {
-    if (!draggedQueueItemId || pendingQueueMutation) {
-      return;
-    }
-    event.preventDefault();
-    clearQueueDropIndicators();
+function queueMoveIntent(clientY: number): QueueDropIntent | null {
+  const rows = [
+    ...queueList.querySelectorAll<HTMLElement>(".queue-item.is-upcoming"),
+  ];
+  if (rows.length === 0) {
+    return null;
+  }
+  const before = rows.find((row) => {
     const bounds = row.getBoundingClientRect();
-    row.classList.add(
-      event.clientY < bounds.top + bounds.height / 2
-        ? "drop-before"
-        : "drop-after",
+    return clientY < bounds.top + bounds.height / 2;
+  });
+  return { kind: "move", beforeId: before?.dataset.itemId ?? null };
+}
+
+function updateQueuePointerDrag(event: PointerEvent): void {
+  const drag = queuePointerDrag;
+  if (!drag || event.pointerId !== drag.pointerId) {
+    return;
+  }
+  event.preventDefault();
+  if (!drag.active) {
+    const distance = Math.hypot(
+      event.clientX - drag.startX,
+      event.clientY - drag.startY,
     );
-    if (event.dataTransfer) {
-      event.dataTransfer.dropEffect = "move";
-    }
-  });
-  row.addEventListener("dragleave", (event) => {
-    if (dragLeftElement(event, row)) {
-      row.classList.remove("drop-before", "drop-after");
-    }
-  });
-  row.addEventListener("drop", (event) => {
-    if (!draggedQueueItemId) {
+    if (distance < QUEUE_DRAG_THRESHOLD) {
       return;
     }
-    event.preventDefault();
-    const bounds = row.getBoundingClientRect();
-    const after = event.clientY >= bounds.top + bounds.height / 2;
-    const ids = currentStatus.queue.map(({ id }) => id);
-    const targetIndex = ids.indexOf(targetId);
-    const beforeId = after ? (ids[targetIndex + 1] ?? null) : targetId;
-    const sourceId = draggedQueueItemId;
-    endQueueDrag();
-    void moveWaitingItem(sourceId, beforeId);
-  });
+    activateQueuePointerDrag(drag);
+  }
+
+  clearQueueDropIndicators();
+  const pointed = document.elementFromPoint(event.clientX, event.clientY);
+  const historyTarget = pointed instanceof Element
+    ? pointed.closest<HTMLElement>(".history-drop-target, .queue-item.is-history")
+    : null;
+  if (historyTarget && queueList.contains(historyTarget)) {
+    historyTarget.classList.add("is-history-drop");
+    drag.intent = { kind: "archive" };
+    return;
+  }
+
+  drag.intent = queueMoveIntent(event.clientY);
+  if (drag.intent?.kind === "move") {
+    markQueueMove(drag.intent.beforeId);
+  }
 }
 
-function configureHistoryDropTarget(element: HTMLElement): void {
-  element.addEventListener("dragover", (event) => {
-    if (!draggedQueueItemId || pendingQueueMutation) {
-      return;
-    }
-    event.preventDefault();
-    clearQueueDropIndicators();
-    element.classList.add("is-history-drop");
-    if (event.dataTransfer) {
-      event.dataTransfer.dropEffect = "move";
-    }
-  });
-  element.addEventListener("dragleave", (event) => {
-    if (dragLeftElement(event, element)) {
-      element.classList.remove("is-history-drop");
-    }
-  });
-  element.addEventListener("drop", (event) => {
-    if (!draggedQueueItemId) {
-      return;
-    }
-    event.preventDefault();
-    const sourceId = draggedQueueItemId;
-    endQueueDrag();
-    void archiveWaitingItem(sourceId);
-  });
+function finishQueuePointerDrag(event: PointerEvent, commit: boolean): void {
+  const drag = queuePointerDrag;
+  if (!drag || event.pointerId !== drag.pointerId) {
+    return;
+  }
+  const intent = drag.active && commit ? drag.intent : null;
+  queuePointerDrag = null;
+  if (drag.handle.hasPointerCapture(drag.pointerId)) {
+    drag.handle.releasePointerCapture(drag.pointerId);
+  }
+  clearQueueDragVisuals();
+  if (intent?.kind === "archive") {
+    void archiveWaitingItem(drag.sourceId);
+  } else if (intent?.kind === "move") {
+    void moveWaitingItem(drag.sourceId, intent.beforeId);
+  }
+}
+
+function cancelQueuePointerDrag(): void {
+  const drag = queuePointerDrag;
+  if (!drag) {
+    return;
+  }
+  queuePointerDrag = null;
+  if (drag.handle.hasPointerCapture(drag.pointerId)) {
+    drag.handle.releasePointerCapture(drag.pointerId);
+  }
+  clearQueueDragVisuals();
 }
 
 function handleQueueReorderKey(event: KeyboardEvent, id: string): void {
@@ -523,13 +577,6 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
 
   const visibleHistory = items.filter(({ kind }) => kind === "history").length;
   const hasUpcoming = items.some(({ kind }) => kind === "upcoming");
-  if (hasUpcoming) {
-    const historyDropShelf = document.createElement("div");
-    historyDropShelf.className = "history-drop-shelf history-drop-target";
-    historyDropShelf.textContent = "Drop in History";
-    configureHistoryDropTarget(historyDropShelf);
-    queueList.append(historyDropShelf);
-  }
   let historyDividerAdded = false;
   const appendHistoryDivider = (): void => {
     historyDividerAdded = true;
@@ -539,7 +586,6 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
       ? `${visibleHistory} of ${historyTotal}`
       : String(historyTotal);
     divider.innerHTML = `<span>History</span><span>${historyCount}</span>`;
-    configureHistoryDropTarget(divider);
     queueList.append(divider);
   };
   for (const item of items) {
@@ -563,24 +609,31 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
       const dragHandle = document.createElement("button");
       dragHandle.className = "queue-drag-handle";
       dragHandle.type = "button";
-      dragHandle.draggable = true;
       dragHandle.title = "Drag to reorder";
       dragHandle.setAttribute(
         "aria-label",
         `Reorder ${itemReference(item)}. Drag, or use the arrow keys`,
       );
       dragHandle.innerHTML = '<span aria-hidden="true"></span>';
-      dragHandle.addEventListener("dragstart", (event) => {
-        beginQueueDrag(event, item.id, row);
+      dragHandle.addEventListener("pointerdown", (event) => {
+        beginQueuePointerDrag(event, item.id, row, dragHandle);
       });
-      dragHandle.addEventListener("dragend", endQueueDrag);
+      dragHandle.addEventListener("pointermove", updateQueuePointerDrag);
+      dragHandle.addEventListener("pointerup", (event) => {
+        finishQueuePointerDrag(event, true);
+      });
+      dragHandle.addEventListener("pointercancel", (event) => {
+        finishQueuePointerDrag(event, false);
+      });
+      dragHandle.addEventListener("lostpointercapture", () => {
+        if (queuePointerDrag?.handle === dragHandle) {
+          cancelQueuePointerDrag();
+        }
+      });
       dragHandle.addEventListener("keydown", (event) => {
         handleQueueReorderKey(event, item.id);
       });
       rowControls.push(dragHandle);
-      configureQueueDropTarget(row, item.id);
-    } else if (item.kind === "history") {
-      configureHistoryDropTarget(row);
     }
 
     const play = document.createElement("button");
@@ -698,7 +751,6 @@ function updateTimelineRows(items: TimelineItem[]): void {
     const dragHandle = row.querySelector<HTMLButtonElement>(".queue-drag-handle");
     if (dragHandle) {
       dragHandle.disabled = queueCommandInFlight || clearPending;
-      dragHandle.draggable = !dragHandle.disabled;
     }
     const remove = row.querySelector<HTMLButtonElement>(".queue-remove");
     if (remove) {
@@ -975,6 +1027,7 @@ document.addEventListener("visibilitychange", () => {
 });
 
 queueList.addEventListener("scroll", updateTimelineFade, { passive: true });
+window.addEventListener("blur", cancelQueuePointerDrag);
 
 render(currentStatus);
 void refreshStatus();

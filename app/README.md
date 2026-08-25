@@ -44,6 +44,16 @@ paths can be overridden with `SUPER_SPEECH_ENGINE_PATH` and
 without starting Electron or touching an audio device. Renderer screenshots can
 use the browser-only demo status produced when the preload bridge is absent.
 
+Run the Electron mouse test after changing queue interactions:
+
+```powershell
+npm run test:drag
+```
+
+It uses real pointer input to reorder a waiting item and drop it into History.
+The test runs against a temporary runtime with silent audio and verifies the
+result in both the renderer and the engine queue.
+
 ## Engine verification
 
 The engine smoke test synthesizes and plays a silent-timing chunk with an
