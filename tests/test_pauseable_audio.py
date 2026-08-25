@@ -122,6 +122,31 @@ def test_status_exposes_pause_current_chunk_and_queue(tmp_path: Path) -> None:
     assert status["history"] == []
 
 
+def test_status_command_retries_a_transient_windows_read_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    engine = load_engine("super_speech_engine_status_retry")
+    configure_runtime(engine, tmp_path)
+    engine.STATUS.write_text('{"version": 3, "state": "idle"}', encoding="utf-8")
+    original_read_text = Path.read_text
+    attempts = 0
+
+    def read_text(path: Path, *args, **kwargs) -> str:
+        nonlocal attempts
+        if path == engine.STATUS:
+            attempts += 1
+            if attempts == 1:
+                raise PermissionError("status is being replaced")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    engine.print_status()
+
+    assert attempts == 2
+    assert json.loads(capsys.readouterr().out)["state"] == "idle"
+
+
 def test_enqueue_text_reserves_the_next_queue_number(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_enqueue")
 
@@ -258,6 +283,12 @@ def test_start_engine_accepts_an_existing_current_engine_that_is_loading(
     )
 
     engine.start_engine()
+
+
+def test_process_exists_recognizes_the_current_process() -> None:
+    engine = load_engine("super_speech_engine_process_exists")
+
+    assert engine.process_exists(os.getpid())
 
 
 def test_start_engine_ignores_status_from_a_previous_lock_owner(

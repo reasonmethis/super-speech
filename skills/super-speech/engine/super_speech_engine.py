@@ -174,6 +174,21 @@ def engine_is_running() -> bool:
 def process_exists(process_id: object) -> bool:
     if not isinstance(process_id, int) or process_id <= 0:
         return False
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+        open_process.restype = ctypes.c_void_p
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
+        handle = open_process(0x1000, False, process_id)
+        if not handle:
+            return False
+        close_handle(handle)
+        return True
     try:
         os.kill(process_id, 0)
     except ProcessLookupError:
@@ -1319,9 +1334,16 @@ def resume() -> None:
 
 
 def print_status() -> None:
-    if STATUS.is_file():
-        print(STATUS.read_text(encoding="utf-8"))
-        return
+    status_error: OSError | None = None
+    for _ in range(5):
+        try:
+            print(STATUS.read_text(encoding="utf-8"))
+            return
+        except OSError as error:
+            status_error = error
+            time.sleep(0.02)
+    if STATUS.exists() and status_error is not None:
+        raise RuntimeError(f"could not read engine status: {status_error}")
     print(
         json.dumps(
             {
