@@ -307,6 +307,36 @@ def test_queue_request_is_applied_and_acknowledged(
     ]
 
 
+def test_queue_ack_retries_a_transient_windows_read_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_queue_ack_retry")
+    configure_runtime(engine, tmp_path)
+    request_id = "a" * 24
+    acknowledgement = engine.queue_ack_path(request_id)
+    acknowledgement.write_text(
+        json.dumps({"ok": True, "accepted_at": 1.0, "error": None}),
+        encoding="utf-8",
+    )
+    original_read_text = Path.read_text
+    attempts = 0
+
+    def read_text(path: Path, *args, **kwargs) -> str:
+        nonlocal attempts
+        if path == acknowledgement:
+            attempts += 1
+            if attempts == 1:
+                raise PermissionError("acknowledgement is being replaced")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    engine.wait_for_queue_ack(request_id, timeout=0.2)
+
+    assert attempts == 2
+    assert not acknowledgement.exists()
+
+
 def test_queue_request_rejects_the_current_chunk(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

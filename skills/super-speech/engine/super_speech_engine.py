@@ -115,7 +115,7 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
-ENGINE_VERSION = "0.4.3"
+ENGINE_VERSION = "0.4.4"
 STATUS_VERSION = 5
 
 
@@ -642,27 +642,39 @@ def publish_play_ack(
         temp_path.unlink(missing_ok=True)
 
 
-def wait_for_play_ack(request_id: str, timeout: float = 60.0) -> dict[str, object]:
-    target = play_ack_path(request_id)
-    deadline = time.monotonic() + timeout
+def wait_for_ack_payload(target: Path, deadline: float) -> dict[str, object] | None:
+    """Read one atomic acknowledgement, tolerating short Windows file locks."""
     while time.monotonic() < deadline:
         try:
             payload = json.loads(target.read_text(encoding="utf-8"))
-        except FileNotFoundError:
+        except OSError:
             time.sleep(0.05)
             continue
-        except (OSError, ValueError, json.JSONDecodeError) as error:
+        except json.JSONDecodeError as error:
             target.unlink(missing_ok=True)
             raise RuntimeError(f"invalid engine acknowledgement: {error}") from error
-        target.unlink(missing_ok=True)
-        if payload.get("ok") is not True:
-            raise RuntimeError(str(payload.get("error") or "engine rejected play request"))
-        result_id = payload.get("result_id")
-        accepted_at = payload.get("accepted_at")
-        if not isinstance(result_id, str) or not isinstance(accepted_at, (int, float)):
-            raise RuntimeError("engine returned an incomplete play acknowledgement")
-        return {"id": result_id, "accepted_at": accepted_at}
-    raise RuntimeError("engine did not acknowledge play request")
+        try:
+            target.unlink(missing_ok=True)
+        except OSError as error:
+            log(f"could not remove acknowledgement {target.name}: {error}")
+        if not isinstance(payload, dict):
+            raise RuntimeError("invalid engine acknowledgement: expected an object")
+        return payload
+    return None
+
+
+def wait_for_play_ack(request_id: str, timeout: float = 60.0) -> dict[str, object]:
+    target = play_ack_path(request_id)
+    payload = wait_for_ack_payload(target, time.monotonic() + timeout)
+    if payload is None:
+        raise RuntimeError("engine did not acknowledge play request")
+    if payload.get("ok") is not True:
+        raise RuntimeError(str(payload.get("error") or "engine rejected play request"))
+    result_id = payload.get("result_id")
+    accepted_at = payload.get("accepted_at")
+    if not isinstance(result_id, str) or not isinstance(accepted_at, (int, float)):
+        raise RuntimeError("engine returned an incomplete play acknowledgement")
+    return {"id": result_id, "accepted_at": accepted_at}
 
 
 def prune_play_acknowledgements(max_age: float = 300.0) -> None:
@@ -790,23 +802,13 @@ def publish_queue_ack(request_id: str, error: str | None = None) -> None:
 
 def wait_for_queue_ack(request_id: str, timeout: float = 10.0) -> None:
     target = queue_ack_path(request_id)
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            payload = json.loads(target.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            time.sleep(0.05)
-            continue
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            target.unlink(missing_ok=True)
-            raise RuntimeError(f"invalid engine acknowledgement: {error}") from error
-        target.unlink(missing_ok=True)
-        if payload.get("ok") is not True:
-            raise RuntimeError(str(payload.get("error") or "engine rejected queue request"))
-        if not isinstance(payload.get("accepted_at"), (int, float)):
-            raise RuntimeError("engine returned an incomplete queue acknowledgement")
-        return
-    raise RuntimeError("engine did not acknowledge queue request")
+    payload = wait_for_ack_payload(target, time.monotonic() + timeout)
+    if payload is None:
+        raise RuntimeError("engine did not acknowledge queue request")
+    if payload.get("ok") is not True:
+        raise RuntimeError(str(payload.get("error") or "engine rejected queue request"))
+    if not isinstance(payload.get("accepted_at"), (int, float)):
+        raise RuntimeError("engine returned an incomplete queue acknowledgement")
 
 
 def prune_queue_acknowledgements(max_age: float = 300.0) -> None:
