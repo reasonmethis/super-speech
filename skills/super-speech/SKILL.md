@@ -214,6 +214,10 @@ the original archive. Selecting while paused resumes playback. Never derive an
 ID from a path or mutate runtime files directly; use the exact opaque ID from
 `status`.
 
+The command waits for the engine to accept or reject the ID. On success it
+prints JSON containing the exact resulting queue ID and acceptance time; a
+missing ID exits with an error.
+
 The `history` array is an archive of completed, skipped, and cleared chunks. Do
 not assume that every history entry played to completion.
 

@@ -15,7 +15,7 @@
       <header id="titlebar" class="titlebar">
         <div class="brand">
           <img class="brand-mark" src="/icon.png" alt="" />
-          <span>Super Speech</span>
+          <h1>Super Speech</h1>
         </div>
         <div class="window-controls">
           <button id="minimize-button" class="window-button" aria-label="Minimize">
@@ -43,7 +43,7 @@
         </button>
 
         <div id="playback-copy" class="playback-copy">
-          <h1 id="playback-title">Getting ready</h1>
+          <h2 id="playback-title">Getting ready</h2>
           <p id="current-text" class="current-text">Reading the local speech engine...</p>
         </div>
 
@@ -59,14 +59,14 @@
       <section class="queue-section">
         <div class="section-heading">
           <div>
-            <h2>Speech</h2>
+            <h2 id="speech-heading">Speech</h2>
           </div>
           <div class="queue-actions">
             <button id="clear-queue-button" class="clear-queue-button is-hidden" type="button">Clear</button>
-            <span id="queue-count" class="queue-count" aria-label="0 chunks waiting">0</span>
+            <span id="queue-count" class="queue-count">0</span>
           </div>
         </div>
-        <div id="queue-list" class="queue-list" tabindex="-1" aria-label="Speech timeline"></div>
+        <div id="queue-list" class="queue-list" tabindex="-1" role="region" aria-labelledby="speech-heading"></div>
         <div id="command-status" class="sr-only" role="status" aria-live="polite"></div>
       </section>
 

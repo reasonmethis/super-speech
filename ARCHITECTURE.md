@@ -13,17 +13,20 @@ engine.
   snapshot
 - Electron main owns the window, tray, installer, and agent integration. While
   the app is running, it also supervises the engine process it starts
-- The renderer displays status and sends a narrow set of commands through a
-  sandboxed preload bridge
+- Electron main adapts the engine's private status and signal files into a
+  narrow, sandboxed renderer bridge
+- The renderer displays status and sends playback commands through that bridge
 - `super-speech-engine` is the public contract for the app, skills, and headless
   users. Its `speak` command starts the one engine process and reserves queue
   numbers atomically
-- Runtime files remain a private, local protocol between engine processes. No
-  web server or second playback state machine is needed
+- Runtime files remain a private, local protocol owned by the engine and read
+  by Electron main. No web server or second playback state machine is needed
 
 The desktop installer places the directory-style frozen engine, Kokoro model,
 and voices outside `app.asar`. Its mutable queue, signal, status, and log files
-stay in `~/.super-speech/`. Electron stops only a child process it owns.
+stay in `~/.super-speech/`. Electron normally stops only a child process it
+owns. At startup, it may interrupt an incompatible older engine holding the
+desktop runtime lock so the bundled engine can replace it safely.
 
 The headless installer creates `runtime/` inside the installed skill. That
 directory contains its private Python environment, models, queue, status, and
@@ -68,7 +71,7 @@ runtime sizes.
 
 ## Playback protocol
 
-`super-speech-engine status` publishes a version 2 snapshot with the current
+`super-speech-engine status` publishes a version 3 snapshot with the current
 chunk, the complete upcoming queue, and up to 50 newest archived chunks. Every
 entry has an opaque `id`. The total `history_count` can exceed the bounded
 `history` array.
@@ -85,8 +88,11 @@ Electron, validates the identifier and owns every queue or archive mutation:
   the original archive and the untouched upcoming queue
 
 Selection invalidates rendered pieces that no longer match the chosen order.
-The atomic request mailbox is last-write-wins before consumption. No HTTP,
-WebSocket, second queue, or renderer playback state machine is needed.
+Each selection uses an atomic request file and a private acknowledgement that
+reports the exact resulting queue ID or an engine rejection. If several
+requests arrive before one poll, the engine rejects the superseded requests
+and accepts the newest one, so every CLI caller terminates. No HTTP, WebSocket,
+second queue, or renderer playback state machine is needed.
 
 ## Distribution boundaries
 

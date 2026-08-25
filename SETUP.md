@@ -100,7 +100,8 @@ upcoming chunk starts it immediately and leaves the interrupted chunk queued.
 Selecting a history entry creates a new queued replay without changing the
 remaining queue or the original archive. Selection is distinct from pause and
 resume: pause preserves the exact audio sample, while a preempted chunk later
-restarts from its beginning.
+restarts from its beginning. The command waits for engine acknowledgement and
+prints the exact resulting queue ID as JSON.
 
 History is an archive, not a completion log. It can contain chunks that
 finished, were skipped, or were cleared before playback.

@@ -52,6 +52,8 @@ work session without having to reconstruct the product decisions.
 - Preserve enough rendered audio history to make replay instant
 - Record completed, skipped, and cleared outcomes before labeling history as played
 - [x] Define queue-selection behavior in tests before changing the file protocol
+- [x] Return an engine-owned acknowledgement for selection and replay
+- [x] Add a silent full-loop test for archived replay and queue preservation
 - Add black-box coverage for skip with buffered pieces, clear during playback,
   stop during gaps, failed synthesis, and persistent pause
 

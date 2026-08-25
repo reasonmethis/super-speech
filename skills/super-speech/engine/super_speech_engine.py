@@ -26,8 +26,8 @@ behavior. Signal files in BASE are the engine's private process protocol:
                continue with next
   CLEAR      - drop the buffer and every non-playing queued chunk (-> spoken/);
                never truncates the currently playing chunk
-  PLAY.json  - select a queued or recent chunk by ID; selecting another chunk
-               preempts the current one without marking it spoken
+  PLAY.*.json - select a queued or recent chunk by ID; selecting another chunk
+                preempts the current one without marking it spoken
   WARMUP     - synthesize a throwaway phrase to pay the first-inference cost
 
 Env:
@@ -45,6 +45,7 @@ import json
 import os
 import queue
 import re
+import secrets
 import subprocess
 import sys
 import threading
@@ -112,6 +113,7 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
 ENGINE_VERSION = "0.3.0"
+STATUS_VERSION = 3
 
 
 class EngineInstanceLock:
@@ -169,6 +171,20 @@ def engine_is_running() -> bool:
     return False
 
 
+def process_exists(process_id: object) -> bool:
+    if not isinstance(process_id, int) or process_id <= 0:
+        return False
+    try:
+        os.kill(process_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def engine_command(*arguments: str) -> list[str]:
     if getattr(sys, "frozen", False):
         return [sys.executable, *arguments]
@@ -178,7 +194,19 @@ def engine_command(*arguments: str) -> list[str]:
 def start_engine() -> None:
     """Start the same engine executable detached and wait for its process lock."""
     if engine_is_running():
-        return
+        try:
+            stored_status = json.loads(STATUS.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            stored_status = {}
+        version = stored_status.get("version")
+        if version is not None and version != STATUS_VERSION:
+            raise RuntimeError(
+                f"running engine uses unsupported protocol version {version}; "
+                "interrupt it and retry"
+            )
+        if wait_for_engine_status():
+            return
+        raise RuntimeError(f"engine lock is held but startup did not finish; inspect {LOG}")
     if not MODEL_PATH.is_file() or not VOICES_PATH.is_file():
         raise RuntimeError(
             f"missing Kokoro models at {MODEL_DIR}; run 'super-speech-engine setup'"
@@ -186,7 +214,6 @@ def start_engine() -> None:
 
     BASE.mkdir(parents=True, exist_ok=True)
     # Wait until this child finishes startup cleanup so a new PLAY is not cleared as stale
-    launch_started_at = time.time()
     with LOG.open("a", encoding="utf-8") as engine_log:
         options: dict[str, object] = {
             "cwd": str(BASE),
@@ -204,6 +231,16 @@ def start_engine() -> None:
             options["start_new_session"] = True
         process = subprocess.Popen(engine_command("serve"), **options)
 
+    if wait_for_engine_status(process.pid, process):
+        return
+    raise RuntimeError(f"engine failed to start; inspect {LOG}")
+
+
+def wait_for_engine_status(
+    expected_pid: int | None = None,
+    process: subprocess.Popen | None = None,
+) -> bool:
+    """Wait until the lock owner publishes status after its startup cleanup."""
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         if engine_is_running():
@@ -212,16 +249,25 @@ def start_engine() -> None:
             except (OSError, ValueError, json.JSONDecodeError):
                 status = {}
             updated_at = status.get("updated_at")
-            if status.get("engine_pid") == process.pid and isinstance(
-                updated_at, (int, float)
-            ) and updated_at >= launch_started_at:
-                return
-        if process.poll() is not None:
+            pid_matches = expected_pid is None or status.get("engine_pid") == expected_pid
+            owner_is_live = expected_pid is not None or process_exists(
+                status.get("engine_pid")
+            )
+            if (
+                status.get("version") == STATUS_VERSION
+                and pid_matches
+                and owner_is_live
+                and isinstance(updated_at, (int, float))
+            ):
+                return True
+        if process is not None and process.poll() is not None:
             if engine_is_running():
-                return
+                expected_pid = None
+                process = None
+                continue
             break
         time.sleep(0.05)
-    raise RuntimeError(f"engine failed to start; inspect {LOG}")
+    return False
 
 
 def file_hash(path: Path) -> str:
@@ -415,51 +461,65 @@ def consume(signal: Path) -> bool:
     return True
 
 
-def request_play(chunk_id: str) -> None:
-    """Atomically publish the latest requested chunk ID for the engine."""
+def play_ack_path(request_id: str) -> Path:
+    if not re.fullmatch(r"[a-f0-9]{24}", request_id):
+        raise ValueError("invalid play request ID")
+    return BASE / f"PLAY_ACK.{request_id}.json"
+
+
+def request_play(chunk_id: str) -> str:
+    """Atomically publish one uniquely acknowledged selection request."""
     if not re.fullmatch(r"[A-Za-z0-9_-]+", chunk_id):
         raise ValueError("chunk ID contains invalid characters")
     if not engine_is_running():
         raise RuntimeError("engine is not running")
 
     BASE.mkdir(parents=True, exist_ok=True)
-    temp_path = PLAY.with_name(
-        f"{PLAY.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp"
+    request_id = secrets.token_hex(12)
+    request_path = PLAY.with_name(f"{PLAY.stem}.{time.time_ns()}.{request_id}.json")
+    temp_path = request_path.with_name(
+        f"{request_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
     )
     try:
-        temp_path.write_text(json.dumps({"id": chunk_id}), encoding="utf-8")
-        os.replace(temp_path, PLAY)
+        temp_path.write_text(
+            json.dumps({"id": chunk_id, "request_id": request_id}), encoding="utf-8"
+        )
+        os.replace(temp_path, request_path)
     finally:
         temp_path.unlink(missing_ok=True)
+    return request_id
 
 
-def claim_play_request() -> Path | None:
-    """Atomically detach one request so a newer writer cannot be unlinked."""
-    claimed = PLAY.with_name(
-        f"{PLAY.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.claim"
-    )
-    try:
-        os.replace(PLAY, claimed)
-    except FileNotFoundError:
-        return None
-    except OSError as error:
-        log(f"could not claim play request: {error}")
-        return None
+def claim_play_requests() -> list[Path]:
+    """Atomically detach the pending request batch from concurrent writers."""
+    claimed: list[Path] = []
+    pattern = f"{PLAY.stem}.*.json"
+    for request in sorted(BASE.glob(pattern)):
+        claim = request.with_suffix(".claim")
+        try:
+            os.replace(request, claim)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            log(f"could not claim play request {request.name}: {error}")
+            continue
+        claimed.append(claim)
     return claimed
 
 
-def take_play_request() -> str | None:
-    claimed = claim_play_request()
-    if claimed is None:
-        return None
+def read_play_claim(claimed: Path) -> tuple[str, str] | None:
     try:
         payload = json.loads(claimed.read_text(encoding="utf-8"))
         chunk_id = payload.get("id")
+        request_id = payload.get("request_id")
         if not isinstance(chunk_id, str) or not re.fullmatch(
             r"[A-Za-z0-9_-]+", chunk_id
         ):
             raise ValueError("invalid chunk ID")
-        return chunk_id
+        if not isinstance(request_id, str):
+            raise ValueError("invalid play request ID")
+        play_ack_path(request_id)
+        return chunk_id, request_id
     except (OSError, ValueError, json.JSONDecodeError) as error:
         log(f"invalid play request: {error}")
         return None
@@ -467,14 +527,84 @@ def take_play_request() -> str | None:
         claimed.unlink(missing_ok=True)
 
 
+def take_play_request() -> tuple[str, str] | None:
+    prune_play_acknowledgements()
+    claimed = claim_play_requests()
+    if not claimed:
+        return None
+    for superseded in claimed[:-1]:
+        request = read_play_claim(superseded)
+        if request is not None:
+            _, request_id = request
+            publish_play_ack(request_id, error="superseded by a newer play request")
+    return read_play_claim(claimed[-1])
+
+
+def publish_play_ack(
+    request_id: str, *, result_id: str | None = None, error: str | None = None
+) -> None:
+    target = play_ack_path(request_id)
+    temp_path = target.with_name(f"{target.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    payload = {
+        "ok": error is None,
+        "result_id": result_id,
+        "accepted_at": time.time(),
+        "error": error,
+    }
+    try:
+        temp_path.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(temp_path, target)
+    except OSError as ack_error:
+        log(f"could not publish play acknowledgement: {ack_error}")
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def wait_for_play_ack(request_id: str, timeout: float = 60.0) -> dict[str, object]:
+    target = play_ack_path(request_id)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            payload = json.loads(target.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            time.sleep(0.05)
+            continue
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            target.unlink(missing_ok=True)
+            raise RuntimeError(f"invalid engine acknowledgement: {error}") from error
+        target.unlink(missing_ok=True)
+        if payload.get("ok") is not True:
+            raise RuntimeError(str(payload.get("error") or "engine rejected play request"))
+        result_id = payload.get("result_id")
+        accepted_at = payload.get("accepted_at")
+        if not isinstance(result_id, str) or not isinstance(accepted_at, (int, float)):
+            raise RuntimeError("engine returned an incomplete play acknowledgement")
+        return {"id": result_id, "accepted_at": accepted_at}
+    raise RuntimeError("engine did not acknowledge play request")
+
+
+def prune_play_acknowledgements(max_age: float = 300.0) -> None:
+    cutoff = time.time() - max_age
+    for acknowledgement in BASE.glob("PLAY_ACK.*.json"):
+        try:
+            if acknowledgement.stat().st_mtime < cutoff:
+                acknowledgement.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            log(f"could not prune play acknowledgement {acknowledgement.name}: {error}")
+
+
 def archive(path: Path) -> bool:
     destination = SPOKEN / path.name
     try:
         SPOKEN.mkdir(parents=True, exist_ok=True)
         os.replace(str(path), str(destination))
+        invalidate_history()
         return True
     except FileNotFoundError as error:
         if not path.exists() and destination.exists():
+            invalidate_history()
             return True
         log(f"archive error {path.name}: {error}")
     except OSError as error:
@@ -523,6 +653,42 @@ class State:
 
 
 _last_status_write = 0.0
+_history_lock = threading.Lock()
+_history_dirty = True
+_history_count = 0
+_history_items: list[dict[str, object]] = []
+
+
+def invalidate_history() -> None:
+    global _history_dirty
+    with _history_lock:
+        _history_dirty = True
+
+
+def history_snapshot() -> tuple[int, list[dict[str, object]]]:
+    """Return the cached bounded archive view, refreshing only after an archive move."""
+    global _history_dirty, _history_count, _history_items
+    with _history_lock:
+        if _history_dirty:
+            history_files = sorted(SPOKEN.glob("*.txt"), key=chunk_sort_key, reverse=True)
+            items: list[dict[str, object]] = []
+            for path in history_files[:HISTORY_LIMIT]:
+                try:
+                    text = path.read_text(encoding="utf-8").strip()
+                except OSError:
+                    continue
+                items.append(
+                    {
+                        "id": path.stem,
+                        "filename": path.name,
+                        "text": text,
+                        "voice": voice_from_name(path.name),
+                    }
+                )
+            _history_count = len(history_files)
+            _history_items = items
+            _history_dirty = False
+        return _history_count, _history_items
 
 
 def publish_status(
@@ -584,31 +750,17 @@ def publish_status(
 
     if PAUSE.exists() and playback_state in {"idle", "playing", "ready"}:
         playback_state = "paused"
-    history_files = sorted(SPOKEN.glob("*.txt"), key=chunk_sort_key, reverse=True)
-    history_items = []
-    for path in history_files[:HISTORY_LIMIT]:
-        try:
-            text = path.read_text(encoding="utf-8").strip()
-        except OSError:
-            continue
-        history_items.append(
-            {
-                "id": path.stem,
-                "filename": path.name,
-                "text": text,
-                "voice": voice_from_name(path.name),
-            }
-        )
+    history_count, history_items = history_snapshot()
 
     payload = {
-        "version": 2,
+        "version": STATUS_VERSION,
         "state": playback_state,
         "updated_at": now,
         "engine_pid": os.getpid(),
         "current": current,
         "queue_count": len(queue_files),
         "queue": queue_items,
-        "history_count": len(history_files),
+        "history_count": history_count,
         "history": history_items,
     }
     temp_path = STATUS.with_name(f"{STATUS.name}.{os.getpid()}.tmp")
@@ -647,9 +799,10 @@ def _discard_buffer(buf: "queue.Queue") -> int:
 
 def process_play_request(buf: "queue.Queue", st: State) -> str | None:
     """Resolve one selected ID and return ``select`` when playback must yield."""
-    chunk_id = take_play_request()
-    if chunk_id is None:
+    request = take_play_request()
+    if request is None:
         return None
+    chunk_id, request_id = request
 
     # Discard audio rendered for the old order but keep source files queued for a clean restart
     with st.lock:
@@ -659,6 +812,7 @@ def process_play_request(buf: "queue.Queue", st: State) -> str | None:
         PAUSE.unlink(missing_ok=True)
         with st.lock:
             st.saw_stop = False
+        publish_play_ack(request_id, result_id=chunk_id)
         log(f"PLAY current {chunk_id}; resumed")
         return None
 
@@ -671,9 +825,11 @@ def process_play_request(buf: "queue.Queue", st: State) -> str | None:
                 target = _copy_history_to_queue(replayed_from)
             except (OSError, RuntimeError, ValueError) as error:
                 log(f"could not replay {chunk_id}: {error}")
+                publish_play_ack(request_id, error=f"could not replay {chunk_id}")
                 return None
     if target is None:
         log(f"PLAY ignored; chunk not found: {chunk_id}")
+        publish_play_ack(request_id, error=f"chunk not found: {chunk_id}")
         return None
 
     STOP.unlink(missing_ok=True)
@@ -684,6 +840,7 @@ def process_play_request(buf: "queue.Queue", st: State) -> str | None:
         st.selection_name = target.name
         st.skip_name = None
         st.saw_stop = False
+    publish_play_ack(request_id, result_id=target.stem)
     if replayed_from is None:
         log(f"PLAY selected {target.name}; discarded {discarded} banked piece(s)")
     else:
@@ -821,13 +978,22 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
                 text,
                 voice,
             )
-            while not st.stop.is_set() and _claimed(st, nxt.name):
-                try:
-                    buf.put(entry, timeout=0.2)
-                    delivered += 1
-                    break
-                except queue.Full:
-                    heartbeat()
+            while not st.stop.is_set():
+                with st.lock:
+                    if (
+                        (nxt.name not in st.claimed and nxt.name != st.playing)
+                        or nxt.name == st.skip_name
+                    ):
+                        break
+                    try:
+                        buf.put_nowait(entry)
+                    except queue.Full:
+                        pass
+                    else:
+                        delivered += 1
+                        break
+                heartbeat()
+                time.sleep(SIGNAL_TICK)
 
 
 def gap_wait(seconds: float, buf: "queue.Queue", st: State) -> str | None:
@@ -841,10 +1007,11 @@ def gap_wait(seconds: float, buf: "queue.Queue", st: State) -> str | None:
             return "interrupt"
         if consume(SKIP):
             return "skip"
-        if not st.saw_stop and STOP.exists():
-            st.saw_stop = True
+        if consume(STOP):
+            return "stop"
         if consume(CLEAR):
             do_clear(buf, st)
+            return "clear"
         now = time.monotonic()
         if PAUSE.exists():
             publish_status("paused", st)
@@ -1026,7 +1193,12 @@ def run_engine_loop() -> None:
             process_play_request(buf, st)
             if consume(CLEAR):
                 do_clear(buf, st)
-            if not st.saw_stop and STOP.exists():
+            with st.lock:
+                playing = st.playing
+            if not playing and (st.saw_stop or consume(STOP)):
+                log("STOP (idle); exiting")
+                return
+            if playing and not st.saw_stop and STOP.exists():
                 st.saw_stop = True
 
             try:
@@ -1044,13 +1216,6 @@ def run_engine_loop() -> None:
             except queue.Empty:
                 heartbeat()
                 publish_status("idle", st)
-                # STOP/idle: nothing playing and nothing buffered -> exit cleanly.
-                if (st.saw_stop or consume(STOP)) and buf.empty():
-                    with st.lock:
-                        more = bool(glob.glob(str(QUEUE / "*.txt")))
-                    if not more or st.saw_stop:
-                        log("STOP (idle); exiting")
-                        return
                 continue
 
             # Drop pieces invalidated while the worker was handing them off
@@ -1074,11 +1239,15 @@ def run_engine_loop() -> None:
                     with st.lock:
                         st.claimed.discard(path.name)
                     continue
-                if outcome == "skip":
-                    archive(path)
+                if outcome == "stop":
                     with st.lock:
                         st.claimed.discard(path.name)
-                        st.skip_name = path.name
+                    log("STOP (gap); exiting")
+                    return
+                if outcome == "clear":
+                    continue
+                if outcome == "skip":
+                    finish_chunk_playback(path, "skip", True, st)
                     continue
             session_first = False
 
@@ -1121,6 +1290,9 @@ def run_engine_loop() -> None:
 def clear_transient_signals() -> None:
     for signal in (STOP, INTERRUPT, SKIP, CLEAR, PLAY, WARMUP):
         signal.unlink(missing_ok=True)
+    for request in BASE.glob(f"{PLAY.stem}.*"):
+        request.unlink(missing_ok=True)
+    prune_play_acknowledgements()
 
 
 def serve() -> None:
@@ -1129,6 +1301,7 @@ def serve() -> None:
     if not instance_lock.acquire():
         return
     try:
+        STATUS.unlink(missing_ok=True)
         clear_transient_signals()
         run_engine_loop()
     finally:
@@ -1152,7 +1325,7 @@ def print_status() -> None:
     print(
         json.dumps(
             {
-                "version": 2,
+                "version": STATUS_VERSION,
                 "state": "stopped",
                 "updated_at": 0,
                 "engine_pid": None,
@@ -1206,7 +1379,8 @@ def cli(argv: list[str] | None = None) -> int:
             resume()
         elif args.command == "play":
             start_engine()
-            request_play(args.chunk_id)
+            request_id = request_play(args.chunk_id)
+            print(json.dumps(wait_for_play_ack(request_id)))
         else:
             signal = {
                 "skip": SKIP,

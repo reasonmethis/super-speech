@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  ENGINE_STATUS_VERSION,
   parseEngineStatus,
+  parseEngineProcessStatus,
+  parsePlayAcceptance,
   statusForEngineProcess,
   timelineItems,
   type EngineStatus,
 } from "./runtime.ts";
 
 const status: EngineStatus = {
-  version: 2,
+  version: ENGINE_STATUS_VERSION,
   state: "stopped",
   updated_at: 1,
   engine_pid: 41,
@@ -31,25 +34,30 @@ test("ignores status until the new engine has published its process ID", () => {
   assert.equal(statusForEngineProcess(status, undefined), null);
 });
 
-test("accepts a complete version 2 status", () => {
+test("accepts a complete current-version status", () => {
   assert.equal(parseEngineStatus(status), status);
 });
 
-test("upgrades version 1 status during an app-engine rolling upgrade", () => {
-  const { history: _history, history_count: _historyCount, ...versionTwo } = status;
-  const versionOne = { ...versionTwo, version: 1 };
-
-  assert.deepEqual(parseEngineStatus(versionOne), {
-    ...versionOne,
-    version: 2,
-    history_count: 0,
-    history: [],
+test("rejects an older status while retaining its process metadata", () => {
+  const older = { ...status, version: ENGINE_STATUS_VERSION - 1 };
+  assert.equal(parseEngineStatus(older), null);
+  assert.deepEqual(parseEngineProcessStatus(older), {
+    engine_pid: status.engine_pid,
+    updated_at: status.updated_at,
   });
 });
 
-test("rejects a partial version 2 status instead of inventing missing fields", () => {
+test("rejects a partial current-version status instead of inventing missing fields", () => {
   const { history: _history, ...partial } = status;
   assert.equal(parseEngineStatus(partial), null);
+});
+
+test("normalizes an engine play acknowledgement", () => {
+  assert.deepEqual(parsePlayAcceptance({ id: "008-bm_fable-say", accepted_at: 12.5 }), {
+    id: "008-bm_fable-say",
+    acceptedAt: 12.5,
+  });
+  assert.equal(parsePlayAcceptance({ id: "008-bm_fable-say" }), null);
 });
 
 test("orders the timeline as current, upcoming, then history", () => {

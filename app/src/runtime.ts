@@ -7,6 +7,8 @@ export type RuntimeState =
   | "setup_required"
   | "stopped";
 
+export const ENGINE_STATUS_VERSION = 3 as const;
+
 export interface QueueItem {
   id: string;
   filename: string;
@@ -21,7 +23,7 @@ export interface CurrentItem extends QueueItem {
 }
 
 export interface EngineStatus {
-  version: 2;
+  version: typeof ENGINE_STATUS_VERSION;
   state: RuntimeState;
   updated_at: number;
   engine_pid: number | null;
@@ -30,6 +32,11 @@ export interface EngineStatus {
   queue: QueueItem[];
   history_count: number;
   history: QueueItem[];
+}
+
+export interface EngineProcessStatus {
+  updated_at: number;
+  engine_pid: number | null;
 }
 
 export interface RuntimeStatus extends EngineStatus {
@@ -42,6 +49,21 @@ export type TimelineItemKind = "current" | "upcoming" | "history";
 export interface TimelineItem extends QueueItem {
   kind: TimelineItemKind;
   position: number | null;
+}
+
+export interface PlayAcceptance {
+  id: string;
+  acceptedAt: number;
+}
+
+export function parsePlayAcceptance(value: unknown): PlayAcceptance | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const acceptance = value as Record<string, unknown>;
+  return typeof acceptance.id === "string" && typeof acceptance.accepted_at === "number"
+    ? { id: acceptance.id, acceptedAt: acceptance.accepted_at }
+    : null;
 }
 
 const RUNTIME_STATES = new Set<RuntimeState>([
@@ -79,10 +101,6 @@ function isCurrentItem(value: unknown): value is CurrentItem {
   );
 }
 
-interface EngineStatusV1 extends Omit<EngineStatus, "version" | "history_count" | "history"> {
-  version: 1;
-}
-
 function hasStatusCore(value: Record<string, unknown>): boolean {
   return (
     typeof value.state === "string" &&
@@ -96,17 +114,11 @@ function hasStatusCore(value: Record<string, unknown>): boolean {
   );
 }
 
-function isEngineStatusV1(
-  value: Record<string, unknown>,
-): value is Record<string, unknown> & EngineStatusV1 {
-  return value.version === 1 && hasStatusCore(value);
-}
-
-function isEngineStatusV2(
+function isEngineStatusCurrent(
   value: Record<string, unknown>,
 ): value is Record<string, unknown> & EngineStatus {
   return (
-    value.version === 2 &&
+    value.version === ENGINE_STATUS_VERSION &&
     hasStatusCore(value) &&
     typeof value.history_count === "number" &&
     Array.isArray(value.history) &&
@@ -119,19 +131,24 @@ export function parseEngineStatus(value: unknown): EngineStatus | null {
     return null;
   }
   const status = value as Record<string, unknown>;
-  if (isEngineStatusV2(status)) {
+  if (isEngineStatusCurrent(status)) {
     return status;
   }
-  // A new app can briefly read v1 status from the outgoing engine; v1 had no history to recover
-  if (isEngineStatusV1(status)) {
-    return {
-      ...status,
-      version: 2,
-      history_count: 0,
-      history: [],
-    };
-  }
   return null;
+}
+
+export function parseEngineProcessStatus(value: unknown): EngineProcessStatus | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const status = value as Record<string, unknown>;
+  if (
+    typeof status.updated_at !== "number" ||
+    (status.engine_pid !== null && typeof status.engine_pid !== "number")
+  ) {
+    return null;
+  }
+  return { updated_at: status.updated_at, engine_pid: status.engine_pid };
 }
 
 function timelineItem(
@@ -162,7 +179,7 @@ export function timelineItems(
 export interface DesktopApi {
   getStatus(): Promise<RuntimeStatus>;
   setPaused(paused: boolean): Promise<RuntimeStatus>;
-  playChunk(id: string): Promise<void>;
+  playChunk(id: string): Promise<PlayAcceptance>;
   clearQueue(): Promise<void>;
   openSetup(): Promise<void>;
   minimize(): Promise<void>;
@@ -187,7 +204,7 @@ export const IPC_CHANNELS = {
 } as const;
 
 export const INITIAL_STATUS: RuntimeStatus = {
-  version: 2,
+  version: ENGINE_STATUS_VERSION,
   state: "loading",
   updated_at: 0,
   engine_pid: null,

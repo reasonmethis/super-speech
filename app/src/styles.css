@@ -123,6 +123,11 @@ button {
   letter-spacing: -0.01em;
 }
 
+.brand h1 {
+  margin: 0;
+  font: inherit;
+}
+
 .brand-mark {
   width: 25px;
   height: 25px;
@@ -366,7 +371,7 @@ body[data-state="loading"] .playback-copy {
   letter-spacing: 0.16em;
 }
 
-.playback-copy h1 {
+.playback-copy h2 {
   margin: 0;
   font-size: 25px;
   font-weight: 680;
@@ -486,7 +491,7 @@ body[data-state="loading"] .playback-copy {
 }
 
 .clear-queue-button:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 48%, transparent);
+  outline: 2px solid var(--accent-bright);
   outline-offset: 1px;
 }
 
@@ -560,7 +565,7 @@ body[data-state="loading"] .playback-copy {
 }
 
 .queue-item:has(button:focus-visible) {
-  outline: 2px solid color-mix(in srgb, var(--accent) 48%, transparent);
+  outline: 2px solid var(--accent-bright);
   outline-offset: 1px;
 }
 
@@ -711,7 +716,7 @@ footer {
   flex: 0 0 20px;
   align-items: center;
   justify-content: center;
-  color: #555263;
+  color: #918d9f;
   font-size: 9px;
 }
 

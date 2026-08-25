@@ -8,7 +8,8 @@ status, pause, identifier-based playback selection, queue clearing, setup, and
 window controls without giving the renderer Node.js or filesystem access.
 Electron forwards playback and clear commands to the engine CLI; the frozen
 Python sidecar remains authoritative for synthesis, queue order, replay, and
-the current sample cursor.
+the current sample cursor. Playback selection returns the engine's exact
+resulting queue ID, so the renderer never infers acceptance from matching text.
 
 ## Prerequisites
 

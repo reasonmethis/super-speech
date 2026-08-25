@@ -24,10 +24,14 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  ENGINE_STATUS_VERSION,
   IPC_CHANNELS,
   parseEngineStatus,
+  parseEngineProcessStatus,
+  parsePlayAcceptance,
   statusForEngineProcess,
-  type EngineStatus,
+  type EngineProcessStatus,
+  type PlayAcceptance,
   type RuntimeState,
   type RuntimeStatus,
 } from "../src/runtime";
@@ -133,7 +137,7 @@ function processExists(processId: number | null | undefined): boolean {
   }
 }
 
-function engineIsRunning(base: string, status: EngineStatus | null): boolean {
+function engineIsRunning(base: string, status: EngineProcessStatus | null): boolean {
   return (
     heartbeatIsFresh(path.join(base, "engine.alive")) ||
     Boolean(
@@ -144,15 +148,32 @@ function engineIsRunning(base: string, status: EngineStatus | null): boolean {
   );
 }
 
-function readEngineStatus(base: string): EngineStatus | null {
+function readStatusSnapshot(base: string): unknown {
   try {
-    const parsed: unknown = JSON.parse(
-      readFileSync(path.join(base, "status.json"), "utf8"),
-    );
-    return parseEngineStatus(parsed);
+    return JSON.parse(readFileSync(path.join(base, "status.json"), "utf8"));
   } catch {
     return null;
   }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function stopIncompatibleEngine(base: string): Promise<boolean> {
+  try {
+    await runEngineCommand("interrupt");
+  } catch {
+    return false;
+  }
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (!engineIsRunning(base, parseEngineProcessStatus(readStatusSnapshot(base)))) {
+      return true;
+    }
+    await delay(50);
+  }
+  return false;
 }
 
 function getStatus(): RuntimeStatus {
@@ -160,27 +181,29 @@ function getStatus(): RuntimeStatus {
   const installed = modelsInstalled(modelDirectory());
   const ownedEngineRunning = ownedEngine !== null && ownedEngine.exitCode === null;
   const paused = existsSync(path.join(base, "PAUSE"));
-  const storedEngine = readEngineStatus(base);
+  const storedSnapshot = readStatusSnapshot(base);
+  const storedEngine = parseEngineStatus(storedSnapshot);
+  const storedProcess = parseEngineProcessStatus(storedSnapshot);
   const engine = ownedEngineRunning
     ? statusForEngineProcess(storedEngine, ownedEngine?.pid)
     : storedEngine;
-  const engineRunning = ownedEngineRunning || engineIsRunning(base, engine);
+  const engineRunning = ownedEngineRunning || engineIsRunning(base, storedProcess);
 
   let state: RuntimeState;
   if (!installed || engine?.state === "setup_required") {
     state = "setup_required";
+  } else if (engineStartFailed) {
+    state = "stopped";
   } else if (paused) {
     state = "paused";
   } else if (engineRunning) {
     state = engine?.state ?? "loading";
-  } else if (engineStartFailed) {
-    state = "stopped";
   } else {
     state = "ready";
   }
 
   return {
-    version: 2,
+    version: ENGINE_STATUS_VERSION,
     state,
     updated_at: engine?.updated_at ?? 0,
     engine_pid: engineRunning ? (engine?.engine_pid ?? ownedEngine?.pid ?? null) : null,
@@ -194,7 +217,7 @@ function getStatus(): RuntimeStatus {
   };
 }
 
-function runEngineCommand(...arguments_: string[]): Promise<void> {
+function runEngineCommand(...arguments_: string[]): Promise<string> {
   const launch = engineLaunch();
   if (!launch) {
     return Promise.reject(new Error("The Super Speech engine is not installed"));
@@ -207,9 +230,14 @@ function runEngineCommand(...arguments_: string[]): Promise<void> {
         SUPER_SPEECH_MODEL_DIR: modelDirectory(),
       },
       windowsHide: true,
-      stdio: ["ignore", "ignore", "pipe"],
+      stdio: ["ignore", "pipe", "pipe"],
     });
+    let output = "";
     let errorText = "";
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (data: string) => {
+      output += data;
+    });
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (data: string) => {
       errorText += data;
@@ -217,7 +245,7 @@ function runEngineCommand(...arguments_: string[]): Promise<void> {
     child.once("error", reject);
     child.once("exit", (code) => {
       if (code === 0) {
-        resolve();
+        resolve(output.trim());
       } else {
         reject(new Error(errorText.trim() || `Engine command exited with code ${code}`));
       }
@@ -225,12 +253,17 @@ function runEngineCommand(...arguments_: string[]): Promise<void> {
   });
 }
 
-function playChunk(id: string): Promise<void> {
-  return runEngineCommand("play", id);
+async function playChunk(id: string): Promise<PlayAcceptance> {
+  const output = await runEngineCommand("play", id);
+  const acceptance = parsePlayAcceptance(JSON.parse(output));
+  if (!acceptance) {
+    throw new Error("Engine returned an incomplete play acknowledgement");
+  }
+  return acceptance;
 }
 
-function clearQueue(): Promise<void> {
-  return runEngineCommand("clear");
+async function clearQueue(): Promise<void> {
+  await runEngineCommand("clear");
 }
 
 function packagedSkillDirectory(): string {
@@ -314,7 +347,7 @@ function writeInstallManifest(
   );
 }
 
-function startEngine(): void {
+async function startEngine(): Promise<void> {
   const base = runtimeDir();
   mkdirSync(path.join(base, "queue"), { recursive: true });
   mkdirSync(path.join(base, "spoken"), { recursive: true });
@@ -322,9 +355,18 @@ function startEngine(): void {
   const launch = engineLaunch();
   writeInstallManifest(base, launch, installAgentSkills(base));
 
-  if (engineIsRunning(base, readEngineStatus(base))) {
-    engineStartFailed = false;
-    return;
+  const storedSnapshot = readStatusSnapshot(base);
+  const storedEngine = parseEngineStatus(storedSnapshot);
+  const storedProcess = parseEngineProcessStatus(storedSnapshot);
+  if (engineIsRunning(base, storedProcess)) {
+    if (storedEngine) {
+      engineStartFailed = false;
+      return;
+    }
+    if (!(await stopIncompatibleEngine(base))) {
+      engineStartFailed = true;
+      return;
+    }
   }
   if (ownedEngine && ownedEngine.exitCode === null) {
     return;
@@ -556,10 +598,10 @@ if (!hasSingleInstanceLock) {
   app.on("window-all-closed", () => {
     // The tray owns the app lifetime
   });
-  void app.whenReady().then(() => {
+  void app.whenReady().then(async () => {
     Menu.setApplicationMenu(null);
     registerIpc();
-    startEngine();
+    await startEngine();
     createWindow();
     createTray();
     if (smokeTest) {
