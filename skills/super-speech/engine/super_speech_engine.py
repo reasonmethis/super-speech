@@ -28,6 +28,7 @@ behavior. Signal files in BASE are the engine's private process protocol:
                never truncates the currently playing chunk
   PLAY.*.json - select a queued or recent chunk by ID; selecting another chunk
                 preempts the current one without marking it spoken
+  QUEUE_COMMAND.*.json - reorder or archive a waiting chunk by stable ID
   WARMUP     - synthesize a throwaway phrase to pay the first-inference cost
 
 Env:
@@ -75,6 +76,8 @@ INTERRUPT = BASE / "INTERRUPT"
 SKIP = BASE / "SKIP"
 CLEAR = BASE / "CLEAR"
 PLAY = BASE / "PLAY.json"
+QUEUE_COMMAND = BASE / "QUEUE_COMMAND.json"
+QUEUE_ORDER = BASE / "queue-order.json"
 WARMUP = BASE / "WARMUP"
 HEARTBEAT = BASE / "engine.alive"
 STATUS = BASE / "status.json"
@@ -112,8 +115,8 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
-ENGINE_VERSION = "0.4.2"
-STATUS_VERSION = 4
+ENGINE_VERSION = "0.4.3"
+STATUS_VERSION = 5
 
 
 class EngineInstanceLock:
@@ -398,6 +401,58 @@ def history_sort_key(path: Path) -> tuple[bool, int, str]:
     return (sequence is not None, sequence or 0, path.name)
 
 
+_queue_order_lock = threading.RLock()
+
+
+def queue_files_in_order() -> list[Path]:
+    """Return live queue files in explicit order, then append new arrivals."""
+    with _queue_order_lock:
+        live = {path.stem: path for path in QUEUE.glob("*.txt")}
+        try:
+            payload = json.loads(QUEUE_ORDER.read_text(encoding="utf-8"))
+            saved_ids = (
+                payload.get("ids", [])
+                if isinstance(payload, dict) and payload.get("version") == 1
+                else []
+            )
+            if not isinstance(saved_ids, list) or not all(
+                isinstance(chunk_id, str) for chunk_id in saved_ids
+            ):
+                saved_ids = []
+        except (OSError, ValueError, json.JSONDecodeError):
+            saved_ids = []
+
+        ordered = [live.pop(chunk_id) for chunk_id in saved_ids if chunk_id in live]
+        ordered.extend(sorted(live.values(), key=chunk_sort_key))
+        return ordered
+
+
+def save_queue_order(paths: list[Path] | None = None) -> None:
+    """Atomically persist the order of files that are still in the queue."""
+    with _queue_order_lock:
+        ordered = paths if paths is not None else queue_files_in_order()
+        live_ids = {path.stem for path in QUEUE.glob("*.txt")}
+        ids = [path.stem for path in ordered if path.stem in live_ids]
+        missing = sorted(
+            (path for path in QUEUE.glob("*.txt") if path.stem not in ids),
+            key=chunk_sort_key,
+        )
+        ids.extend(path.stem for path in missing)
+        if not ids:
+            QUEUE_ORDER.unlink(missing_ok=True)
+            return
+        temp_path = QUEUE_ORDER.with_name(
+            f"{QUEUE_ORDER.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        try:
+            temp_path.write_text(
+                json.dumps({"version": 1, "ids": ids}), encoding="utf-8"
+            )
+            os.replace(temp_path, QUEUE_ORDER)
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+
 def log(msg: str) -> None:
     now = time.time()
     line = f"{time.strftime('%H:%M:%S', time.localtime(now))}.{int((now % 1) * 1000):03d} {msg}\n"
@@ -555,10 +610,10 @@ def read_play_claim(claimed: Path) -> tuple[str, str] | None:
 
 
 def take_play_request() -> tuple[str, str] | None:
-    prune_play_acknowledgements()
     claimed = claim_play_requests()
     if not claimed:
         return None
+    prune_play_acknowledgements()
     for superseded in claimed[:-1]:
         request = read_play_claim(superseded)
         if request is not None:
@@ -622,11 +677,160 @@ def prune_play_acknowledgements(max_age: float = 300.0) -> None:
             log(f"could not prune play acknowledgement {acknowledgement.name}: {error}")
 
 
+def queue_ack_path(request_id: str) -> Path:
+    if not re.fullmatch(r"[a-f0-9]{24}", request_id):
+        raise ValueError("invalid queue request ID")
+    return BASE / f"QUEUE_ACK.{request_id}.json"
+
+
+def request_queue_command(
+    action: str, chunk_id: str, before_id: str | None = None
+) -> str:
+    """Publish one reorder/archive request for exact engine acknowledgement."""
+    if action not in {"move", "archive"}:
+        raise ValueError("invalid queue action")
+    for value in (chunk_id, before_id):
+        if value is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+            raise ValueError("chunk ID contains invalid characters")
+    if action == "archive" and before_id is not None:
+        raise ValueError("archive does not accept a destination")
+    if not engine_is_running():
+        raise RuntimeError("engine is not running")
+
+    BASE.mkdir(parents=True, exist_ok=True)
+    request_id = secrets.token_hex(12)
+    request_path = QUEUE_COMMAND.with_name(
+        f"{QUEUE_COMMAND.stem}.{time.time_ns()}.{request_id}.json"
+    )
+    temp_path = request_path.with_name(
+        f"{request_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    try:
+        temp_path.write_text(
+            json.dumps(
+                {
+                    "action": action,
+                    "id": chunk_id,
+                    "before_id": before_id,
+                    "request_id": request_id,
+                }
+            ),
+            encoding="utf-8",
+        )
+        os.replace(temp_path, request_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return request_id
+
+
+def claim_queue_requests() -> list[Path]:
+    claimed: list[Path] = []
+    for request in sorted(BASE.glob(f"{QUEUE_COMMAND.stem}.*.json")):
+        claim = request.with_suffix(".claim")
+        try:
+            os.replace(request, claim)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            log(f"could not claim queue request {request.name}: {error}")
+            continue
+        claimed.append(claim)
+    return claimed
+
+
+def read_queue_claim(claimed: Path) -> tuple[str, str, str | None, str] | None:
+    try:
+        payload = json.loads(claimed.read_text(encoding="utf-8"))
+        action = payload.get("action")
+        chunk_id = payload.get("id")
+        before_id = payload.get("before_id")
+        request_id = payload.get("request_id")
+        if action not in {"move", "archive"}:
+            raise ValueError("invalid queue action")
+        for value in (chunk_id, before_id):
+            if value is not None and not (
+                isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]+", value)
+            ):
+                raise ValueError("invalid chunk ID")
+        if not isinstance(chunk_id, str):
+            raise ValueError("invalid chunk ID")
+        if action == "archive" and before_id is not None:
+            raise ValueError("archive does not accept a destination")
+        if not isinstance(request_id, str):
+            raise ValueError("invalid queue request ID")
+        queue_ack_path(request_id)
+        return action, chunk_id, before_id, request_id
+    except (AttributeError, OSError, ValueError, json.JSONDecodeError) as error:
+        log(f"invalid queue request: {error}")
+        return None
+    finally:
+        claimed.unlink(missing_ok=True)
+
+
+def publish_queue_ack(request_id: str, error: str | None = None) -> None:
+    target = queue_ack_path(request_id)
+    temp_path = target.with_name(f"{target.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        temp_path.write_text(
+            json.dumps(
+                {
+                    "ok": error is None,
+                    "accepted_at": time.time(),
+                    "error": error,
+                }
+            ),
+            encoding="utf-8",
+        )
+        os.replace(temp_path, target)
+    except OSError as ack_error:
+        log(f"could not publish queue acknowledgement: {ack_error}")
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def wait_for_queue_ack(request_id: str, timeout: float = 10.0) -> None:
+    target = queue_ack_path(request_id)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            payload = json.loads(target.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            time.sleep(0.05)
+            continue
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            target.unlink(missing_ok=True)
+            raise RuntimeError(f"invalid engine acknowledgement: {error}") from error
+        target.unlink(missing_ok=True)
+        if payload.get("ok") is not True:
+            raise RuntimeError(str(payload.get("error") or "engine rejected queue request"))
+        if not isinstance(payload.get("accepted_at"), (int, float)):
+            raise RuntimeError("engine returned an incomplete queue acknowledgement")
+        return
+    raise RuntimeError("engine did not acknowledge queue request")
+
+
+def prune_queue_acknowledgements(max_age: float = 300.0) -> None:
+    cutoff = time.time() - max_age
+    for acknowledgement in BASE.glob("QUEUE_ACK.*.json"):
+        try:
+            if acknowledgement.stat().st_mtime < cutoff:
+                acknowledgement.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            log(f"could not prune queue acknowledgement {acknowledgement.name}: {error}")
+
+
 def archive(path: Path) -> bool:
     destination = SPOKEN / path.name
     try:
         SPOKEN.mkdir(parents=True, exist_ok=True)
         os.replace(str(path), str(destination))
+        try:
+            save_queue_order()
+        except OSError as order_error:
+            # The live queue is still authoritative if its optional order file cannot update
+            log(f"queue order update error after archiving {path.name}: {order_error}")
         invalidate_history()
         return True
     except FileNotFoundError as error:
@@ -743,7 +947,7 @@ def publish_status(
 
     queue_files = [
         path
-        for path in sorted(QUEUE.glob("*.txt"), key=chunk_sort_key)
+        for path in queue_files_in_order()
         if path.name != playing
     ]
     queue_items = []
@@ -834,6 +1038,30 @@ def _discard_buffer(buf: "queue.Queue") -> int:
             discarded += 1
         except queue.Empty:
             return discarded
+
+
+def _reset_waiting_buffer(buf: "queue.Queue", st: State) -> int:
+    """Drop rendered waiting audio while preserving every current-chunk piece."""
+    with st.lock:
+        kept = []
+        discarded = 0
+        while True:
+            try:
+                entry = buf.get_nowait()
+            except queue.Empty:
+                break
+            if st.playing and entry[0].name == st.playing:
+                kept.append(entry)
+            else:
+                discarded += 1
+        for entry in kept:
+            buf.put_nowait(entry)
+        st.claimed = {entry[0].name for entry in kept}
+        if st.playing:
+            st.claimed.add(st.playing)
+        if st.selection_name and _find_chunk(QUEUE, Path(st.selection_name).stem) is None:
+            st.selection_name = None
+        return discarded
 
 
 def process_play_request(buf: "queue.Queue", st: State) -> str | None:
@@ -929,6 +1157,77 @@ def do_clear(buf: "queue.Queue", st: State) -> None:
     log(f"CLEAR; dropped {n} buffered/queued chunk(s)")
 
 
+def apply_queue_command(
+    buf: "queue.Queue",
+    st: State,
+    action: str,
+    chunk_id: str,
+    before_id: str | None,
+) -> None:
+    """Apply one waiting-queue mutation without changing current playback."""
+    ordered = queue_files_in_order()
+    source = next((path for path in ordered if path.stem == chunk_id), None)
+    with st.lock:
+        playing = st.playing
+    if source is None or source.name == playing:
+        raise ValueError(f"waiting chunk not found: {chunk_id}")
+
+    if action == "archive":
+        if not archive(source):
+            raise RuntimeError(f"could not archive waiting chunk: {chunk_id}")
+        discarded = _reset_waiting_buffer(buf, st)
+        log(f"QUEUE archive {source.name}; discarded {discarded} banked piece(s)")
+        return
+
+    if action != "move":
+        raise ValueError("invalid queue action")
+    if before_id == chunk_id:
+        return
+    ordered.remove(source)
+    if before_id is None:
+        ordered.append(source)
+    else:
+        destination = next(
+            (path for path in ordered if path.stem == before_id and path.name != playing),
+            None,
+        )
+        if destination is None:
+            raise ValueError(f"waiting destination not found: {before_id}")
+        ordered.insert(ordered.index(destination), source)
+    save_queue_order(ordered)
+    with st.lock:
+        if st.selection_name == source.name:
+            st.selection_name = None
+    discarded = _reset_waiting_buffer(buf, st)
+    log(
+        f"QUEUE move {source.name} before {before_id or 'end'}; "
+        f"discarded {discarded} banked piece(s)"
+    )
+
+
+def process_queue_requests(buf: "queue.Queue", st: State) -> bool:
+    """Apply every queued mutation in publication order and acknowledge each caller."""
+    claimed_requests = claim_queue_requests()
+    if not claimed_requests:
+        return False
+    prune_queue_acknowledgements()
+    changed = False
+    for claimed in claimed_requests:
+        request = read_queue_claim(claimed)
+        if request is None:
+            continue
+        action, chunk_id, before_id, request_id = request
+        try:
+            apply_queue_command(buf, st, action, chunk_id, before_id)
+        except (OSError, RuntimeError, ValueError) as error:
+            log(f"QUEUE {action} rejected for {chunk_id}: {error}")
+            publish_queue_ack(request_id, error=str(error))
+        else:
+            changed = True
+            publish_queue_ack(request_id)
+    return changed
+
+
 def _claimed(st: State, name: str) -> bool:
     with st.lock:
         return (name in st.claimed or name == st.playing) and st.skip_name != name
@@ -936,7 +1235,7 @@ def _claimed(st: State, name: str) -> bool:
 
 def claim_next_queued_chunk(st: State) -> Path | None:
     with st.lock:
-        candidates = sorted(QUEUE.glob("*.txt"), key=chunk_sort_key)
+        candidates = queue_files_in_order()
         if st.selection_name:
             selected = next(
                 (path for path in candidates if path.name == st.selection_name),
@@ -1042,6 +1341,8 @@ def gap_wait(seconds: float, buf: "queue.Queue", st: State) -> str | None:
     while remaining > 0:
         if process_play_request(buf, st) == "select":
             return "select"
+        if process_queue_requests(buf, st):
+            return "queue_changed"
         if consume(INTERRUPT):
             return "interrupt"
         if consume(SKIP):
@@ -1107,6 +1408,7 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
             if process_play_request(buf, st) == "select":
                 stream.abort()
                 return "select"
+            process_queue_requests(buf, st)
             if consume(SKIP):
                 stream.abort()
                 return "skip"
@@ -1180,8 +1482,8 @@ def run_engine_loop() -> None:
         sys.stderr.write(f"missing kokoro files at {MODEL_DIR}\n")
         sys.exit(1)
 
-    import sounddevice as sd
     import numpy as np
+    import sounddevice as sd
     # Warm up PortAudio so the first real sd.play() doesn't pay device-open latency.
     sd.play(np.zeros(int(0.1 * 24000), dtype=np.float32), 24000)
     sd.wait()
@@ -1230,6 +1532,7 @@ def run_engine_loop() -> None:
                 log("INTERRUPT (idle); exiting")
                 return
             process_play_request(buf, st)
+            process_queue_requests(buf, st)
             if consume(CLEAR):
                 do_clear(buf, st)
             with st.lock:
@@ -1268,6 +1571,11 @@ def run_engine_loop() -> None:
             if stale:
                 continue
 
+            if process_queue_requests(buf, st):
+                with st.lock:
+                    st.claimed.discard(path.name)
+                continue
+
             if first and not session_first and not selected:
                 g = gap_from_name(path.name)
                 outcome = gap_wait(g if g is not None else CHUNK_GAP_S, buf, st)
@@ -1284,6 +1592,10 @@ def run_engine_loop() -> None:
                     log("STOP (gap); exiting")
                     return
                 if outcome == "clear":
+                    continue
+                if outcome == "queue_changed":
+                    with st.lock:
+                        st.claimed.discard(path.name)
                     continue
                 if outcome == "skip":
                     finish_chunk_playback(path, "skip", True, st)
@@ -1327,11 +1639,14 @@ def run_engine_loop() -> None:
 
 
 def clear_transient_signals() -> None:
-    for signal in (STOP, INTERRUPT, SKIP, CLEAR, PLAY, WARMUP):
+    for signal in (STOP, INTERRUPT, SKIP, CLEAR, PLAY, QUEUE_COMMAND, WARMUP):
         signal.unlink(missing_ok=True)
     for request in BASE.glob(f"{PLAY.stem}.*"):
         request.unlink(missing_ok=True)
+    for request in BASE.glob(f"{QUEUE_COMMAND.stem}.*"):
+        request.unlink(missing_ok=True)
     prune_play_acknowledgements()
+    prune_queue_acknowledgements()
 
 
 def serve() -> None:
@@ -1402,6 +1717,17 @@ def cli(argv: list[str] | None = None) -> int:
     commands.add_parser("resume", help="resume from the current audio sample")
     play = commands.add_parser("play", help="play a queued or recent chunk by ID")
     play.add_argument("chunk_id", help="chunk ID from status output")
+    move = commands.add_parser("move", help="move a waiting chunk before another ID")
+    move.add_argument("chunk_id", help="waiting chunk ID from status output")
+    move.add_argument(
+        "before_id",
+        nargs="?",
+        help="waiting chunk ID to insert before; omit to move to the end",
+    )
+    archive_command = commands.add_parser(
+        "archive", help="move one waiting chunk to History"
+    )
+    archive_command.add_argument("chunk_id", help="waiting chunk ID from status output")
     commands.add_parser("skip", help="skip the current chunk")
     commands.add_parser("clear", help="clear queued chunks after the current chunk")
     commands.add_parser("stop", help="finish the current chunk and stop")
@@ -1427,6 +1753,14 @@ def cli(argv: list[str] | None = None) -> int:
             start_engine()
             request_id = request_play(args.chunk_id)
             print(json.dumps(wait_for_play_ack(request_id)))
+        elif args.command in {"move", "archive"}:
+            start_engine()
+            request_id = request_queue_command(
+                args.command,
+                args.chunk_id,
+                args.before_id if args.command == "move" else None,
+            )
+            wait_for_queue_ack(request_id)
         else:
             signal = {
                 "skip": SKIP,

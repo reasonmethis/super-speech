@@ -43,6 +43,8 @@ def configure_runtime(engine, tmp_path: Path) -> None:
     engine.SKIP = tmp_path / "SKIP"
     engine.CLEAR = tmp_path / "CLEAR"
     engine.PLAY = tmp_path / "PLAY.json"
+    engine.QUEUE_COMMAND = tmp_path / "QUEUE_COMMAND.json"
+    engine.QUEUE_ORDER = tmp_path / "queue-order.json"
     engine.WARMUP = tmp_path / "WARMUP"
     engine.HEARTBEAT = tmp_path / "engine.alive"
     engine.STATUS = tmp_path / "status.json"
@@ -181,6 +183,147 @@ def test_enqueue_text_reserves_the_next_queue_number(tmp_path: Path) -> None:
 
     assert queued.name == "008-bm_fable-g650-say.txt"
     assert queued.read_text(encoding="utf-8") == "New words"
+
+
+def test_queue_order_preserves_stable_ids_and_appends_new_arrivals(tmp_path: Path) -> None:
+    engine = load_engine("super_speech_engine_queue_order")
+    configure_runtime(engine, tmp_path)
+    first = engine.QUEUE / "001-af_heart-say.txt"
+    second = engine.QUEUE / "002-bm_fable-say.txt"
+    third = engine.QUEUE / "003-af_bella-say.txt"
+    for path in (first, second, third):
+        path.write_text(path.stem, encoding="utf-8")
+
+    engine.save_queue_order([third, first, second])
+    new_arrival = engine.QUEUE / "004-bm_george-say.txt"
+    new_arrival.write_text("New", encoding="utf-8")
+
+    assert [path.stem for path in engine.queue_files_in_order()] == [
+        third.stem,
+        first.stem,
+        second.stem,
+        new_arrival.stem,
+    ]
+
+
+def test_moving_a_waiting_chunk_resets_banked_audio_but_keeps_current(
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_queue_move")
+    configure_runtime(engine, tmp_path)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    second = engine.QUEUE / "002-bm_fable-say.txt"
+    third = engine.QUEUE / "003-af_bella-say.txt"
+    for path in (current, second, third):
+        path.write_text(path.stem, encoding="utf-8")
+    buffered: queue.Queue = queue.Queue()
+    buffered.put((current, "current piece"))
+    buffered.put((second, "stale second"))
+    buffered.put((third, "stale third"))
+    state = engine.State()
+    state.playing = current.name
+    state.selection_name = third.name
+    state.claimed.update(path.name for path in (current, second, third))
+
+    engine.apply_queue_command(buffered, state, "move", third.stem, second.stem)
+
+    assert [path.stem for path in engine.queue_files_in_order()] == [
+        current.stem,
+        third.stem,
+        second.stem,
+    ]
+    assert buffered.get_nowait() == (current, "current piece")
+    assert buffered.empty()
+    assert state.claimed == {current.name}
+    assert state.selection_name is None
+    assert engine.claim_next_queued_chunk(state) == third
+
+
+def test_archiving_one_waiting_chunk_preserves_current_and_remaining_queue(
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_queue_archive")
+    configure_runtime(engine, tmp_path)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    archived = engine.QUEUE / "002-bm_fable-say.txt"
+    remaining = engine.QUEUE / "003-af_bella-say.txt"
+    for path in (current, archived, remaining):
+        path.write_text(path.stem, encoding="utf-8")
+    buffered: queue.Queue = queue.Queue()
+    buffered.put((current, "current piece"))
+    buffered.put((archived, "stale archived"))
+    buffered.put((remaining, "stale remaining"))
+    state = engine.State()
+    state.playing = current.name
+    state.claimed.update(path.name for path in (current, archived, remaining))
+
+    engine.apply_queue_command(buffered, state, "archive", archived.stem, None)
+
+    assert not archived.exists()
+    assert (engine.SPOKEN / archived.name).is_file()
+    assert [path.stem for path in engine.queue_files_in_order()] == [
+        current.stem,
+        remaining.stem,
+    ]
+    assert buffered.get_nowait() == (current, "current piece")
+    assert state.claimed == {current.name}
+
+
+def test_archive_still_succeeds_when_the_order_sidecar_cannot_update(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_archive_order_failure")
+    configure_runtime(engine, tmp_path)
+    queued = engine.QUEUE / "001-af_heart-say.txt"
+    queued.write_text("Speech", encoding="utf-8")
+
+    def fail_order_update(*_args) -> None:
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(engine, "save_queue_order", fail_order_update)
+
+    assert engine.archive(queued)
+    assert (engine.SPOKEN / queued.name).read_text(encoding="utf-8") == "Speech"
+
+
+def test_queue_request_is_applied_and_acknowledged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_queue_request")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    first = engine.QUEUE / "001-af_heart-say.txt"
+    second = engine.QUEUE / "002-bm_fable-say.txt"
+    first.write_text("First", encoding="utf-8")
+    second.write_text("Second", encoding="utf-8")
+
+    request_id = engine.request_queue_command("move", second.stem, first.stem)
+    assert engine.process_queue_requests(queue.Queue(), engine.State())
+    engine.wait_for_queue_ack(request_id, timeout=0.1)
+
+    assert [path.stem for path in engine.queue_files_in_order()] == [
+        second.stem,
+        first.stem,
+    ]
+
+
+def test_queue_request_rejects_the_current_chunk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_queue_current")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    current.write_text("Current", encoding="utf-8")
+    state = engine.State()
+    state.playing = current.name
+
+    request_id = engine.request_queue_command("archive", current.stem)
+    assert not engine.process_queue_requests(queue.Queue(), state)
+
+    with pytest.raises(RuntimeError, match="waiting chunk not found"):
+        engine.wait_for_queue_ack(request_id, timeout=0.1)
+    assert current.is_file()
 
 
 def test_enqueue_text_skips_a_number_reserved_by_another_writer(tmp_path: Path) -> None:
@@ -668,6 +811,28 @@ def test_selection_interrupts_an_inter_chunk_gap(
     assert engine.claim_next_queued_chunk(state) == selected
 
 
+def test_reordering_during_a_gap_discards_the_held_piece(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_queue_gap")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    held = engine.QUEUE / "001-af_heart-say.txt"
+    selected = engine.QUEUE / "002-bm_fable-say.txt"
+    held.write_text("Held", encoding="utf-8")
+    selected.write_text("Selected", encoding="utf-8")
+    state = engine.State()
+    state.claimed.add(held.name)
+    request_id = engine.request_queue_command("move", selected.stem, held.stem)
+
+    assert engine.gap_wait(1.0, queue.Queue(), state) == "queue_changed"
+    engine.wait_for_queue_ack(request_id, timeout=0.1)
+
+    assert held.is_file()
+    assert state.claimed == set()
+    assert engine.claim_next_queued_chunk(state) == selected
+
+
 @pytest.mark.parametrize("outcome", ["done", "skip"])
 def test_failed_archive_keeps_chunk_claimed_instead_of_repeating(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: str
@@ -805,6 +970,11 @@ def test_startup_cleanup_removes_stale_play_request(tmp_path: Path) -> None:
     acknowledgement = engine.BASE / f"PLAY_ACK.{'a' * 24}.json"
     acknowledgement.write_text("{}", encoding="utf-8")
     os.utime(acknowledgement, (0, 0))
+    queue_request = engine.BASE / f"QUEUE_COMMAND.1.{'b' * 24}.json"
+    queue_request.write_text("{}", encoding="utf-8")
+    queue_acknowledgement = engine.BASE / f"QUEUE_ACK.{'b' * 24}.json"
+    queue_acknowledgement.write_text("{}", encoding="utf-8")
+    os.utime(queue_acknowledgement, (0, 0))
 
     engine.clear_transient_signals()
 
@@ -813,6 +983,8 @@ def test_startup_cleanup_removes_stale_play_request(tmp_path: Path) -> None:
     assert not claim.exists()
     assert not temporary.exists()
     assert not acknowledgement.exists()
+    assert not queue_request.exists()
+    assert not queue_acknowledgement.exists()
 
 
 def test_play_ack_pruning_keeps_active_waiters(tmp_path: Path) -> None:
