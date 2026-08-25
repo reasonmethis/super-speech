@@ -172,7 +172,14 @@ function readEngineStatus(base: string): EngineStatus | null {
     const parsed: unknown = JSON.parse(
       readFileSync(path.join(base, "status.json"), "utf8"),
     );
-    return isEngineStatus(parsed) ? parsed : null;
+    if (!isEngineStatus(parsed)) {
+      return null;
+    }
+    return {
+      ...parsed,
+      history_count: typeof parsed.history_count === "number" ? parsed.history_count : 0,
+      history: Array.isArray(parsed.history) ? parsed.history : [],
+    };
   } catch {
     return null;
   }
@@ -212,7 +219,50 @@ function getStatus(): RuntimeStatus {
     current: engineRunning ? (engine?.current ?? null) : null,
     queue_count: engine?.queue_count ?? 0,
     queue: engine?.queue ?? [],
+    history_count: engine?.history_count ?? 0,
+    history: engine?.history ?? [],
   };
+}
+
+function runEngineCommand(...arguments_: string[]): Promise<void> {
+  const launch = engineLaunch();
+  if (!launch) {
+    return Promise.reject(new Error("The Super Speech engine is not installed"));
+  }
+  return new Promise((resolve, reject) => {
+    const child = spawn(launch.command, [...launch.args, ...arguments_], {
+      env: {
+        ...process.env,
+        SUPER_SPEECH_HOME: runtimeDir(),
+        SUPER_SPEECH_MODEL_DIR: modelDirectory(),
+      },
+      windowsHide: true,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let errorText = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (data: string) => {
+      errorText += data;
+    });
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(errorText.trim() || `Engine command exited with code ${code}`));
+      }
+    });
+  });
+}
+
+async function playChunk(id: string): Promise<RuntimeStatus> {
+  await runEngineCommand("play", id);
+  return getStatus();
+}
+
+async function clearQueue(): Promise<RuntimeStatus> {
+  await runEngineCommand("clear");
+  return getStatus();
 }
 
 function packagedSkillDirectory(): string {
@@ -390,15 +440,8 @@ function runSmokeTest(): void {
   }, 250);
 }
 
-function setPaused(paused: boolean): RuntimeStatus {
-  const base = runtimeDir();
-  mkdirSync(base, { recursive: true });
-  const pausePath = path.join(base, "PAUSE");
-  if (paused) {
-    writeFileSync(pausePath, "");
-  } else if (existsSync(pausePath)) {
-    unlinkSync(pausePath);
-  }
+async function setPaused(paused: boolean): Promise<RuntimeStatus> {
+  await runEngineCommand(paused ? "pause" : "resume");
   refreshTrayMenu();
   return getStatus();
 }
@@ -489,7 +532,7 @@ function refreshTrayMenu(): void {
       { label: "Open Super Speech", click: showWindow },
       {
         label: paused ? "Resume Speech" : "Pause Speech",
-        click: () => setPaused(!paused),
+        click: () => void setPaused(!paused),
       },
       { label: "Open runtime folder", click: () => void shell.openPath(runtimeDir()) },
       { label: "Third-party notices", click: () => void shell.openPath(noticesPath()) },
@@ -517,6 +560,8 @@ function createTray(): void {
 function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.getStatus, getStatus);
   ipcMain.handle(IPC_CHANNELS.setPaused, (_event, paused: boolean) => setPaused(paused));
+  ipcMain.handle(IPC_CHANNELS.playChunk, (_event, id: string) => playChunk(id));
+  ipcMain.handle(IPC_CHANNELS.clearQueue, clearQueue);
   ipcMain.handle(IPC_CHANNELS.openSetup, () => shell.openExternal(SETUP_URL));
   ipcMain.handle(IPC_CHANNELS.minimize, (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize();

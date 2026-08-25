@@ -27,13 +27,13 @@
         </div>
       </header>
 
-      <section class="playback-card" aria-live="polite">
+      <section class="playback-card">
         <div class="ambient-ring" aria-hidden="true">
           <div class="ring ring-one"></div>
           <div class="ring ring-two"></div>
         </div>
 
-        <div class="status-line">
+        <div class="status-line" role="status" aria-live="polite">
           <span id="status-dot" class="status-dot"></span>
           <span id="status-label">Connecting</span>
         </div>
@@ -59,10 +59,12 @@
       <section class="queue-section">
         <div class="section-heading">
           <div>
-            <p class="section-kicker">COMING UP</p>
-            <h2>Speech queue</h2>
+            <h2>Speech</h2>
           </div>
-          <span id="queue-count" class="queue-count">0</span>
+          <div class="queue-actions">
+            <button id="clear-queue-button" class="clear-queue-button is-hidden" type="button">Clear</button>
+            <span id="queue-count" class="queue-count" aria-label="0 chunks waiting">0</span>
+          </div>
         </div>
         <div id="queue-list" class="queue-list"></div>
       </section>
