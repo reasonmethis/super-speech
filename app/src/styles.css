@@ -511,7 +511,7 @@ body[data-state="loading"] .playback-copy {
   flex: 1;
   flex-direction: column;
   gap: 7px;
-  padding-right: 4px;
+  padding: 2px 4px 2px 2px;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -521,6 +521,11 @@ body[data-state="loading"] .playback-copy {
 
 .queue-list.has-more {
   mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 12px), transparent 100%);
+}
+
+.queue-list.is-queue-dragging {
+  cursor: grabbing;
+  mask-image: none;
 }
 
 .queue-list::-webkit-scrollbar {
@@ -582,33 +587,22 @@ body[data-state="loading"] .playback-copy {
   border-color: color-mix(in srgb, var(--carnival-orange) 46%, transparent);
 }
 
-.queue-item.is-mutating {
-  border-color: color-mix(in srgb, var(--accent) 44%, transparent);
-}
-
 .queue-item.is-dragging {
-  opacity: 0.48;
+  position: fixed;
+  z-index: 20;
+  pointer-events: none;
+  opacity: 0.98;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4),
+    0 0 0 1px color-mix(in srgb, var(--accent) 46%, transparent);
 }
 
-.queue-item.drop-before::before,
-.queue-item.drop-after::after {
-  position: absolute;
-  right: 6px;
-  left: 6px;
-  z-index: 2;
-  height: 2px;
-  border-radius: 999px;
-  background: var(--accent-bright);
-  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 65%, transparent);
-  content: "";
-}
-
-.queue-item.drop-before::before {
-  top: -5px;
-}
-
-.queue-item.drop-after::after {
-  bottom: -5px;
+.queue-drag-placeholder {
+  width: 100%;
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 .queue-play,
@@ -787,8 +781,7 @@ body[data-state="loading"] .playback-copy {
 .queue-item.is-history.is-history-drop {
   color: var(--accent-bright);
   background: color-mix(in srgb, var(--accent) 14%, transparent);
-  outline: 1px dashed color-mix(in srgb, var(--accent) 52%, transparent);
-  outline-offset: -1px;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 52%, transparent);
 }
 
 .timeline-divider::after {

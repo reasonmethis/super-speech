@@ -61,7 +61,7 @@ test("normalizes an engine play acknowledgement", () => {
   assert.equal(parsePlayAcceptance({ id: "008-bm_fable-say" }), null);
 });
 
-test("orders the timeline as current, upcoming, then history", () => {
+test("keeps newest waiting speech above current speech and history", () => {
   const current = {
     id: "002-af_heart-say",
     filename: "002-af_heart-say.txt",
@@ -71,12 +71,29 @@ test("orders the timeline as current, upcoming, then history", () => {
     piece_count: 1,
     elapsed_seconds: 0,
   };
-  const upcoming = { ...current, id: "003-af_heart-say", text: "Next" };
+  const next = { ...current, id: "003-af_heart-say", text: "Next" };
+  const newest = { ...current, id: "004-af_heart-say", text: "Newest" };
   const earlier = { ...current, id: "001-af_heart-say", text: "Earlier" };
 
   assert.deepEqual(
-    timelineItems({ current, queue: [upcoming], history: [earlier] }),
+    timelineItems({ current, queue: [next, newest], history: [earlier] }),
     [
+      {
+        id: newest.id,
+        filename: newest.filename,
+        text: newest.text,
+        voice: newest.voice,
+        kind: "upcoming",
+        position: 2,
+      },
+      {
+        id: next.id,
+        filename: next.filename,
+        text: next.text,
+        voice: next.voice,
+        kind: "upcoming",
+        position: 1,
+      },
       {
         id: current.id,
         filename: current.filename,
@@ -84,14 +101,6 @@ test("orders the timeline as current, upcoming, then history", () => {
         voice: current.voice,
         kind: "current",
         position: null,
-      },
-      {
-        id: upcoming.id,
-        filename: upcoming.filename,
-        text: upcoming.text,
-        voice: upcoming.voice,
-        kind: "upcoming",
-        position: 1,
       },
       {
         id: earlier.id,
@@ -121,6 +130,32 @@ test("shows an archived replay only in its active timeline position", () => {
       ({ id, kind }) => ({ id, kind }),
     ),
     [{ id: replay.id, kind: "current" }],
+  );
+});
+
+test("keeps row order stable when current speech enters history", () => {
+  const current = {
+    id: "002-af_heart-say",
+    filename: "002-af_heart-say.txt",
+    text: "Now",
+    voice: "af_heart",
+    piece: 1,
+    piece_count: 1,
+    elapsed_seconds: 0,
+  };
+  const next = { ...current, id: "003-af_heart-say", text: "Next" };
+  const newest = { ...current, id: "004-af_heart-say", text: "Newest" };
+  const earlier = { ...current, id: "001-af_heart-say", text: "Earlier" };
+  const before = timelineItems({ current, queue: [next, newest], history: [earlier] });
+  const after = timelineItems({
+    current: null,
+    queue: [next, newest],
+    history: [current, earlier],
+  });
+
+  assert.deepEqual(
+    before.map(({ id }) => id),
+    after.map(({ id }) => id),
   );
 });
 

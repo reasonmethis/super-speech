@@ -50,9 +50,11 @@ Run the Electron mouse test after changing queue interactions:
 npm run test:drag
 ```
 
-It uses real pointer input to reorder a waiting item and drop it into History.
-The test runs against a temporary runtime with silent audio and verifies the
-result in both the renderer and the engine queue.
+It uses real pointer input to move a card into the first visual position and
+drop it into History. While the pointer is down, it verifies that the card
+follows the pointer and the neighboring card moves out of its place. The test
+runs against a temporary runtime with silent audio and verifies the result in
+both the renderer and the engine queue.
 
 ## Engine verification
 

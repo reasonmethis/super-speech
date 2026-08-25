@@ -107,6 +107,14 @@ waiting item into History. Both use unique request files and exact
 acknowledgements. The engine invalidates buffered waiting audio after either
 mutation while preserving every rendered piece of the current item.
 
+The engine status keeps waiting items in playback order, oldest first. The
+desktop timeline displays that list in reverse so new arrivals enter at the top,
+then places the current item above newest-first History. When current playback
+finishes, the same row therefore crosses the divider without changing its
+position relative to the other rows. A visual drag is translated back into one
+engine `move` command. The renderer applies the result immediately and rolls it
+back only if the engine rejects the command.
+
 ## Distribution boundaries
 
 - Build the frozen engine independently for Windows x64 and macOS arm64. The

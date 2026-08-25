@@ -69,7 +69,7 @@ async function waitFor(predicate, message, timeout = 15_000) {
   throw new Error(message);
 }
 
-async function drag(page, source, destination) {
+async function drag(page, source, destination, inspect) {
   const sourceBounds = await source.boundingBox();
   const destinationBounds = await destination.boundingBox();
   assert(sourceBounds, "Drag source must be visible");
@@ -85,6 +85,7 @@ async function drag(page, source, destination) {
   await page.mouse.move(from.x, from.y);
   await page.mouse.down();
   await page.mouse.move(to.x, to.y, { steps: 12 });
+  await inspect?.({ from, to });
   await page.mouse.up();
 }
 
@@ -117,14 +118,36 @@ try {
   const firstId = await rows.nth(0).getAttribute("data-item-id");
   const secondId = await rows.nth(1).getAttribute("data-item-id");
   assert(firstId && secondId, "Waiting items must expose stable IDs");
+  const firstStart = await rows.nth(0).boundingBox();
+  const secondStart = await rows.nth(1).boundingBox();
+  assert(firstStart && secondStart, "Waiting items must be visible before dragging");
 
-  await drag(page, rows.nth(1).locator(".queue-drag-handle"), rows.nth(0));
-  await waitFor(
-    async () => await rows.nth(0).getAttribute("data-item-id") === secondId,
-    "A real mouse drag did not reorder the waiting items",
+  await drag(
+    page,
+    rows.nth(1).locator(".queue-drag-handle"),
+    rows.nth(0),
+    async ({ to }) => {
+      const dragged = await page.locator(`[data-item-id="${secondId}"]`).boundingBox();
+      const shifted = await page.locator(`[data-item-id="${firstId}"]`).boundingBox();
+      assert(dragged && shifted, "Rows must stay visible while dragging");
+      assert.equal(await page.locator(".queue-drag-placeholder").count(), 1);
+      assert.equal(await page.locator(".drop-before, .drop-after").count(), 0);
+      assert(
+        Math.abs(dragged.y + dragged.height / 2 - to.y) < dragged.height / 2,
+        "The dragged row did not follow the pointer",
+      );
+      assert(
+        shifted.y > firstStart.y + 20,
+        "The neighboring row did not move out of the first position",
+      );
+    },
   );
   await waitFor(
-    () => status().queue[0]?.id === secondId,
+    async () => await rows.nth(0).getAttribute("data-item-id") === secondId,
+    "A real mouse drag did not move the item into the first visual position",
+  );
+  await waitFor(
+    () => status().queue.at(-1)?.id === secondId,
     "The engine did not persist the mouse-driven reorder",
   );
 

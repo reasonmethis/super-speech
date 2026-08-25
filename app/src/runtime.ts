@@ -173,9 +173,12 @@ export function timelineItems(
     ...(status.current ? [status.current.id] : []),
     ...status.queue.map(({ id }) => id),
   ]);
+  const upcoming = status.queue.map((item, index) =>
+    timelineItem(item, "upcoming", index + 1)
+  );
   return [
+    ...upcoming.reverse(),
     ...(status.current ? [timelineItem(status.current, "current", null)] : []),
-    ...status.queue.map((item, index) => timelineItem(item, "upcoming", index + 1)),
     ...status.history
       .filter(({ id }) => !activeIds.has(id))
       .map((item) => timelineItem(item, "history", null)),

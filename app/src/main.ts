@@ -84,9 +84,7 @@ interface PendingQueueMutation {
   id: string;
 }
 
-type QueueDropIntent =
-  | { kind: "move"; beforeId: string | null }
-  | { kind: "archive" };
+type QueueDropIntent = "move" | "archive";
 
 interface QueuePointerDrag {
   pointerId: number;
@@ -95,7 +93,10 @@ interface QueuePointerDrag {
   handle: HTMLButtonElement;
   startX: number;
   startY: number;
-  active: boolean;
+  pointerOffsetX: number;
+  pointerOffsetY: number;
+  width: number;
+  placeholder: HTMLElement | null;
   intent: QueueDropIntent | null;
 }
 
@@ -136,11 +137,6 @@ function formatVoice(voice: string): string {
 }
 
 function timelineAction(item: TimelineItem, pending: boolean, failed: boolean): string {
-  if (pendingQueueMutation?.id === item.id) {
-    return pendingQueueMutation.action === "archive"
-      ? "Moving to History..."
-      : "Moving...";
-  }
   if (failedQueueMutationId === item.id) {
     return "Could not move / Try again";
   }
@@ -366,11 +362,9 @@ function render(status: RuntimeStatus): void {
   renderTimeline(timelineItems(status), status.history_count);
 }
 
-function clearQueueDropIndicators(): void {
-  for (const element of queueList.querySelectorAll(
-    ".drop-before, .drop-after, .is-history-drop",
-  )) {
-    element.classList.remove("drop-before", "drop-after", "is-history-drop");
+function clearHistoryDropIndicator(): void {
+  for (const element of queueList.querySelectorAll(".is-history-drop")) {
+    element.classList.remove("is-history-drop");
   }
 }
 
@@ -390,6 +384,7 @@ function beginQueuePointerDrag(
   }
 
   event.preventDefault();
+  const bounds = row.getBoundingClientRect();
   handle.focus({ preventScroll: true });
   handle.setPointerCapture(event.pointerId);
   queuePointerDrag = {
@@ -399,47 +394,79 @@ function beginQueuePointerDrag(
     handle,
     startX: event.clientX,
     startY: event.clientY,
-    active: false,
+    pointerOffsetX: event.clientX - bounds.left,
+    pointerOffsetY: event.clientY - bounds.top,
+    width: bounds.width,
+    placeholder: null,
     intent: null,
   };
 }
 
 function activateQueuePointerDrag(drag: QueuePointerDrag): void {
-  drag.active = true;
+  const bounds = drag.row.getBoundingClientRect();
+  const placeholder = document.createElement("div");
+  placeholder.className = "queue-drag-placeholder";
+  placeholder.style.height = `${bounds.height}px`;
+  placeholder.setAttribute("aria-hidden", "true");
+  drag.row.before(placeholder);
+  drag.placeholder = placeholder;
   queueList.classList.add("is-queue-dragging");
   drag.row.classList.add("is-dragging");
+  drag.row.style.left = `${bounds.left}px`;
+  drag.row.style.top = `${bounds.top}px`;
+  drag.row.style.width = `${bounds.width}px`;
+  drag.row.style.height = `${bounds.height}px`;
 }
 
-function clearQueueDragVisuals(): void {
+function clearQueueDragVisuals(drag: QueuePointerDrag): void {
+  drag.placeholder?.remove();
+  drag.placeholder = null;
+  drag.row.classList.remove("is-dragging");
+  drag.row.style.removeProperty("left");
+  drag.row.style.removeProperty("top");
+  drag.row.style.removeProperty("width");
+  drag.row.style.removeProperty("height");
   queueList.classList.remove("is-queue-dragging");
-  clearQueueDropIndicators();
-  for (const row of queueList.querySelectorAll(".is-dragging")) {
-    row.classList.remove("is-dragging");
-  }
+  clearHistoryDropIndicator();
 }
 
-function markQueueMove(beforeId: string | null): void {
-  const rows = [
-    ...queueList.querySelectorAll<HTMLElement>(".queue-item.is-upcoming"),
-  ];
-  const target = beforeId
-    ? rows.find((row) => row.dataset.itemId === beforeId)
-    : rows.at(-1);
-  target?.classList.add(beforeId ? "drop-before" : "drop-after");
-}
-
-function queueMoveIntent(clientY: number): QueueDropIntent | null {
-  const rows = [
-    ...queueList.querySelectorAll<HTMLElement>(".queue-item.is-upcoming"),
-  ];
-  if (rows.length === 0) {
-    return null;
+function placeQueueDragPlaceholder(drag: QueuePointerDrag, clientY: number): void {
+  const placeholder = drag.placeholder;
+  if (!placeholder) {
+    return;
   }
+  const rows = [
+    ...queueList.querySelectorAll<HTMLElement>(".queue-item.is-upcoming"),
+  ].filter((row) => row !== drag.row);
   const before = rows.find((row) => {
     const bounds = row.getBoundingClientRect();
     return clientY < bounds.top + bounds.height / 2;
   });
-  return { kind: "move", beforeId: before?.dataset.itemId ?? null };
+  const destination = before ?? queueList.querySelector<HTMLElement>(
+    ".queue-item.is-current, .timeline-divider",
+  );
+  if (placeholder.nextElementSibling === destination) {
+    return;
+  }
+
+  const previousTops = new Map(rows.map((row) => [row, row.offsetTop]));
+  queueList.insertBefore(placeholder, destination);
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    return;
+  }
+  for (const row of rows) {
+    const distance = (previousTops.get(row) ?? row.offsetTop) - row.offsetTop;
+    if (distance === 0) {
+      continue;
+    }
+    for (const animation of row.getAnimations()) {
+      animation.cancel();
+    }
+    row.animate(
+      [{ transform: `translateY(${distance}px)` }, { transform: "translateY(0)" }],
+      { duration: 130, easing: "ease-out" },
+    );
+  }
 }
 
 function updateQueuePointerDrag(event: PointerEvent): void {
@@ -448,7 +475,7 @@ function updateQueuePointerDrag(event: PointerEvent): void {
     return;
   }
   event.preventDefault();
-  if (!drag.active) {
+  if (!drag.placeholder) {
     const distance = Math.hypot(
       event.clientX - drag.startX,
       event.clientY - drag.startY,
@@ -459,21 +486,27 @@ function updateQueuePointerDrag(event: PointerEvent): void {
     activateQueuePointerDrag(drag);
   }
 
-  clearQueueDropIndicators();
+  const listBounds = queueList.getBoundingClientRect();
+  const left = Math.min(
+    Math.max(event.clientX - drag.pointerOffsetX, listBounds.left),
+    listBounds.right - drag.width,
+  );
+  drag.row.style.left = `${left}px`;
+  drag.row.style.top = `${event.clientY - drag.pointerOffsetY}px`;
+
+  clearHistoryDropIndicator();
   const pointed = document.elementFromPoint(event.clientX, event.clientY);
   const historyTarget = pointed instanceof Element
     ? pointed.closest<HTMLElement>(".history-drop-target, .queue-item.is-history")
     : null;
   if (historyTarget && queueList.contains(historyTarget)) {
     historyTarget.classList.add("is-history-drop");
-    drag.intent = { kind: "archive" };
+    drag.intent = "archive";
     return;
   }
 
-  drag.intent = queueMoveIntent(event.clientY);
-  if (drag.intent?.kind === "move") {
-    markQueueMove(drag.intent.beforeId);
-  }
+  drag.intent = "move";
+  placeQueueDragPlaceholder(drag, event.clientY);
 }
 
 function finishQueuePointerDrag(event: PointerEvent, commit: boolean): void {
@@ -481,16 +514,26 @@ function finishQueuePointerDrag(event: PointerEvent, commit: boolean): void {
   if (!drag || event.pointerId !== drag.pointerId) {
     return;
   }
-  const intent = drag.active && commit ? drag.intent : null;
+  const intent = drag.placeholder && commit ? drag.intent : null;
   queuePointerDrag = null;
+  let beforeId: string | null = null;
+  if (intent === "move" && drag.placeholder) {
+    drag.placeholder.replaceWith(drag.row);
+    drag.placeholder = null;
+    const visualIds = [
+      ...queueList.querySelectorAll<HTMLElement>(".queue-item.is-upcoming"),
+    ].map((row) => row.dataset.itemId ?? "");
+    const playbackIds = visualIds.reverse();
+    beforeId = playbackIds[playbackIds.indexOf(drag.sourceId) + 1] ?? null;
+  }
   if (drag.handle.hasPointerCapture(drag.pointerId)) {
     drag.handle.releasePointerCapture(drag.pointerId);
   }
-  clearQueueDragVisuals();
-  if (intent?.kind === "archive") {
+  clearQueueDragVisuals(drag);
+  if (intent === "archive") {
     void archiveWaitingItem(drag.sourceId);
-  } else if (intent?.kind === "move") {
-    void moveWaitingItem(drag.sourceId, intent.beforeId);
+  } else if (intent === "move") {
+    void moveWaitingItem(drag.sourceId, beforeId);
   }
 }
 
@@ -503,7 +546,7 @@ function cancelQueuePointerDrag(): void {
   if (drag.handle.hasPointerCapture(drag.pointerId)) {
     drag.handle.releasePointerCapture(drag.pointerId);
   }
-  clearQueueDragVisuals();
+  clearQueueDragVisuals(drag);
 }
 
 function handleQueueReorderKey(event: KeyboardEvent, id: string): void {
@@ -513,14 +556,14 @@ function handleQueueReorderKey(event: KeyboardEvent, id: string): void {
     return;
   }
   let beforeId: string | null | undefined;
-  if (event.key === "ArrowUp" && index > 0) {
-    beforeId = ids[index - 1];
-  } else if (event.key === "ArrowDown" && index < ids.length - 1) {
+  if (event.key === "ArrowUp" && index < ids.length - 1) {
     beforeId = ids[index + 2] ?? null;
-  } else if (event.key === "Home" && index > 0) {
-    beforeId = ids[0];
-  } else if (event.key === "End" && index < ids.length - 1) {
+  } else if (event.key === "ArrowDown" && index > 0) {
+    beforeId = ids[index - 1];
+  } else if (event.key === "Home" && index < ids.length - 1) {
     beforeId = null;
+  } else if (event.key === "End" && index > 0) {
+    beforeId = ids[0];
   }
   if (beforeId !== undefined) {
     event.preventDefault();
@@ -730,7 +773,6 @@ function updateTimelineRows(items: TimelineItem[]): void {
     const selected = pending && !commandInFlight;
     const failed = item.id === failedChunkId;
     row.classList.toggle("is-pending", pending);
-    row.classList.toggle("is-mutating", pendingQueueMutation?.id === item.id);
     row.classList.toggle(
       "is-error",
       failed || failedQueueMutationId === item.id,
@@ -861,9 +903,11 @@ async function moveWaitingItem(id: string, beforeId: string | null): Promise<voi
   if (reordered.every((item, index) => item.id === previousIds[index])) {
     return;
   }
+  const previousStatus = currentStatus;
   pendingQueueMutation = { action: "move", id };
   failedQueueMutationId = null;
   commandStatus.textContent = "";
+  currentStatus = { ...currentStatus, queue: reordered };
   render(currentStatus);
   try {
     if (desktopApi) {
@@ -871,13 +915,13 @@ async function moveWaitingItem(id: string, beforeId: string | null): Promise<voi
     } else {
       await new Promise((resolve) => window.setTimeout(resolve, 250));
     }
-    currentStatus = { ...currentStatus, queue: reordered };
     pendingQueueMutation = null;
     render(currentStatus);
     void refreshStatus();
   } catch (error) {
     console.error("Could not reorder waiting speech", error);
     pendingQueueMutation = null;
+    currentStatus = previousStatus;
     failedQueueMutationId = id;
     commandStatus.textContent = "Could not reorder waiting speech. Try again.";
     render(currentStatus);
@@ -892,9 +936,20 @@ async function archiveWaitingItem(id: string): Promise<void> {
   if (!item) {
     return;
   }
+  const previousStatus = currentStatus;
+  const alreadyInHistory = currentStatus.history.some((entry) => entry.id === id);
   pendingQueueMutation = { action: "archive", id };
   failedQueueMutationId = null;
   commandStatus.textContent = "";
+  currentStatus = {
+    ...currentStatus,
+    queue_count: Math.max(0, currentStatus.queue_count - 1),
+    queue: currentStatus.queue.filter((queued) => queued.id !== id),
+    history_count: alreadyInHistory
+      ? currentStatus.history_count
+      : currentStatus.history_count + 1,
+    history: [item, ...currentStatus.history.filter((entry) => entry.id !== id)].slice(0, 50),
+  };
   render(currentStatus);
   try {
     if (desktopApi) {
@@ -902,22 +957,13 @@ async function archiveWaitingItem(id: string): Promise<void> {
     } else {
       await new Promise((resolve) => window.setTimeout(resolve, 250));
     }
-    const alreadyInHistory = currentStatus.history.some((entry) => entry.id === id);
-    currentStatus = {
-      ...currentStatus,
-      queue_count: Math.max(0, currentStatus.queue_count - 1),
-      queue: currentStatus.queue.filter((queued) => queued.id !== id),
-      history_count: alreadyInHistory
-        ? currentStatus.history_count
-        : currentStatus.history_count + 1,
-      history: [item, ...currentStatus.history.filter((entry) => entry.id !== id)].slice(0, 50),
-    };
     pendingQueueMutation = null;
     render(currentStatus);
     void refreshStatus();
   } catch (error) {
     console.error("Could not move waiting speech to History", error);
     pendingQueueMutation = null;
+    currentStatus = previousStatus;
     failedQueueMutationId = id;
     commandStatus.textContent = "Could not move waiting speech to History. Try again.";
     render(currentStatus);
@@ -930,7 +976,11 @@ async function refreshStatus(): Promise<void> {
     return;
   }
   try {
-    render(await desktopApi.getStatus());
+    const mutationAtStart = pendingQueueMutation;
+    const status = await desktopApi.getStatus();
+    if (!mutationAtStart && !pendingQueueMutation) {
+      render(status);
+    }
   } catch (error) {
     console.error("Could not read Super Speech status", error);
     render({ ...currentStatus, state: "stopped", engine_running: false });

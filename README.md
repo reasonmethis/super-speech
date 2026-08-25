@@ -44,15 +44,17 @@ replay target even though the engine renders it as smaller sentence pieces. The
 desktop window and tray menu
 control that same engine and can pause immediately at the current audio sample,
 then resume from that exact point. The window also shows the current voice,
-current text, and a scrollable queue. Click an upcoming row to start it
-immediately. The interrupted item stays queued and restarts from its beginning
+current text, and a scrollable queue. Waiting rows appear newest first, with the
+current row at the bottom of the active group. When it finishes, that row enters
+the top of History without moving the surrounding rows. Click an upcoming row
+to start it immediately. The interrupted item stays queued and restarts from its beginning
 later. Recent archive entries appear under History and can be replayed without
 changing the remaining queue or adding duplicate History rows. History includes
 completed, skipped, and cleared items. `Clear all` archives every waiting item
 without changing the current item or playback state. Each waiting row also has
-a move-to-History control. Drag its grip to reorder it, or drop it on History to
-archive it; the grip also supports the arrow, Home, and End keys. A row's
-disclosure button expands its full text.
+a move-to-History control. Drag its grip to move the card directly, or drop it
+on History to archive it; the grip also supports the arrow, Home, and End keys.
+A row's disclosure button expands its full text.
 
 In desktop mode, mutable state stays in `~/.super-speech/`. The installed model
 and engine are read-only application resources. A headless installation keeps
