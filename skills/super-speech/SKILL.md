@@ -1,6 +1,6 @@
 ---
 name: super-speech
-description: Speak concise replies aloud with the local Super Speech engine. Use whenever the user asks for voice or audio replies, asks for Super Speech, names a Kokoro voice, or wants to install, configure, or troubleshoot Super Speech. Works with either the desktop app or the minimal headless engine, using the same CLI and queue in both modes. Default to `af_heart` unless the user asks for another voice.
+description: Speak concise replies aloud with the local Super Speech engine. Use whenever the user asks for voice or audio replies, asks for Super Speech, names a Kokoro voice, or wants to install, configure, or troubleshoot Super Speech. Works with either the desktop app or the minimal headless engine, using the same CLI and queue semantics in both modes. Default to `af_heart` unless the user asks for another voice.
 metadata:
   managed_by: super-speech
   integration_version: 1
@@ -200,11 +200,19 @@ The CLI owns playback controls. Do not create or remove runtime files directly:
 |---|---|
 | `pause` | Pause immediately at the current audio sample |
 | `resume` | Resume from the same sample |
+| `play <id>` | Play an exact `current`, `queue`, or `history` ID from `status` |
 | `skip` | Archive the current chunk and continue |
 | `clear` | Archive every queued chunk except the one currently playing |
 | `stop` | Finish the current chunk and stop the engine |
 | `interrupt` | Stop playback and the engine immediately |
 | `status` | Print the current queue and playback status as JSON |
+
+`play` keeps all untouched upcoming chunks. Selecting another upcoming chunk
+preempts the current chunk, which remains queued and later restarts from its
+beginning. Selecting a `history` ID copies it to a new queue entry and preserves
+the original archive. Selecting while paused resumes playback. Never derive an
+ID from a path or mutate runtime files directly; use the exact opaque ID from
+`status`.
 
 For a forced restart, run `interrupt`, then use `speak` normally. The next `speak` command starts the engine before it queues text.
 

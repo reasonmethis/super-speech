@@ -1,5 +1,8 @@
 # Super Speech setup
 
+[README.md](README.md) is the canonical installation and product guide. This
+document covers the narrower headless workflow.
+
 Super Speech has one engine implementation with two installation sizes. The desktop installer includes Electron, the engine, models, and agent skill. The headless installer includes only the Python engine, models, and skill. Both expose the same `super-speech-engine` command.
 
 ## Desktop installation
@@ -82,3 +85,19 @@ Queued headless chunks do not migrate into the desktop app.
 Each runtime allows one engine process to hold its lock. If an older process is
 still running during an upgrade, stop it before verification, then invoke
 `speak`; the new CLI starts the installed engine automatically.
+
+## Select or replay a chunk
+
+Run `super-speech-engine status` and use an exact `id` from `current`, `queue`,
+or the bounded `history` list:
+
+```powershell
+& $engine play '014-af_heart-say'
+```
+
+The same command works in desktop and headless installations. Selecting an
+upcoming chunk starts it immediately and leaves the interrupted chunk queued.
+Selecting a history entry creates a new queued replay without changing the
+remaining queue or the original archive. Selection is distinct from pause and
+resume: pause preserves the exact audio sample, while a preempted chunk later
+restarts from its beginning.

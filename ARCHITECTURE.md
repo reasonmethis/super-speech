@@ -66,12 +66,25 @@ migrated its desktop app from Tauri to Electron. Keeping Tauri would retain a
 known maintenance risk while saving little relative to model and inference
 runtime sizes.
 
-## Protocol growth
+## Playback protocol
 
-Version zero uses CLI commands plus the atomic status file. Interactive queue
-selection should extend that CLI with explicit chunk identifiers. Do not
-introduce HTTP, WebSocket, or a general service framework until those commands
-need behavior that the local process protocol cannot express safely.
+`super-speech-engine status` publishes a version 2 snapshot with the current
+chunk, the complete upcoming queue, and up to 50 newest archived chunks. Every
+entry has an opaque `id`. The total `history_count` can exceed the bounded
+`history` array.
+
+`super-speech-engine play <id>` is the one selection command. The engine, not
+Electron, validates the identifier and owns every queue or archive mutation:
+
+- selecting the current chunk resumes it from the same sample when paused
+- selecting an upcoming chunk preempts the current output, plays the selection,
+  then later restarts the interrupted chunk from its beginning
+- selecting an archived chunk copies it to a new queue entry, preserving both
+  the original archive and the untouched upcoming queue
+
+Selection invalidates rendered pieces that no longer match the chosen order.
+The atomic request mailbox is last-write-wins before consumption. No HTTP,
+WebSocket, second queue, or renderer playback state machine is needed.
 
 ## Distribution boundaries
 

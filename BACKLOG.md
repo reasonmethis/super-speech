@@ -1,5 +1,7 @@
 # Desktop app backlog
 
+Start with the canonical project overview in [README.md](README.md).
+
 This is the ordered backlog for taking the version-zero controller into a
 public Super Speech app. Each section is meant to be runnable as a focused
 work session without having to reconstruct the product decisions.
@@ -10,7 +12,7 @@ work session without having to reconstruct the product decisions.
 - [x] Tray app with a compact status window
 - [x] Immediate pause with sample-position-preserving resume
 - [x] Persistent pause state across engine restarts
-- [x] Current voice, current text, and scrollable read-only upcoming queue
+- [x] Current voice, current text, and scrollable queue with recent history
 - [x] Electron architecture following Littlebird's packaged-helper precedent
 - [x] Native Windows installer build through Electron
 - [x] Self-contained Windows installer with the frozen engine, model, and voices
@@ -38,13 +40,17 @@ work session without having to reconstruct the product decisions.
 
 ## P1: interactive queue
 
-- Let a user select any upcoming chunk and start it immediately
-- Let a user replay a past chunk without losing the remaining queue
-- Keep the current chunk and sample position when the user only pauses
-- Add previous, next, replay, remove, clear, and drag-to-reorder controls
+- [x] Let a user select any upcoming chunk and start it immediately
+- [x] Let a user replay a past chunk without losing the remaining queue
+- [x] Keep the current chunk and sample position when the user only pauses
+- Add previous and next controls using the identifier-based selection command
+- [x] Add replay through the same identifier-based selection command
+- Add remove controls
+- [x] Add clear controls to the desktop UI
+- Add drag-to-reorder controls
 - Show when each chunk was queued, when it started, and when it finished
 - Preserve enough rendered audio history to make replay instant
-- Define queue-selection behavior in tests before changing the file protocol
+- [x] Define queue-selection behavior in tests before changing the file protocol
 - Add black-box coverage for skip with buffered pieces, clear during playback,
   stop during gaps, failed synthesis, and persistent pause
 

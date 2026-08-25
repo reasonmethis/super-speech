@@ -4,9 +4,10 @@ Start with the canonical project overview in [../README.md](../README.md).
 This document covers development and packaging for the Electron app.
 
 The renderer is plain TypeScript and CSS. A sandboxed preload bridge exposes
-status, pause, setup, and window controls without giving the renderer Node.js
-or filesystem access. The frozen Python sidecar remains authoritative for
-synthesis, queue order, playback, and the current sample cursor.
+status, pause, identifier-based playback selection, setup, and window controls
+without giving the renderer Node.js or filesystem access. Electron forwards
+`playChunk(id)` to the engine CLI; the frozen Python sidecar remains
+authoritative for synthesis, queue order, replay, and the current sample cursor.
 
 ## Prerequisites
 
@@ -36,6 +37,10 @@ The app reads and writes the shared runtime under `~/.super-speech/`. Set
 `SUPER_SPEECH_HOME` to an isolated directory for tests. The engine and model
 paths can be overridden with `SUPER_SPEECH_ENGINE_PATH` and
 `SUPER_SPEECH_MODEL_DIR`.
+
+`npm test` covers status ownership and current/upcoming/history timeline order
+without starting Electron or touching an audio device. Renderer screenshots can
+use the browser-only demo status produced when the preload bridge is absent.
 
 ## Engine verification
 

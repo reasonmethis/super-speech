@@ -6,11 +6,14 @@ or per-word billing.
 
 This README is the canonical project entry point. The narrower documents cover
 [desktop architecture](ARCHITECTURE.md), [app development](app/README.md), the
-[product backlog](BACKLOG.md), and [headless setup](SETUP.md).
+[product backlog](BACKLOG.md), [headless setup](SETUP.md), and the
+[agent-facing skill contract](skills/super-speech/SKILL.md).
 
 ## Install
 
-On Windows, run `Super-Speech-Win-x64-0.2.1-Setup.exe`. The installer includes:
+On Windows, download and run the latest x64 setup file from
+[GitHub Releases](https://github.com/reasonmethis/super-speech/releases/latest).
+The installer includes:
 
 - the Electron tray app and status window
 - a frozen Python speech engine
@@ -39,7 +42,10 @@ The agent invokes `super-speech-engine speak`, which starts the installed engine
 when needed and queues each spoken chunk. The desktop window and tray menu
 control that same engine and can pause immediately at the current audio sample,
 then resume from that exact point. The window also shows the current voice,
-current text, and a scrollable upcoming queue.
+current text, and a scrollable queue. Click an upcoming row to start it
+immediately. The interrupted chunk stays queued and restarts from its beginning
+later. Recent archived speech appears under Earlier and can be replayed without
+changing the remaining queue. A row's disclosure button expands its full text.
 
 In desktop mode, mutable state stays in `~/.super-speech/`. The installed model
 and engine are read-only application resources. A headless installation keeps
