@@ -122,7 +122,7 @@ test -x "$ENGINE" || { echo "Super Speech is not installed. Run this skill's scr
 
 ## The shared engine CLI
 
-Queue every chunk through `super-speech-engine speak`. That command starts the selected runtime's single engine process when needed and reserves the next queue number atomically. When the desktop engine is selected, the app supervises and controls that process.
+Queue every chunk through `super-speech-engine speak`. That command starts the selected runtime's single engine process when needed and reserves the next queue number atomically. When the desktop app is running, it supervises the engine process it starts; otherwise the CLI starts the same engine itself.
 
 ```powershell
 & $engine speak 'Your chunk text.' --voice bm_fable
@@ -134,7 +134,7 @@ Queue every chunk through `super-speech-engine speak`. That command starts the s
 
 ## Chunking rules
 
-These rules are the **canonical chunking contract** — the auto-podcast and whatsapp-voice skills refer back here rather than restating them.
+These rules are the **canonical chunking contract**. The auto-podcast and whatsapp-voice skills refer back here rather than restating them.
 
 1. **First chunk is short.** Aim for one short sentence, ~90-110 chars. A 100-char chunk synthesizes in ~1-2s — that's your time-to-first-audio.
 
@@ -213,6 +213,9 @@ beginning. Selecting a `history` ID copies it to a new queue entry and preserves
 the original archive. Selecting while paused resumes playback. Never derive an
 ID from a path or mutate runtime files directly; use the exact opaque ID from
 `status`.
+
+The `history` array is an archive of completed, skipped, and cleared chunks. Do
+not assume that every history entry played to completion.
 
 For a forced restart, run `interrupt`, then use `speak` normally. The next `speak` command starts the engine before it queues text.
 

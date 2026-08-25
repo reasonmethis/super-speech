@@ -44,8 +44,10 @@ control that same engine and can pause immediately at the current audio sample,
 then resume from that exact point. The window also shows the current voice,
 current text, and a scrollable queue. Click an upcoming row to start it
 immediately. The interrupted chunk stays queued and restarts from its beginning
-later. Recent archived speech appears under Earlier and can be replayed without
-changing the remaining queue. A row's disclosure button expands its full text.
+later. Recent archive entries appear under History and can be replayed without
+changing the remaining queue. History includes completed, skipped, and cleared
+chunks. Clear archives every waiting chunk without changing the current chunk
+or playback state. A row's disclosure button expands its full text.
 
 In desktop mode, mutable state stays in `~/.super-speech/`. The installed model
 and engine are read-only application resources. A headless installation keeps

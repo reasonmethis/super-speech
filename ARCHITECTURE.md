@@ -11,8 +11,8 @@ engine.
 - The Python engine owns synthesis, queue order, playback, the current sample
   cursor, daemon startup, playback commands, and the atomic `status.json`
   snapshot
-- Electron main owns the window, tray, installer, agent integration, and engine
-  supervision
+- Electron main owns the window, tray, installer, and agent integration. While
+  the app is running, it also supervises the engine process it starts
 - The renderer displays status and sends a narrow set of commands through a
   sandboxed preload bridge
 - `super-speech-engine` is the public contract for the app, skills, and headless
@@ -72,6 +72,8 @@ runtime sizes.
 chunk, the complete upcoming queue, and up to 50 newest archived chunks. Every
 entry has an opaque `id`. The total `history_count` can exceed the bounded
 `history` array.
+The archive currently includes completed, skipped, and cleared chunks, so the
+UI calls it History rather than claiming every entry played to completion.
 
 `super-speech-engine play <id>` is the one selection command. The engine, not
 Electron, validates the identifier and owns every queue or archive mutation:

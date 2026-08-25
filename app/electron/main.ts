@@ -25,6 +25,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   IPC_CHANNELS,
+  parseEngineStatus,
   statusForEngineProcess,
   type EngineStatus,
   type RuntimeState,
@@ -35,15 +36,6 @@ const HEARTBEAT_FRESHNESS_MS = 15_000;
 const MODEL_MIN_BYTES = 300_000_000;
 const VOICES_MIN_BYTES = 20_000_000;
 const SETUP_URL = "https://github.com/reasonmethis/super-speech#install";
-const RUNTIME_STATES = new Set<RuntimeState>([
-  "loading",
-  "playing",
-  "paused",
-  "idle",
-  "ready",
-  "setup_required",
-  "stopped",
-]);
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const rendererDir = path.join(moduleDir, "..", "dist");
 const smokeTest = process.argv.includes("--smoke-test");
@@ -152,34 +144,12 @@ function engineIsRunning(base: string, status: EngineStatus | null): boolean {
   );
 }
 
-function isEngineStatus(value: unknown): value is EngineStatus {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const status = value as Partial<EngineStatus>;
-  return (
-    typeof status.version === "number" &&
-    typeof status.state === "string" &&
-    RUNTIME_STATES.has(status.state as RuntimeState) &&
-    typeof status.updated_at === "number" &&
-    typeof status.queue_count === "number" &&
-    Array.isArray(status.queue)
-  );
-}
-
 function readEngineStatus(base: string): EngineStatus | null {
   try {
     const parsed: unknown = JSON.parse(
       readFileSync(path.join(base, "status.json"), "utf8"),
     );
-    if (!isEngineStatus(parsed)) {
-      return null;
-    }
-    return {
-      ...parsed,
-      history_count: typeof parsed.history_count === "number" ? parsed.history_count : 0,
-      history: Array.isArray(parsed.history) ? parsed.history : [],
-    };
+    return parseEngineStatus(parsed);
   } catch {
     return null;
   }
@@ -210,7 +180,7 @@ function getStatus(): RuntimeStatus {
   }
 
   return {
-    version: engine?.version ?? 1,
+    version: 2,
     state,
     updated_at: engine?.updated_at ?? 0,
     engine_pid: engineRunning ? (engine?.engine_pid ?? ownedEngine?.pid ?? null) : null,
@@ -255,14 +225,12 @@ function runEngineCommand(...arguments_: string[]): Promise<void> {
   });
 }
 
-async function playChunk(id: string): Promise<RuntimeStatus> {
-  await runEngineCommand("play", id);
-  return getStatus();
+function playChunk(id: string): Promise<void> {
+  return runEngineCommand("play", id);
 }
 
-async function clearQueue(): Promise<RuntimeStatus> {
-  await runEngineCommand("clear");
-  return getStatus();
+function clearQueue(): Promise<void> {
+  return runEngineCommand("clear");
 }
 
 function packagedSkillDirectory(): string {

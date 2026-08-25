@@ -10,6 +10,18 @@
   box-sizing: border-box;
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 html,
 body {
   width: 100%;
@@ -483,6 +495,11 @@ body[data-state="loading"] .playback-copy {
   opacity: 0.7;
 }
 
+.clear-queue-button[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.7;
+}
+
 .queue-list {
   display: flex;
   min-height: 0;
@@ -579,6 +596,10 @@ body[data-state="loading"] .playback-copy {
   opacity: 1;
 }
 
+.queue-play[aria-disabled="true"] {
+  cursor: default;
+}
+
 .queue-disclosure {
   display: grid;
   min-width: 38px;
@@ -607,7 +628,7 @@ body[data-state="loading"] .playback-copy {
 .queue-order {
   width: 38px;
   padding-top: 3px;
-  color: #777386;
+  color: #918d9f;
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 9px;
 }
@@ -643,7 +664,7 @@ body[data-state="loading"] .playback-copy {
   align-items: center;
   gap: 8px;
   margin: 5px 3px 0;
-  color: #777386;
+  color: #918d9f;
   font-size: 9px;
   font-weight: 650;
   letter-spacing: 0.08em;
@@ -670,7 +691,7 @@ body[data-state="loading"] .playback-copy {
   gap: 8px;
   border: 1px dashed rgba(255, 255, 255, 0.07);
   border-radius: 13px;
-  color: #777386;
+  color: #918d9f;
   font-size: 11px;
 }
 

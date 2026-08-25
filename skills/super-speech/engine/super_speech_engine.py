@@ -185,6 +185,7 @@ def start_engine() -> None:
         )
 
     BASE.mkdir(parents=True, exist_ok=True)
+    # Wait until this child finishes startup cleanup so a new PLAY is not cleared as stale
     launch_started_at = time.time()
     with LOG.open("a", encoding="utf-8") as engine_log:
         options: dict[str, object] = {
@@ -515,8 +516,8 @@ class State:
         self.current_piece = 0
         self.current_piece_count = 0
         self.skip_name: str | None = None  # skipped chunk whose banked pieces must be dropped
-        self.preferred_name: str | None = None  # next chunk the worker should claim
-        self.selected_name: str | None = None  # selected chunk skips the normal queue gap once
+        # Selected chunk stays prioritized until its first piece reaches playback
+        self.selection_name: str | None = None
         self.stop = threading.Event()    # tell the worker to exit
         self.saw_stop = False            # latched STOP — finish current chunk, then exit
 
@@ -650,6 +651,7 @@ def process_play_request(buf: "queue.Queue", st: State) -> str | None:
     if chunk_id is None:
         return None
 
+    # Discard audio rendered for the old order but keep source files queued for a clean restart
     with st.lock:
         playing = st.playing
     if playing and Path(playing).stem == chunk_id:
@@ -679,8 +681,7 @@ def process_play_request(buf: "queue.Queue", st: State) -> str | None:
     with st.lock:
         discarded = _discard_buffer(buf)
         st.claimed.clear()
-        st.preferred_name = target.name
-        st.selected_name = target.name
+        st.selection_name = target.name
         st.skip_name = None
         st.saw_stop = False
     if replayed_from is None:
@@ -728,8 +729,7 @@ def do_clear(buf: "queue.Queue", st: State) -> None:
             else:
                 blocked.add(path.name)
         st.claimed = blocked | ({st.playing} if st.playing else set())
-        st.preferred_name = None
-        st.selected_name = None
+        st.selection_name = None
     log(f"CLEAR; dropped {n} buffered/queued chunk(s)")
 
 
@@ -741,23 +741,20 @@ def _claimed(st: State, name: str) -> bool:
 def claim_next_queued_chunk(st: State) -> Path | None:
     with st.lock:
         candidates = sorted(QUEUE.glob("*.txt"), key=chunk_sort_key)
-        if st.preferred_name:
-            preferred = next(
-                (path for path in candidates if path.name == st.preferred_name),
+        if st.selection_name:
+            selected = next(
+                (path for path in candidates if path.name == st.selection_name),
                 None,
             )
-            if preferred is not None:
-                candidates.remove(preferred)
-                candidates.insert(0, preferred)
+            if selected is not None:
+                candidates.remove(selected)
+                candidates.insert(0, selected)
             else:
-                st.preferred_name = None
-                st.selected_name = None
+                st.selection_name = None
         for path in candidates:
             if path.name in st.claimed or path.name == st.playing:
                 continue
             st.claimed.add(path.name)
-            if path.name == st.preferred_name:
-                st.preferred_name = None
             return path
     return None
 
@@ -1059,9 +1056,9 @@ def run_engine_loop() -> None:
             # Drop pieces invalidated while the worker was handing them off
             with st.lock:
                 stale = st.skip_name == path.name or path.name not in st.claimed
-                selected = not stale and first and st.selected_name == path.name
+                selected = not stale and first and st.selection_name == path.name
                 if selected:
-                    st.selected_name = None
+                    st.selection_name = None
                 if first and st.skip_name and not stale:
                     st.skip_name = None
             if stale:

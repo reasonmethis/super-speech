@@ -7,7 +7,7 @@ import {
 } from "./runtime";
 
 const demoStatus: RuntimeStatus = {
-  version: 1,
+  version: 2,
   state: "playing",
   updated_at: Date.now() / 1000,
   engine_pid: 4821,
@@ -68,14 +68,25 @@ const metadataRow = requiredElement<HTMLDivElement>("metadata-row");
 const queueCount = requiredElement<HTMLSpanElement>("queue-count");
 const clearQueueButton = requiredElement<HTMLButtonElement>("clear-queue-button");
 const queueList = requiredElement<HTMLDivElement>("queue-list");
+const commandStatus = requiredElement<HTMLDivElement>("command-status");
 const desktopApi = window.superSpeech;
+
+interface PendingSelection {
+  id: string;
+  kind: TimelineItem["kind"];
+  text: string;
+  voice: string;
+  baselineIds: Set<string>;
+  timeoutId: number;
+}
 
 let currentStatus = desktopApi ? INITIAL_STATUS : demoStatus;
 let commandPending = false;
-let pendingChunkId: string | null = null;
+let pendingSelection: PendingSelection | null = null;
 let failedChunkId: string | null = null;
 let clearPending = false;
 let clearFailed = false;
+let clearTimeoutId: number | null = null;
 let expandedItemId: string | null = null;
 let renderedTimelineKey: string | null = null;
 
@@ -113,6 +124,69 @@ function timelineAction(item: TimelineItem, pending: boolean, failed: boolean): 
     return "Play now";
   }
   return currentStatus.state === "paused" ? "Paused" : "Speaking";
+}
+
+function itemReference(item: TimelineItem): string {
+  if (item.kind === "current") {
+    return "current speech";
+  }
+  if (item.kind === "upcoming") {
+    return `waiting chunk ${item.position}, ${item.text.slice(0, 40)}`;
+  }
+  return `history chunk, ${item.text.slice(0, 40)}`;
+}
+
+function selectionWasApplied(status: RuntimeStatus, selection: PendingSelection): boolean {
+  if (selection.kind === "upcoming") {
+    return (
+      status.current?.id === selection.id ||
+      !status.queue.some(({ id }) => id === selection.id)
+    );
+  }
+  // Replays get new IDs, so a new matching item confirms that the engine accepted the archive ID
+  const observed = [
+    ...(status.current ? [status.current] : []),
+    ...status.queue,
+    ...status.history,
+  ];
+  return observed.some(
+    (item) =>
+      !selection.baselineIds.has(item.id) &&
+      item.text === selection.text &&
+      item.voice === selection.voice,
+  );
+}
+
+function reconcileCommands(status: RuntimeStatus): void {
+  if (pendingSelection && selectionWasApplied(status, pendingSelection)) {
+    window.clearTimeout(pendingSelection.timeoutId);
+    pendingSelection = null;
+    commandStatus.textContent = "";
+  }
+  if (
+    status.queue_count === 0 &&
+    (clearPending || clearFailed || clearTimeoutId !== null)
+  ) {
+    const restoreFocus = document.activeElement === clearQueueButton;
+    if (clearTimeoutId !== null) {
+      window.clearTimeout(clearTimeoutId);
+    }
+    clearTimeoutId = null;
+    clearPending = false;
+    clearFailed = false;
+    commandStatus.textContent = "";
+    if (restoreFocus) {
+      queueList.focus({ preventScroll: true });
+    }
+  }
+}
+
+function playActionLabel(item: TimelineItem): string {
+  if (item.kind === "current") {
+    return currentStatus.state === "paused" ? "Currently paused" : "Currently speaking";
+  }
+  const reference = itemReference(item);
+  return item.kind === "history" ? `Replay ${reference}` : `Play ${reference} now`;
 }
 
 function statusCopy(status: RuntimeStatus): {
@@ -187,6 +261,7 @@ function playbackIconMarkup(status: RuntimeStatus): string {
 }
 
 function render(status: RuntimeStatus): void {
+  reconcileCommands(status);
   currentStatus = status;
   const paused = status.state === "paused";
   const copy = statusCopy(status);
@@ -228,13 +303,22 @@ function render(status: RuntimeStatus): void {
     piecePill.classList.add("is-hidden");
   }
 
-  queueCount.textContent = String(status.queue_count);
+  queueCount.textContent = `${status.queue_count} waiting`;
   queueCount.setAttribute(
     "aria-label",
     `${status.queue_count} ${status.queue_count === 1 ? "chunk" : "chunks"} waiting`,
   );
   clearQueueButton.classList.toggle("is-hidden", status.queue_count === 0);
-  clearQueueButton.disabled = clearPending;
+  clearQueueButton.setAttribute("aria-disabled", String(clearPending));
+  clearQueueButton.setAttribute("aria-busy", String(clearPending));
+  clearQueueButton.setAttribute(
+    "aria-label",
+    clearPending
+      ? "Clearing waiting speech"
+      : clearFailed
+        ? "Retry clearing waiting speech"
+        : `Clear ${status.queue_count} waiting ${status.queue_count === 1 ? "chunk" : "chunks"}; current chunk and playback state will not change`,
+  );
   clearQueueButton.textContent = clearPending
     ? "Clearing..."
     : clearFailed
@@ -250,18 +334,24 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
   if (!items.some((item) => item.id === failedChunkId)) {
     failedChunkId = null;
   }
+  // Preserve row nodes across polling so hover, focus, expansion, and in-progress clicks survive
   const timelineKey = JSON.stringify([
-    pendingChunkId,
-    failedChunkId,
     historyTotal,
     items.map(({ id, text, voice, kind, position }) => [id, text, voice, kind, position]),
   ]);
   if (timelineKey === renderedTimelineKey) {
+    updateTimelineRows(items);
+    updateTimelineFade();
     return;
   }
   renderedTimelineKey = timelineKey;
 
   const previousScrollTop = queueList.scrollTop;
+  const focusedControl = document.activeElement instanceof HTMLElement
+    ? document.activeElement.closest<HTMLElement>(".queue-item")
+    : null;
+  const focusedItemId = focusedControl?.dataset.itemId;
+  const focusedDisclosure = document.activeElement?.classList.contains("queue-disclosure");
   queueList.replaceChildren();
   if (items.length === 0) {
     const empty = document.createElement("div");
@@ -272,13 +362,17 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     return;
   }
 
+  const visibleHistory = items.filter(({ kind }) => kind === "history").length;
   let historyDividerAdded = false;
   for (const item of items) {
     if (item.kind === "history" && !historyDividerAdded) {
       historyDividerAdded = true;
       const divider = document.createElement("div");
       divider.className = "timeline-divider";
-      divider.innerHTML = `<span>Earlier</span><span>${historyTotal}</span>`;
+      const historyCount = visibleHistory < historyTotal
+        ? `${visibleHistory} of ${historyTotal}`
+        : String(historyTotal);
+      divider.innerHTML = `<span>History</span><span>${historyCount}</span>`;
       queueList.append(divider);
     }
 
@@ -287,47 +381,30 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     row.dataset.itemId = item.id;
     const isCurrent = item.kind === "current";
     const isExpanded = item.id === expandedItemId;
-    const isPending = item.id === pendingChunkId;
-    const isFailed = item.id === failedChunkId;
     if (isCurrent) {
       row.classList.add("is-current");
       row.setAttribute("aria-current", "true");
-    }
-    if (isPending) {
-      row.classList.add("is-pending");
-    }
-    if (isFailed) {
-      row.classList.add("is-error");
     }
 
     const play = document.createElement("button");
     play.className = "queue-play";
     play.type = "button";
-    play.disabled = isCurrent || pendingChunkId !== null;
-    play.setAttribute(
-      "aria-label",
-      isCurrent
-        ? "Currently speaking"
-        : item.kind === "history"
-          ? `Replay: ${item.text}`
-          : `Play now: ${item.text}`,
-    );
 
     const order = document.createElement("span");
     order.className = "queue-order";
     order.textContent = isCurrent
       ? "NOW"
       : item.kind === "history"
-        ? "PAST"
+        ? "HIST"
         : String(item.position).padStart(2, "0");
 
     const copy = document.createElement("div");
     copy.className = "queue-copy";
     const text = document.createElement("p");
+    text.id = `chunk-text-${item.id}`;
     text.textContent = item.text;
     const meta = document.createElement("span");
-    const action = timelineAction(item, isPending, isFailed);
-    meta.textContent = `${formatVoice(item.voice)}  /  ${action}`;
+    meta.className = "queue-meta";
     copy.append(text, meta);
     play.append(order, copy);
 
@@ -335,9 +412,11 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     disclosure.className = "queue-disclosure";
     disclosure.type = "button";
     disclosure.setAttribute("aria-expanded", String(isExpanded));
+    disclosure.setAttribute("aria-controls", text.id);
+    disclosure.dataset.itemReference = itemReference(item);
     disclosure.setAttribute(
       "aria-label",
-      `${isExpanded ? "Collapse" : "Expand"} full text`,
+      `${isExpanded ? "Collapse" : "Expand"} full text for ${itemReference(item)}`,
     );
     disclosure.innerHTML = '<span aria-hidden="true"></span>';
     disclosure.addEventListener("click", () => {
@@ -354,7 +433,42 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     queueList.append(row);
   }
   queueList.scrollTop = previousScrollTop;
+  updateTimelineRows(items);
   updateTimelineFade();
+  if (focusedItemId) {
+    const row = queueList.querySelector<HTMLElement>(`[data-item-id="${focusedItemId}"]`);
+    const preferred = focusedDisclosure
+      ? row?.querySelector<HTMLButtonElement>(".queue-disclosure")
+      : row?.querySelector<HTMLButtonElement>(".queue-play");
+    const fallback = row?.querySelector<HTMLButtonElement>(".queue-disclosure");
+    (preferred?.disabled ? fallback : preferred)?.focus({ preventScroll: true });
+  }
+}
+
+function updateTimelineRows(items: TimelineItem[]): void {
+  const itemById = new Map(items.map((item) => [item.id, item]));
+  const pendingId = pendingSelection?.id ?? null;
+  for (const row of queueList.querySelectorAll<HTMLElement>(".queue-item")) {
+    const item = itemById.get(row.dataset.itemId ?? "");
+    if (!item) {
+      continue;
+    }
+    const pending = item.id === pendingId;
+    const failed = item.id === failedChunkId;
+    row.classList.toggle("is-pending", pending);
+    row.classList.toggle("is-error", failed);
+    const play = row.querySelector<HTMLButtonElement>(".queue-play");
+    if (play) {
+      play.disabled = item.kind === "current";
+      play.setAttribute("aria-disabled", String(item.kind === "current" || pendingId !== null));
+      play.setAttribute("aria-busy", String(pending));
+      play.setAttribute("aria-label", playActionLabel(item));
+    }
+    const meta = row.querySelector<HTMLElement>(".queue-meta");
+    if (meta) {
+      meta.textContent = `${formatVoice(item.voice)}  /  ${timelineAction(item, pending, failed)}`;
+    }
+  }
 }
 
 function updateTimelineFade(): void {
@@ -369,30 +483,59 @@ function setExpandedItem(id: string | null): void {
     row.classList.toggle("is-expanded", expanded);
     const disclosure = row.querySelector<HTMLButtonElement>(".queue-disclosure");
     disclosure?.setAttribute("aria-expanded", String(expanded));
-    disclosure?.setAttribute("aria-label", `${expanded ? "Collapse" : "Expand"} full text`);
+    disclosure?.setAttribute(
+      "aria-label",
+      `${expanded ? "Collapse" : "Expand"} full text for ${disclosure.dataset.itemReference}`,
+    );
   }
+  updateTimelineFade();
 }
 
 async function playTimelineItem(item: TimelineItem): Promise<void> {
-  if (item.kind === "current" || pendingChunkId !== null) {
+  if (item.kind === "current" || pendingSelection !== null) {
     return;
   }
-  pendingChunkId = item.id;
   failedChunkId = null;
-  renderedTimelineKey = null;
+  const selection = {
+    id: item.id,
+    kind: item.kind,
+    text: item.text,
+    voice: item.voice,
+    baselineIds: new Set(timelineItems(currentStatus).map(({ id }) => id)),
+    timeoutId: 0,
+  };
+  selection.timeoutId = window.setTimeout(() => {
+    if (pendingSelection === selection) {
+      pendingSelection = null;
+      failedChunkId = item.id;
+      commandStatus.textContent = "Could not start selected speech. Try again.";
+      render(currentStatus);
+    }
+  }, 30_000);
+  pendingSelection = selection;
+  commandStatus.textContent = "";
   render(currentStatus);
   try {
     if (desktopApi) {
-      render(await desktopApi.playChunk(item.id));
+      await desktopApi.playChunk(item.id);
+      void refreshStatus();
     } else {
       console.info(`Demo playback requested for ${item.id}`);
+      await new Promise((resolve) => window.setTimeout(resolve, 700));
+      window.clearTimeout(selection.timeoutId);
+      if (pendingSelection === selection) {
+        pendingSelection = null;
+      }
+      render(currentStatus);
     }
   } catch (error) {
     console.error("Could not start the selected speech", error);
+    window.clearTimeout(selection.timeoutId);
+    if (pendingSelection === selection) {
+      pendingSelection = null;
+    }
     failedChunkId = item.id;
-  } finally {
-    pendingChunkId = null;
-    renderedTimelineKey = null;
+    commandStatus.textContent = "Could not start selected speech. Try again.";
     render(currentStatus);
   }
 }
@@ -450,18 +593,36 @@ clearQueueButton.addEventListener("click", async () => {
   }
   clearPending = true;
   clearFailed = false;
+  commandStatus.textContent = "";
+  clearTimeoutId = window.setTimeout(() => {
+    clearTimeoutId = null;
+    clearPending = false;
+    clearFailed = true;
+    commandStatus.textContent = "Could not clear waiting speech. Try again.";
+    render(currentStatus);
+  }, 10_000);
   render(currentStatus);
   try {
     if (desktopApi) {
-      render(await desktopApi.clearQueue());
+      await desktopApi.clearQueue();
+      void refreshStatus();
     } else {
       console.info("Demo queue clear requested");
+      await new Promise((resolve) => window.setTimeout(resolve, 700));
+      window.clearTimeout(clearTimeoutId);
+      clearTimeoutId = null;
+      clearPending = false;
+      render(currentStatus);
     }
   } catch (error) {
     console.error("Could not clear the speech queue", error);
-    clearFailed = true;
-  } finally {
+    if (clearTimeoutId !== null) {
+      window.clearTimeout(clearTimeoutId);
+    }
+    clearTimeoutId = null;
     clearPending = false;
+    clearFailed = true;
+    commandStatus.textContent = "Could not clear waiting speech. Try again.";
     render(currentStatus);
   }
 });

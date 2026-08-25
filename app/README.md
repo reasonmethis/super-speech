@@ -4,10 +4,11 @@ Start with the canonical project overview in [../README.md](../README.md).
 This document covers development and packaging for the Electron app.
 
 The renderer is plain TypeScript and CSS. A sandboxed preload bridge exposes
-status, pause, identifier-based playback selection, setup, and window controls
-without giving the renderer Node.js or filesystem access. Electron forwards
-`playChunk(id)` to the engine CLI; the frozen Python sidecar remains
-authoritative for synthesis, queue order, replay, and the current sample cursor.
+status, pause, identifier-based playback selection, queue clearing, setup, and
+window controls without giving the renderer Node.js or filesystem access.
+Electron forwards playback and clear commands to the engine CLI; the frozen
+Python sidecar remains authoritative for synthesis, queue order, replay, and
+the current sample cursor.
 
 ## Prerequisites
 

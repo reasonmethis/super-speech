@@ -41,7 +41,7 @@ work session without having to reconstruct the product decisions.
 ## P1: interactive queue
 
 - [x] Let a user select any upcoming chunk and start it immediately
-- [x] Let a user replay a past chunk without losing the remaining queue
+- [x] Let a user replay an archived chunk without losing the remaining queue
 - [x] Keep the current chunk and sample position when the user only pauses
 - Add previous and next controls using the identifier-based selection command
 - [x] Add replay through the same identifier-based selection command
@@ -50,6 +50,7 @@ work session without having to reconstruct the product decisions.
 - Add drag-to-reorder controls
 - Show when each chunk was queued, when it started, and when it finished
 - Preserve enough rendered audio history to make replay instant
+- Record completed, skipped, and cleared outcomes before labeling history as played
 - [x] Define queue-selection behavior in tests before changing the file protocol
 - Add black-box coverage for skip with buffered pieces, clear during playback,
   stop during gaps, failed synthesis, and persistent pause

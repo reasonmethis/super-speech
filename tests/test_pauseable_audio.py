@@ -5,6 +5,7 @@ import json
 import queue
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -318,8 +319,6 @@ def test_selecting_upcoming_chunk_preempts_without_archiving_current(
     assert current.is_file()
     assert not (engine.SPOKEN / current.name).exists()
     assert state.claimed == set()
-    assert state.preferred_name == selected.name
-    assert state.selected_name == selected.name
     assert buffered.empty()
 
     assert engine.finish_chunk_playback(current, "select", False, state)
@@ -327,7 +326,6 @@ def test_selecting_upcoming_chunk_preempts_without_archiving_current(
     assert current.is_file()
     assert not (engine.SPOKEN / current.name).exists()
     assert engine.claim_next_queued_chunk(state) == selected
-    state.claimed.discard(selected.name)
     assert engine.claim_next_queued_chunk(state) == current
 
 
@@ -347,8 +345,104 @@ def test_replaying_history_copies_it_to_a_new_selected_queue_entry(
     replay = engine.QUEUE / "008-bm_fable-g350-say.txt"
     assert archived.read_text(encoding="utf-8") == "Say this again"
     assert replay.read_text(encoding="utf-8") == "Say this again"
-    assert state.preferred_name == replay.name
-    assert state.selected_name == replay.name
+    assert engine.claim_next_queued_chunk(state) == replay
+
+
+def test_engine_loop_replays_history_before_the_existing_queue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_loop_replay")
+    configure_runtime(engine, tmp_path)
+    for name in ("INTERRUPT", "SKIP", "CLEAR", "WARMUP", "HEARTBEAT"):
+        setattr(engine, name, tmp_path / name)
+    engine.MODEL_DIR = tmp_path / "models"
+    engine.MODEL_PATH = engine.MODEL_DIR / "model.onnx"
+    engine.VOICES_PATH = engine.MODEL_DIR / "voices.bin"
+    engine.MODEL_DIR.mkdir()
+    engine.MODEL_PATH.touch()
+    engine.VOICES_PATH.touch()
+    engine.POLL_INTERVAL = 0.01
+    engine.SIGNAL_TICK = 0.001
+    engine.CHUNK_GAP_S = 0
+    engine.SILENT = False
+
+    queued = engine.QUEUE / "001-af_heart-say.txt"
+    archived = engine.SPOKEN / "007-bm_fable-say.txt"
+    queued.write_text("First queued", encoding="utf-8")
+    archived.write_text("Replay me", encoding="utf-8")
+    engine.PLAY.write_text(json.dumps({"id": archived.stem}), encoding="utf-8")
+
+    played_samples: list[int] = []
+
+    class FakeCallbackStop(Exception):
+        pass
+
+    class FakeOutputStream:
+        def __init__(self, *, callback, finished_callback, **_kwargs) -> None:
+            self.callback = callback
+            self.finished_callback = finished_callback
+            self.active = False
+
+        def start(self) -> None:
+            self.active = True
+            playback = self.callback.__self__
+            played_samples.append(int(playback.audio[0, 0]))
+            output = np.empty_like(playback.audio)
+            try:
+                self.callback(output, len(output), None, None)
+            except FakeCallbackStop:
+                pass
+            self.active = False
+            self.finished_callback()
+            if len(played_samples) == 1:
+                engine.STOP.touch()
+
+        def abort(self) -> None:
+            self.active = False
+
+        def close(self) -> None:
+            self.active = False
+
+    class FakeKokoro:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        @classmethod
+        def from_session(cls, *_args, **_kwargs):
+            return cls()
+
+        def get_voices(self) -> list[str]:
+            return ["af_bella", "af_heart", "bm_fable"]
+
+        def create(self, text: str, **_kwargs):
+            sample = {"Replay me": 8, "First queued": 1}.get(text, 0)
+            return np.full(4, sample, dtype=np.float32), 1000
+
+    class FakeSessionOptions:
+        intra_op_num_threads = 0
+
+    fake_sounddevice = SimpleNamespace(
+        CallbackStop=FakeCallbackStop,
+        OutputStream=FakeOutputStream,
+        play=lambda *_args, **_kwargs: None,
+        wait=lambda: None,
+    )
+    fake_onnxruntime = SimpleNamespace(
+        SessionOptions=FakeSessionOptions,
+        InferenceSession=lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sounddevice)
+    monkeypatch.setitem(sys.modules, "kokoro_onnx", SimpleNamespace(Kokoro=FakeKokoro))
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_onnxruntime)
+
+    engine.run_engine_loop()
+
+    replay = engine.SPOKEN / "008-bm_fable-say.txt"
+    assert played_samples == [8, 1]
+    assert archived.read_text(encoding="utf-8") == "Replay me"
+    assert replay.read_text(encoding="utf-8") == "Replay me"
+    assert (engine.SPOKEN / queued.name).read_text(encoding="utf-8") == "First queued"
+    assert not list(engine.QUEUE.glob("*.txt"))
 
 
 def test_idle_selection_replaces_worker_claims_and_becomes_next(
@@ -385,7 +479,7 @@ def test_selection_interrupts_an_inter_chunk_gap(
     engine.request_play(selected.stem)
 
     assert engine.gap_wait(1.0, queue.Queue(), state) == "select"
-    assert state.preferred_name == selected.name
+    assert engine.claim_next_queued_chunk(state) == selected
 
 
 def test_failed_archive_keeps_chunk_claimed_instead_of_repeating(

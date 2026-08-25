@@ -36,7 +36,7 @@ The installer:
 - installs `engine/super_speech_engine.py` and its pinned runtime dependencies
 - downloads both Kokoro model files into `runtime/models/` and verifies their SHA-256 hashes
 
-The queue, spoken archive, status, controls, and logs are also created under
+The queue, archive, status, controls, and logs are also created under
 that `runtime/` directory when the engine runs. The installation does not
 retain a repository path or write Super Speech files elsewhere.
 
@@ -101,3 +101,6 @@ Selecting a history entry creates a new queued replay without changing the
 remaining queue or the original archive. Selection is distinct from pause and
 resume: pause preserves the exact audio sample, while a preempted chunk later
 restarts from its beginning.
+
+History is an archive, not a completion log. It can contain chunks that
+finished, were skipped, or were cleared before playback.
