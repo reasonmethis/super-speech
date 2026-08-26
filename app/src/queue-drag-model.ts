@@ -153,8 +153,18 @@ export function queueDropBeforeId(
   pointerY: number,
 ): string | null {
   return rows.find(
-    (row) => row.id !== sourceId && pointerY < row.top + row.height / 2,
+    (row) => row.id !== sourceId && pointerY <= row.top + row.height / 2,
   )?.id ?? null;
+}
+
+export function pointerMovedBeyondThreshold(
+  startX: number,
+  startY: number,
+  currentX: number,
+  currentY: number,
+  threshold: number,
+): boolean {
+  return Math.hypot(currentX - startX, currentY - startY) >= threshold;
 }
 
 export function isHistoryDropArea(

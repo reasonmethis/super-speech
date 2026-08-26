@@ -9,6 +9,7 @@ import {
 } from "./runtime";
 import {
   isHistoryDropArea,
+  pointerMovedBeyondThreshold,
   queueDropBeforeId,
   startQueueDrag,
   transitionQueueDrag,
@@ -100,6 +101,14 @@ interface QueuePointerDrag {
   width: number;
 }
 
+interface PlayPointerGesture {
+  pointerId: number;
+  button: HTMLButtonElement;
+  startX: number;
+  startY: number;
+  moved: boolean;
+}
+
 let currentStatus = desktopApi ? INITIAL_STATUS : demoStatus;
 let commandPending = false;
 let pendingSelection: PendingSelection | null = null;
@@ -114,8 +123,10 @@ let pendingQueueMutation: PendingQueueMutation | null = null;
 let failedQueueMutationId: string | null = null;
 let queueMutationGeneration = 0;
 let queuePointerDrag: QueuePointerDrag | null = null;
+let playPointerGesture: PlayPointerGesture | null = null;
+const suppressedPlayClicks = new WeakSet<HTMLButtonElement>();
 
-const QUEUE_DRAG_THRESHOLD = 5;
+const POINTER_GESTURE_THRESHOLD = 5;
 
 function requiredElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -466,22 +477,85 @@ function releaseQueuePointer(pointerId: number): void {
   }
 }
 
-function applyQueueVisualOrder(
-  visualOrder: readonly string[],
-  animate = true,
+function beginPlayPointerGesture(
+  event: PointerEvent,
+  button: HTMLButtonElement,
 ): void {
-  const rows = [...queueList.querySelectorAll<HTMLElement>(".queue-item.is-upcoming")];
-  for (const row of rows) {
-    for (const animation of row.getAnimations()) {
-      animation.cancel();
-    }
+  if (
+    event.button !== 0 ||
+    !event.isPrimary ||
+    button.disabled ||
+    playPointerGesture
+  ) {
+    return;
   }
+  playPointerGesture = {
+    pointerId: event.pointerId,
+    button,
+    startX: event.clientX,
+    startY: event.clientY,
+    moved: false,
+  };
+}
+
+function suppressNextPlayClick(button: HTMLButtonElement): void {
+  suppressedPlayClicks.add(button);
+  window.setTimeout(() => suppressedPlayClicks.delete(button), 0);
+}
+
+function recordPlayPointerMovement(
+  gesture: PlayPointerGesture,
+  event: PointerEvent,
+): void {
+  gesture.moved ||= pointerMovedBeyondThreshold(
+    gesture.startX,
+    gesture.startY,
+    event.clientX,
+    event.clientY,
+    POINTER_GESTURE_THRESHOLD,
+  );
+}
+
+function updatePlayPointerGesture(event: PointerEvent): void {
+  const gesture = playPointerGesture;
+  if (!gesture || event.pointerId !== gesture.pointerId) {
+    return;
+  }
+  recordPlayPointerMovement(gesture, event);
+  if ((event.buttons & 1) === 0) {
+    if (gesture.moved) {
+      suppressNextPlayClick(gesture.button);
+    }
+    playPointerGesture = null;
+  }
+}
+
+function finishPlayPointerGesture(event: PointerEvent): void {
+  const gesture = playPointerGesture;
+  if (!gesture || event.pointerId !== gesture.pointerId) {
+    return;
+  }
+  recordPlayPointerMovement(gesture, event);
+  if (gesture.moved) {
+    suppressNextPlayClick(gesture.button);
+  }
+  playPointerGesture = null;
+}
+
+function cancelPlayPointerGesture(pointerId?: number): void {
+  if (pointerId !== undefined && playPointerGesture?.pointerId !== pointerId) {
+    return;
+  }
+  playPointerGesture = null;
+}
+
+function applyQueueVisualOrder(visualOrder: readonly string[]): void {
+  const rows = [...queueList.querySelectorAll<HTMLElement>(".queue-item.is-upcoming")];
   const currentOrder = rows.map((row) => row.dataset.itemId ?? "");
   if (visualOrder.every((id, index) => id === currentOrder[index])) {
     return;
   }
   const rowsById = new Map(rows.map((row) => [row.dataset.itemId ?? "", row]));
-  const previousTops = new Map(rows.map((row) => [row, row.getBoundingClientRect().top]));
   const anchor = queueList.querySelector<HTMLElement>(
     ".queue-item.is-current, .timeline-divider",
   );
@@ -490,19 +564,6 @@ function applyQueueVisualOrder(
     if (row) {
       queueList.insertBefore(row, anchor);
     }
-  }
-  if (!animate || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-    return;
-  }
-  for (const row of rows) {
-    const distance = (previousTops.get(row) ?? 0) - row.getBoundingClientRect().top;
-    if (distance === 0) {
-      continue;
-    }
-    row.animate(
-      [{ transform: `translateY(${distance}px)` }, { transform: "translateY(0)" }],
-      { duration: 130, easing: "ease-out" },
-    );
   }
 }
 
@@ -517,11 +578,13 @@ function updateQueuePointerDrag(event: PointerEvent): void {
   }
   event.preventDefault();
   if (drag.state.phase === "armed") {
-    const distance = Math.hypot(
-      event.clientX - drag.startX,
-      event.clientY - drag.startY,
-    );
-    if (distance < QUEUE_DRAG_THRESHOLD) {
+    if (!pointerMovedBeyondThreshold(
+      drag.startX,
+      drag.startY,
+      event.clientX,
+      event.clientY,
+      POINTER_GESTURE_THRESHOLD,
+    )) {
       return;
     }
     if (!activateQueuePointerDrag(drag)) {
@@ -617,7 +680,7 @@ function finishQueuePointerDrag(event: PointerEvent, commit: boolean): void {
   let projectionFailed = false;
   try {
     if (transition.visualOrder) {
-      applyQueueVisualOrder(transition.visualOrder, false);
+      applyQueueVisualOrder(transition.visualOrder);
     }
   } catch (error) {
     console.error("Could not settle queue drag", error);
@@ -649,7 +712,7 @@ function cancelQueuePointerDrag(): void {
   let projectionFailed = false;
   try {
     if (transition.visualOrder) {
-      applyQueueVisualOrder(transition.visualOrder, false);
+      applyQueueVisualOrder(transition.visualOrder);
     }
   } catch (error) {
     console.error("Could not cancel queue drag", error);
@@ -826,7 +889,13 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
       }
     });
 
-    play.addEventListener("click", () => void playTimelineItem(item));
+    play.addEventListener("click", (event) => {
+      if (suppressedPlayClicks.delete(play)) {
+        event.preventDefault();
+        return;
+      }
+      void playTimelineItem(item);
+    });
     rowControls.push(play);
     if (isUpcoming) {
       const remove = document.createElement("button");
@@ -1185,6 +1254,7 @@ requiredElement<HTMLButtonElement>("hide-button").addEventListener("click", () =
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     cancelQueuePointerDrag();
+    cancelPlayPointerGesture();
   } else {
     void refreshStatus();
   }
@@ -1200,12 +1270,24 @@ queueList.addEventListener("pointerdown", (event) => {
   const id = row?.dataset.itemId;
   if (handle && row && id) {
     beginQueuePointerDrag(event, id, row, handle);
+    return;
+  }
+  const play = target.closest<HTMLButtonElement>(".queue-play");
+  if (play && queueList.contains(play)) {
+    beginPlayPointerGesture(event, play);
   }
 });
 queueList.addEventListener("scroll", updateTimelineFade, { passive: true });
 window.addEventListener("pointermove", updateQueuePointerDrag, true);
-window.addEventListener("pointerup", (event) => finishQueuePointerDrag(event, true), true);
-window.addEventListener("pointercancel", (event) => finishQueuePointerDrag(event, false), true);
+window.addEventListener("pointermove", updatePlayPointerGesture, true);
+window.addEventListener("pointerup", (event) => {
+  finishQueuePointerDrag(event, true);
+  finishPlayPointerGesture(event);
+}, true);
+window.addEventListener("pointercancel", (event) => {
+  finishQueuePointerDrag(event, false);
+  cancelPlayPointerGesture(event.pointerId);
+}, true);
 queueList.addEventListener("lostpointercapture", (event) => {
   if (queuePointerDrag?.state.pointerId === event.pointerId) {
     cancelQueuePointerDrag();
@@ -1216,7 +1298,10 @@ window.addEventListener("keydown", (event) => {
     cancelQueuePointerDrag();
   }
 });
-window.addEventListener("blur", cancelQueuePointerDrag);
+window.addEventListener("blur", () => {
+  cancelQueuePointerDrag();
+  cancelPlayPointerGesture();
+});
 
 render(currentStatus);
 void refreshStatus();

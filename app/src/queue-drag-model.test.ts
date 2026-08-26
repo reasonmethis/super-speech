@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   isHistoryDropArea,
+  pointerMovedBeyondThreshold,
   queueDropBeforeId,
   startQueueDrag,
   transitionQueueDrag,
@@ -35,7 +36,13 @@ test("maps pointer positions to the first, middle, and last visual slots", () =>
 
   assert.equal(queueDropBeforeId("middle", rows, -10), "newest");
   assert.equal(queueDropBeforeId("middle", rows, 70), "oldest");
+  assert.equal(queueDropBeforeId("middle", rows, 114), "oldest");
   assert.equal(queueDropBeforeId("middle", rows, 200), null);
+});
+
+test("pointer movement activates at the threshold, not just beyond it", () => {
+  assert.equal(pointerMovedBeyondThreshold(10, 10, 13, 13, 5), false);
+  assert.equal(pointerMovedBeyondThreshold(10, 10, 13, 14, 5), true);
 });
 
 test("History accepts blank space inside the list but not the same Y outside it", () => {

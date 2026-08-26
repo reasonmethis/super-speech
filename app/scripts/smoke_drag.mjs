@@ -173,6 +173,12 @@ try {
         shifted.y > firstStart.y + 20,
         "The neighboring row did not move out of the first position",
       );
+      const transformAnimations = await rows.evaluateAll((items) =>
+        items.flatMap((item) => item.getAnimations()).filter((animation) =>
+          animation.effect?.getKeyframes().some((frame) => frame.transform)
+        ).length
+      );
+      assert.equal(transformAnimations, 0, "Queue rows must move without position animation");
     },
   );
   await waitFor(
@@ -237,6 +243,40 @@ try {
     },
     "The renderer did not reconcile to the persisted archive",
   );
+
+  const playbackBeforeHistoryGesture = status();
+  const historyPlay = page.locator(
+    `[data-item-id="${secondId}"].is-history .queue-play`,
+  );
+  const historyBounds = await historyPlay.boundingBox();
+  assert(historyBounds, "Archived card must be visible for the gesture test");
+  const historyPoint = {
+    x: historyBounds.x + historyBounds.width / 2,
+    y: historyBounds.y + historyBounds.height / 2,
+  };
+  await page.mouse.move(historyPoint.x, historyPoint.y);
+  await page.mouse.down();
+  await page.mouse.move(historyPoint.x + 10, historyPoint.y, { steps: 4 });
+  await page.mouse.up();
+  await new Promise((resolve) => setTimeout(resolve, 1_000));
+  const playbackAfterHistoryGesture = status();
+  assert.equal(await page.locator(".queue-item.is-pending").count(), 0);
+  assert.equal(
+    playbackAfterHistoryGesture.current?.id,
+    playbackBeforeHistoryGesture.current?.id,
+    "Dragging an archived card started playback",
+  );
+  assert.deepEqual(
+    playbackAfterHistoryGesture.queue.map(({ id }) => id),
+    playbackBeforeHistoryGesture.queue.map(({ id }) => id),
+    "Dragging an archived card changed the waiting queue",
+  );
+  assert.equal(
+    playbackAfterHistoryGesture.history_count,
+    playbackBeforeHistoryGesture.history_count,
+    "Dragging an archived card changed History",
+  );
+
   const orderBeforeBlur = await remainingRows.evaluateAll((items) =>
     items.map((item) => item.getAttribute("data-item-id"))
   );
