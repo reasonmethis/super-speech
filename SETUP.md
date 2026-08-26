@@ -96,11 +96,12 @@ or the bounded `history` list:
 ```
 
 The same command works in desktop and headless installations. Selecting an
-upcoming item starts it immediately and leaves the interrupted item queued.
+upcoming item jumps to that point: the current item and every older waiting item
+before the selection move to History, while newer waiting items keep their order.
 Selecting a history entry queues a working copy under the same ID without
 changing the remaining queue, the original archive, or the number of History
 rows. Selection is distinct from pause and resume: pause preserves the exact
-audio sample, while a preempted item later restarts from its beginning. The
+audio sample, while selecting another item ends that paused position. The
 command waits for engine acknowledgement and prints the resulting ID as JSON.
 
 History is an archive, not a completion log. It can contain items that

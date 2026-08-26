@@ -46,10 +46,13 @@ control that same engine and can pause immediately at the current audio sample,
 then resume from that exact point. The window also shows the current voice,
 current text, and a scrollable queue. Waiting rows appear newest first, with the
 current row at the bottom of the active group. When it finishes, that row enters
-the top of History without moving the surrounding rows. Click a row once to
-toggle its full text, or double-click an upcoming or History row to play it
-without changing its expanded state. The interrupted item stays queued and
-restarts from its beginning later. Recent
+the top of History without moving the surrounding rows. Waiting, Current, and
+History dividers mark the timeline, while a fixed label beside Speech names the
+section in view. The app reveals the current row when playback changes. Click a
+row once to toggle its full text, or double-click an upcoming or History row to play it
+without changing its expanded state. Selecting a waiting row jumps to that point:
+the current row and every older waiting row below the selection move to History,
+while newer waiting rows keep their order. Recent
 archive entries appear under History and can be replayed without
 changing the remaining queue or adding duplicate History rows. History includes
 completed, skipped, and cleared items. `Clear all` archives every waiting item

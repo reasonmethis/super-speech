@@ -76,9 +76,11 @@ const currentText = requiredElement<HTMLParagraphElement>("current-text");
 const voicePill = requiredElement<HTMLSpanElement>("voice-pill");
 const voiceLabel = requiredElement<HTMLSpanElement>("voice-label");
 const metadataRow = requiredElement<HTMLDivElement>("metadata-row");
+const visibleSectionLabel = requiredElement<HTMLSpanElement>("visible-section-label");
 const queueCount = requiredElement<HTMLSpanElement>("queue-count");
 const clearQueueButton = requiredElement<HTMLButtonElement>("clear-queue-button");
 const queueList = requiredElement<HTMLDivElement>("queue-list");
+const queueActionMenu = requiredElement<HTMLDivElement>("queue-action-menu");
 const commandStatus = requiredElement<HTMLDivElement>("command-status");
 const versionLabel = requiredElement<HTMLSpanElement>("version-label");
 const desktopApi = window.superSpeech;
@@ -136,6 +138,7 @@ let chunkPointerGesture: ChunkPointerGesture | null = null;
 const suppressedChunkClicks = new WeakSet<HTMLButtonElement>();
 let pendingChunkExpansion: PendingChunkExpansion | null = null;
 let openMenuItemId: string | null = null;
+let revealedCurrentItemId: string | null = null;
 
 const POINTER_GESTURE_THRESHOLD = 5;
 const QUEUE_REORDER_ANIMATION_MS = 140;
@@ -626,7 +629,7 @@ function applyQueueVisualOrder(visualOrder: readonly string[]): void {
   }
   const rowsById = new Map(rows.map((row) => [row.dataset.itemId ?? "", row]));
   const anchor = queueList.querySelector<HTMLElement>(
-    ".queue-item.is-current, .timeline-divider",
+    '.timeline-divider[data-section="current"], .timeline-divider[data-section="history"]',
   );
   for (const id of visualOrder) {
     const row = rowsById.get(id);
@@ -850,19 +853,30 @@ function timelineRenderKey(items: TimelineItem[], historyTotal: number): string 
   ]);
 }
 
+type TimelineSection = TimelineItem["kind"];
+
+function requiredTimelineSections(items: TimelineItem[]): TimelineSection[] {
+  const present = new Set(items.map(({ kind }) => kind));
+  if (present.has("upcoming")) {
+    present.add("history");
+  }
+  return (["upcoming", "current", "history"] as const)
+    .filter((section) => present.has(section));
+}
+
 function reconcileTimelineNodes(items: TimelineItem[]): boolean {
   const rows = [...queueList.querySelectorAll<HTMLElement>(".queue-item")];
   const rowsById = new Map(rows.map((row) => [row.dataset.itemId, row]));
-  const historyDivider = queueList.querySelector<HTMLElement>(
-    ".timeline-divider.history-drop-target",
+  const dividers = [...queueList.querySelectorAll<HTMLElement>(".timeline-divider")];
+  const dividersBySection = new Map(
+    dividers.map((divider) => [divider.dataset.section as TimelineSection, divider]),
   );
-  const needsHistoryDivider = items.some(
-    (item) => item.kind === "upcoming" || item.kind === "history",
-  );
+  const sections = requiredTimelineSections(items);
   if (
     rows.length !== items.length ||
     rowsById.size !== rows.length ||
-    Boolean(historyDivider) !== needsHistoryDivider ||
+    dividersBySection.size !== sections.length ||
+    sections.some((section) => !dividersBySection.has(section)) ||
     items.some((item) => {
       const row = rowsById.get(item.id);
       return !row ||
@@ -874,26 +888,39 @@ function reconcileTimelineNodes(items: TimelineItem[]): boolean {
     return false;
   }
 
-  let insertedHistoryDivider = false;
+  const insertedSections = new Set<TimelineSection>();
+  let activeSection: TimelineSection | null = null;
   for (const item of items) {
-    if (item.kind === "history" && !insertedHistoryDivider) {
-      queueList.append(historyDivider!);
-      insertedHistoryDivider = true;
+    const section = item.kind;
+    if (section !== activeSection) {
+      queueList.append(dividersBySection.get(section)!);
+      insertedSections.add(section);
+      activeSection = section;
     }
     queueList.append(rowsById.get(item.id)!);
   }
-  if (historyDivider && !insertedHistoryDivider) {
-    queueList.append(historyDivider);
+  for (const section of sections) {
+    if (!insertedSections.has(section)) {
+      queueList.append(dividersBySection.get(section)!);
+    }
   }
   return true;
 }
 
 function setOpenActionMenu(itemId: string | null): void {
+  const item = itemId
+    ? timelineItems(currentStatus).find(({ id }) => id === itemId)
+    : null;
+  const target = item
+    ? queueList.querySelector<HTMLElement>(`[data-item-id="${item.id}"]`)
+    : null;
+  const button = target?.querySelector<HTMLButtonElement>(".queue-menu-button");
   if (itemId) {
-    const target = queueList.querySelector<HTMLElement>(`[data-item-id="${itemId}"]`);
     const listBounds = queueList.getBoundingClientRect();
     const targetBounds = target?.getBoundingClientRect();
     if (
+      !item ||
+      !button ||
       !targetBounds ||
       targetBounds.bottom <= listBounds.top ||
       targetBounds.top >= listBounds.bottom
@@ -904,32 +931,64 @@ function setOpenActionMenu(itemId: string | null): void {
   openMenuItemId = itemId;
   for (const row of queueList.querySelectorAll<HTMLElement>(".queue-item")) {
     const open = row.dataset.itemId === itemId;
-    const button = row.querySelector<HTMLButtonElement>(".queue-menu-button");
-    const menu = row.querySelector<HTMLElement>(".queue-action-menu");
-    button?.setAttribute("aria-expanded", String(open));
-    if (!menu) {
-      continue;
-    }
-    menu.hidden = !open;
-    if (open) {
-      const buttonBounds = button?.getBoundingClientRect();
-      const menuBounds = menu.getBoundingClientRect();
-      if (!buttonBounds) {
-        continue;
-      }
-      const edgeGap = 8;
-      const left = Math.min(
-        Math.max(edgeGap, buttonBounds.right - menuBounds.width),
-        window.innerWidth - menuBounds.width - edgeGap,
-      );
-      const below = buttonBounds.bottom + 4;
-      const top = below + menuBounds.height <= window.innerHeight - edgeGap
-        ? below
-        : buttonBounds.top - menuBounds.height - 4;
-      menu.style.left = `${left}px`;
-      menu.style.top = `${Math.max(edgeGap, top)}px`;
-    }
+    row.querySelector<HTMLButtonElement>(".queue-menu-button")
+      ?.setAttribute("aria-expanded", String(open));
   }
+  queueActionMenu.hidden = !itemId;
+  if (!itemId || !item || !button) {
+    queueActionMenu.replaceChildren();
+    return;
+  }
+
+  const actions = [];
+  if (item.kind === "current") {
+    actions.push(createMenuAction(
+      currentStatus.state === "paused" ? "Resume" : "Pause",
+      () => void runPlaybackAction(),
+      "is-playback",
+    ));
+  } else {
+    actions.push(createMenuAction(
+      item.kind === "history" ? "Replay" : "Play",
+      () => void playTimelineItem(item),
+    ));
+  }
+  actions.push(createMenuAction(
+    "Copy text",
+    () => void desktopApi?.copyText(item.text),
+  ));
+  if (item.kind === "upcoming") {
+    actions.push(createMenuAction(
+      "Delete",
+      () => void archiveWaitingItem(item.id),
+      "is-delete",
+    ));
+  }
+  queueActionMenu.replaceChildren(...actions);
+
+  const edgeGap = 8;
+  const itemGap = 4;
+  const listBounds = queueList.getBoundingClientRect();
+  const buttonBounds = button.getBoundingClientRect();
+  const availableTop = Math.max(edgeGap, listBounds.top + edgeGap);
+  const availableBottom = Math.min(window.innerHeight - edgeGap, listBounds.bottom - edgeGap);
+  queueActionMenu.style.maxHeight = `${Math.max(0, availableBottom - availableTop)}px`;
+  const menuBounds = queueActionMenu.getBoundingClientRect();
+  const availableLeft = Math.max(edgeGap, listBounds.left);
+  const availableRight = Math.min(window.innerWidth - edgeGap, listBounds.right);
+  const left = Math.min(
+    Math.max(availableLeft, buttonBounds.right - menuBounds.width),
+    availableRight - menuBounds.width,
+  );
+  const below = buttonBounds.bottom + itemGap;
+  const above = buttonBounds.top - menuBounds.height - itemGap;
+  const top = below + menuBounds.height <= availableBottom
+    ? below
+    : above >= availableTop
+      ? above
+      : Math.min(Math.max(availableTop, buttonBounds.top), availableBottom - menuBounds.height);
+  queueActionMenu.style.left = `${left}px`;
+  queueActionMenu.style.top = `${top}px`;
 }
 
 function createMenuAction(
@@ -947,6 +1006,51 @@ function createMenuAction(
     action();
   });
   return button;
+}
+
+function updateTimelineDividers(items: TimelineItem[], historyTotal: number): void {
+  const waitingCount = items.filter(({ kind }) => kind === "upcoming").length;
+  const historyCount = items.filter(({ kind }) => kind === "history").length;
+  const labels: Record<TimelineSection, [string, string]> = {
+    upcoming: ["Waiting", waitingCount.toLocaleString()],
+    current: ["Current", currentStatus.state === "paused" ? "Paused" : "Playing"],
+    history: [
+      "History",
+      historyCount < historyTotal
+        ? `${historyCount.toLocaleString()} recent of ${historyTotal.toLocaleString()}`
+        : historyCount.toLocaleString(),
+    ],
+  };
+  for (const divider of queueList.querySelectorAll<HTMLElement>(".timeline-divider")) {
+    const section = divider.dataset.section as TimelineSection;
+    const [title, count] = labels[section];
+    divider.querySelector<HTMLElement>(".timeline-divider-title")!.textContent = title;
+    divider.querySelector<HTMLElement>(".timeline-divider-count")!.textContent = count;
+  }
+}
+
+function createTimelineDivider(section: TimelineSection): HTMLDivElement {
+  const divider = document.createElement("div");
+  divider.className = `timeline-divider${section === "history" ? " history-drop-target" : ""}`;
+  divider.dataset.section = section;
+  divider.innerHTML = '<span class="timeline-divider-title"></span><span class="timeline-divider-count"></span>';
+  return divider;
+}
+
+function revealCurrentItem(): void {
+  const currentId = currentStatus.current?.id ?? null;
+  if (!currentId) {
+    revealedCurrentItemId = null;
+    return;
+  }
+  if (currentId === revealedCurrentItemId) {
+    return;
+  }
+  const row = queueList.querySelector<HTMLElement>(`[data-item-id="${currentId}"]`);
+  if (row) {
+    row.scrollIntoView({ block: "center" });
+    revealedCurrentItemId = currentId;
+  }
 }
 
 function renderTimeline(items: TimelineItem[], historyTotal: number): void {
@@ -974,14 +1078,10 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
   const timelineKey = timelineRenderKey(items, historyTotal);
   if (timelineKey === renderedTimelineKey || reconcileTimelineNodes(items)) {
     renderedTimelineKey = timelineKey;
-    const historyCount = queueList.querySelector<HTMLElement>(
-      ".timeline-divider.history-drop-target span:last-child",
-    );
-    if (historyCount) {
-      historyCount.textContent = `${historyTotal.toLocaleString()} total`;
-    }
+    updateTimelineDividers(items, historyTotal);
     updateTimelineRows(items);
-    updateTimelineFade();
+    revealCurrentItem();
+    updateTimelineViewport();
     return;
   }
   cancelQueuePointerDrag();
@@ -1004,22 +1104,17 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     empty.className = "queue-empty";
     empty.innerHTML = '<span class="empty-check">&#10003;</span><span>No speech yet</span>';
     queueList.append(empty);
-    updateTimelineFade();
+    updateTimelineViewport();
     return;
   }
 
-  const hasUpcoming = items.some(({ kind }) => kind === "upcoming");
-  let historyDividerAdded = false;
-  const appendHistoryDivider = (): void => {
-    historyDividerAdded = true;
-    const divider = document.createElement("div");
-    divider.className = "timeline-divider history-drop-target";
-    divider.innerHTML = `<span>History</span><span>${historyTotal.toLocaleString()} total</span>`;
-    queueList.append(divider);
-  };
+  const sections = requiredTimelineSections(items);
+  const insertedSections = new Set<TimelineSection>();
   for (const item of items) {
-    if (item.kind === "history" && !historyDividerAdded) {
-      appendHistoryDivider();
+    const section = item.kind;
+    if (!insertedSections.has(section)) {
+      queueList.append(createTimelineDivider(section));
+      insertedSections.add(section);
     }
 
     const row = document.createElement("div");
@@ -1101,50 +1196,26 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     menuButton.setAttribute("aria-expanded", "false");
     menuButton.setAttribute("aria-label", `Actions for ${reference}`);
     menuButton.innerHTML = '<span aria-hidden="true"></span>';
-    const menu = document.createElement("div");
-    menu.className = "queue-action-menu";
-    menu.id = `speech-actions-${item.id}`;
-    menu.role = "menu";
-    menu.hidden = true;
-    menuButton.setAttribute("aria-controls", menu.id);
+    menuButton.setAttribute("aria-controls", queueActionMenu.id);
     menuButton.addEventListener("click", () => {
       setOpenActionMenu(openMenuItemId === item.id ? null : item.id);
     });
-    if (isCurrent) {
-      menu.append(createMenuAction(
-        currentStatus.state === "paused" ? "Resume" : "Pause",
-        () => void runPlaybackAction(),
-        "is-playback",
-      ));
-    } else {
-      menu.append(createMenuAction(
-        item.kind === "history" ? "Replay" : "Play",
-        () => void playTimelineItem(item),
-      ));
-    }
-    menu.append(createMenuAction(
-      "Copy text",
-      () => void desktopApi?.copyText(item.text),
-    ));
-    if (isUpcoming) {
-      menu.append(createMenuAction(
-        "Delete",
-        () => void archiveWaitingItem(item.id),
-        "is-delete",
-      ));
-    }
-    actions.append(menuButton, menu);
+    actions.append(menuButton);
     rowControls.push(chunk, actions, accessibleText);
     row.classList.toggle("is-expanded", isExpanded);
     row.append(...rowControls);
     queueList.append(row);
   }
-  if (hasUpcoming && !historyDividerAdded) {
-    appendHistoryDivider();
+  for (const section of sections) {
+    if (!insertedSections.has(section)) {
+      queueList.append(createTimelineDivider(section));
+    }
   }
   queueList.scrollTop = previousScrollTop;
+  updateTimelineDividers(items, historyTotal);
   updateTimelineRows(items);
-  updateTimelineFade();
+  revealCurrentItem();
+  updateTimelineViewport();
   if (focusedItemId) {
     const row = queueList.querySelector<HTMLElement>(`[data-item-id="${focusedItemId}"]`);
     const preferred = focusedControlClass
@@ -1204,15 +1275,6 @@ function updateTimelineRows(items: TimelineItem[]): void {
         ),
       );
     }
-    const playbackMenuAction = row.querySelector<HTMLButtonElement>(
-      ".queue-menu-action.is-playback",
-    );
-    if (playbackMenuAction) {
-      playbackMenuAction.textContent = currentStatus.state === "paused" ? "Resume" : "Pause";
-    }
-    for (const action of row.querySelectorAll<HTMLButtonElement>(".queue-menu-action")) {
-      action.disabled = queueCommandInFlight || clearPending;
-    }
     row.querySelector<HTMLElement>(".queue-full-text")?.setAttribute(
       "aria-label",
       `Full text for ${reference}`,
@@ -1225,11 +1287,36 @@ function updateTimelineRows(items: TimelineItem[]): void {
         : formatVoice(item.voice);
     }
   }
+  const playbackMenuAction = queueActionMenu.querySelector<HTMLButtonElement>(
+    ".queue-menu-action.is-playback",
+  );
+  if (playbackMenuAction) {
+    playbackMenuAction.textContent = currentStatus.state === "paused" ? "Resume" : "Pause";
+  }
+  for (const action of queueActionMenu.querySelectorAll<HTMLButtonElement>(
+    ".queue-menu-action",
+  )) {
+    action.disabled = queueCommandInFlight || clearPending;
+  }
 }
 
-function updateTimelineFade(): void {
+function updateTimelineViewport(): void {
   const remaining = queueList.scrollHeight - queueList.clientHeight - queueList.scrollTop;
   queueList.classList.toggle("has-more", remaining > 1);
+  const dividers = [...queueList.querySelectorAll<HTMLElement>(".timeline-divider")];
+  const listBounds = queueList.getBoundingClientRect();
+  const sectionProbe = listBounds.top + listBounds.height / 2;
+  let activeDivider: HTMLElement | null = dividers[0] ?? null;
+  for (const divider of dividers) {
+    if (divider.getBoundingClientRect().top <= sectionProbe) {
+      activeDivider = divider;
+    } else {
+      break;
+    }
+  }
+  visibleSectionLabel.textContent = activeDivider
+    ?.querySelector<HTMLElement>(".timeline-divider-title")
+    ?.textContent ?? "";
 }
 
 function setExpandedItem(id: string | null): void {
@@ -1249,7 +1336,7 @@ function setExpandedItem(id: string | null): void {
       accessibleText.hidden = !expanded;
     }
   }
-  updateTimelineFade();
+  updateTimelineViewport();
 }
 
 async function playTimelineItem(item: TimelineItem): Promise<void> {
@@ -1573,7 +1660,7 @@ queueList.addEventListener("scroll", () => {
   if (openMenuItemId) {
     setOpenActionMenu(openMenuItemId);
   }
-  updateTimelineFade();
+  updateTimelineViewport();
 }, { passive: true });
 window.addEventListener("pointermove", updateQueuePointerDrag, true);
 window.addEventListener("pointermove", updateChunkPointerGesture, true);
@@ -1606,7 +1693,7 @@ document.addEventListener("pointerdown", (event) => {
   if (
     openMenuItemId &&
     event.target instanceof Element &&
-    !event.target.closest(".chunk-actions")
+    !event.target.closest(".chunk-actions, #queue-action-menu")
   ) {
     setOpenActionMenu(null);
   }

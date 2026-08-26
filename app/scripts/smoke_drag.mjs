@@ -100,6 +100,23 @@ async function assertDragClean(page) {
   assert.equal(new Set(ids).size, ids.length, "Waiting cards must have unique IDs");
 }
 
+async function actionMenuIsFullyVisible(page) {
+  return page.locator("#queue-action-menu:not([hidden])").evaluate((menu) => {
+    const bounds = menu.getBoundingClientRect();
+    const listBounds = document.querySelector("#queue-list").getBoundingClientRect();
+    const center = document.elementFromPoint(
+      bounds.left + bounds.width / 2,
+      bounds.top + bounds.height / 2,
+    );
+    return bounds.left >= 0 &&
+      bounds.top >= listBounds.top &&
+      bounds.right <= window.innerWidth &&
+      bounds.bottom <= listBounds.bottom &&
+      center !== null &&
+      menu.contains(center);
+  });
+}
+
 async function visibleHistoryDropPoint(page) {
   await page.locator("#queue-list").evaluate((list) => {
     list.scrollTop = list.scrollHeight;
@@ -183,6 +200,32 @@ try {
     async () => await page.locator("body").getAttribute("data-state") === "paused",
     "The Electron window did not render the paused fixture",
   );
+  assert(
+    await page.locator(".queue-item.is-current").evaluate((row) => {
+      const rowBounds = row.getBoundingClientRect();
+      const listBounds = document.querySelector("#queue-list").getBoundingClientRect();
+      return rowBounds.top >= listBounds.top && rowBounds.bottom <= listBounds.bottom;
+    }),
+    "The app must reveal the current row when playback first appears",
+  );
+  assert.deepEqual(
+    await page.locator(".timeline-divider").evaluateAll((dividers) =>
+      dividers.map((divider) => ({
+        section: divider.getAttribute("data-section"),
+        title: divider.querySelector(".timeline-divider-title")?.textContent,
+      }))
+    ),
+    [
+      { section: "upcoming", title: "Waiting" },
+      { section: "current", title: "Current" },
+      { section: "history", title: "History" },
+    ],
+    "Current, Waiting, and History must have explicit timeline boundaries",
+  );
+  await waitFor(
+    async () => await page.locator("#visible-section-label").textContent() === "Current",
+    "The fixed timeline context did not identify the visible Current section",
+  );
   const pausedPlayback = await playbackSnapshot(page);
   assert(pausedPlayback.title && pausedPlayback.text && pausedPlayback.voice);
   assert.equal(pausedPlayback.accent, "#4153be");
@@ -239,6 +282,7 @@ try {
   });
 
   const rows = page.locator(".queue-item.is-upcoming");
+  await rows.first().scrollIntoViewIfNeeded();
   const firstId = await rows.nth(0).getAttribute("data-item-id");
   const secondId = await rows.nth(1).getAttribute("data-item-id");
   assert(firstId && secondId, "Waiting items must expose stable IDs");
@@ -491,10 +535,14 @@ try {
     0,
     "Timeline labels must not shift row copy",
   );
+  const renderedHistoryCount = await page.locator(".queue-item.is-history").count();
+  const historyCountLabel = renderedHistoryCount < status().history_count
+    ? `${renderedHistoryCount.toLocaleString()} recent of ${status().history_count.toLocaleString()}`
+    : renderedHistoryCount.toLocaleString();
   assert.equal(
-    await page.locator(".timeline-divider.history-drop-target span").nth(1).textContent(),
-    `${status().history_count.toLocaleString()} total`,
-    "History must show its total count without implying every archived item is rendered",
+    await page.locator(".timeline-divider.history-drop-target .timeline-divider-count").textContent(),
+    historyCountLabel,
+    "History must distinguish rendered recent items from the full archive",
   );
   await waitFor(
     async () => /App \d+\.\d+\.\d+ \| Engine \d+\.\d+\.\d+/.test(
@@ -562,23 +610,11 @@ try {
     "The row did not collapse after its alignment check",
   );
   await menuButton.click();
-  const visibleActions = menuRow.locator(".queue-action-menu:not([hidden])");
+  const visibleActions = page.locator("#queue-action-menu:not([hidden])");
   await new Promise((resolve) => setTimeout(resolve, 800));
   assert.equal(await visibleActions.count(), 1, "The row action menu did not open");
   assert(
-    await visibleActions.evaluate((menu) => {
-      const bounds = menu.getBoundingClientRect();
-      const center = document.elementFromPoint(
-        bounds.left + bounds.width / 2,
-        bounds.top + bounds.height / 2,
-      );
-      return bounds.left >= 0 &&
-        bounds.top >= 0 &&
-        bounds.right <= window.innerWidth &&
-        bounds.bottom <= window.innerHeight &&
-        center !== null &&
-        menu.contains(center);
-    }),
+    await actionMenuIsFullyVisible(page),
     "The row action menu was clipped or covered",
   );
   assert.deepEqual(
@@ -620,6 +656,14 @@ try {
   );
   await page.locator("#speech-heading").click();
   assert.equal(await visibleActions.count(), 0, "Clicking outside did not close the action menu");
+  const historyMenuButton = page.locator(".queue-item.is-history .queue-menu-button").first();
+  await historyMenuButton.scrollIntoViewIfNeeded();
+  await historyMenuButton.click();
+  assert(
+    await actionMenuIsFullyVisible(page),
+    "A History menu near the viewport edge was clipped or covered",
+  );
+  await page.locator("#speech-heading").click();
   if (process.env.SUPER_SPEECH_SCREENSHOT) {
     await page.screenshot({ path: process.env.SUPER_SPEECH_SCREENSHOT });
   }
@@ -718,7 +762,7 @@ try {
   const deletedId = await deleteRow.getAttribute("data-item-id");
   assert(deletedId, "A waiting item must be available for the Delete action");
   await deleteRow.locator(".queue-menu-button").click();
-  await deleteRow.getByRole("menuitem", { name: "Delete" }).click();
+  await page.locator("#queue-action-menu").getByRole("menuitem", { name: "Delete" }).click();
   await waitFor(
     async () => await page.locator(`[data-item-id="${deletedId}"].is-history`).count() === 1,
     "The Delete menu action did not remove the item from the waiting queue",
@@ -751,6 +795,65 @@ try {
     historyCountBeforeReplay,
     "Replaying a History chunk added a duplicate archive row",
   );
+  runEngine("pause");
+
+  runEngine(
+    "speak",
+    "Jump test current speech keeps the paused fixture alive while the next two waiting rows are added.",
+  );
+  runEngine(
+    "speak",
+    "Jump test older waiting speech should move into History when the newer target starts.",
+  );
+  runEngine(
+    "speak",
+    "Jump test target has enough words to remain current while the renderer verifies stable timeline order after selection.",
+  );
+  await waitFor(
+    () => status().current && status().state === "paused" && status().queue_count >= 2,
+    "The jump-to-here fixture did not reach the waiting queue",
+  );
+  const interruptedId = status().current.id;
+  const [olderWaiting, jumpTarget] = status().queue.slice(-2);
+  await waitFor(
+    async () => await page.locator(`[data-item-id="${jumpTarget.id}"].is-upcoming`).count() === 1,
+    "The jump target did not appear in the renderer",
+  );
+  const stableIds = [jumpTarget.id, olderWaiting.id, interruptedId];
+  const orderBeforeJump = await page.locator(".queue-item").evaluateAll(
+    (rows, ids) => rows
+      .map((row) => row.getAttribute("data-item-id"))
+      .filter((id) => ids.includes(id)),
+    stableIds,
+  );
+  await page.locator(`[data-item-id="${jumpTarget.id}"] .queue-chunk`).dblclick();
+  assert.equal(
+    await page.locator("body").getAttribute("data-state"),
+    "playing",
+    "Jump-to-here did not enter the playing presentation immediately",
+  );
+  await waitFor(
+    () => status().current?.id === jumpTarget.id,
+    "Jump-to-here did not start the selected waiting item",
+    30_000,
+  );
+  await waitFor(
+    async () =>
+      await page.locator(`[data-item-id="${olderWaiting.id}"].is-history`).count() === 1 &&
+      await page.locator(`[data-item-id="${interruptedId}"].is-history`).count() === 1,
+    "Jump-to-here did not move the interrupted and older rows into History",
+  );
+  assert.deepEqual(
+    await page.locator(".queue-item").evaluateAll(
+      (rows, ids) => rows
+        .map((row) => row.getAttribute("data-item-id"))
+        .filter((id) => ids.includes(id)),
+      stableIds,
+    ),
+    orderBeforeJump,
+    "Jump-to-here changed row order instead of changing section membership",
+  );
+  assert(!status().queue.some(({ id }) => id === olderWaiting.id));
   runEngine("pause");
 
   console.log("Super Speech pointer drag and cancellation smoke test passed");

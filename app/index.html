@@ -59,7 +59,7 @@
       <section class="queue-section">
         <div class="section-heading">
           <div>
-            <h2 id="speech-heading">Speech</h2>
+            <h2 id="speech-heading">Speech <span id="visible-section-label"></span></h2>
           </div>
           <div class="queue-actions">
             <button id="clear-queue-button" class="clear-queue-button is-hidden" type="button">Clear all</button>
@@ -75,6 +75,8 @@
         <span id="version-label">App -- | Engine --</span>
       </footer>
     </main>
+
+    <div id="queue-action-menu" class="queue-action-menu" role="menu" hidden></div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

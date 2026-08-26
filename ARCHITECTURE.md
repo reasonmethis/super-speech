@@ -86,8 +86,8 @@ UI calls it History rather than claiming every entry played to completion.
 Electron, validates the identifier and owns every queue or archive mutation:
 
 - selecting the current item resumes it from the same sample when paused
-- selecting an upcoming item preempts the current output, plays the selection,
-  then later restarts the interrupted item from its beginning
+- selecting an upcoming item archives the current item and every older waiting
+  item before it, then plays the selection without reordering newer items
 - selecting an archived item queues a working copy under the same ID, preserving
   the original archive and the untouched upcoming queue without adding another
   History row when replay finishes
@@ -109,7 +109,9 @@ mutation while preserving every rendered piece of the current item.
 
 The engine status keeps waiting items in playback order, oldest first. The
 desktop timeline displays that list in reverse so new arrivals enter at the top,
-then places the current item above newest-first History. When current playback
+then places the current item above newest-first History. Section dividers and a
+fixed visible-section label identify Waiting, Current, and History, and a new
+current ID is scrolled into view once instead of on every status poll. When current playback
 finishes, the same row therefore crosses the divider without changing its
 position relative to the other rows. A visual drag is translated back into one
 engine `move` command. The renderer applies the result immediately and rolls it

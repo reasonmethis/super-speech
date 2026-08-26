@@ -209,9 +209,10 @@ The CLI owns playback controls. Do not create or remove runtime files directly:
 | `interrupt` | Stop playback and the engine immediately |
 | `status` | Print the current queue and playback status as JSON |
 
-`play` keeps all untouched upcoming chunks. Selecting another upcoming chunk
-preempts the current chunk, which remains queued and later restarts from its
-beginning. Selecting a `history` ID queues a working copy under the same ID, so
+Selecting another upcoming chunk jumps to that point: the current chunk and
+every older waiting chunk before the selection move to History, while newer
+waiting chunks keep their order. Selecting a `history` ID queues a working copy
+under the same ID, so
 the original archive remains available and replay does not add duplicate History
 rows. Selecting while paused resumes playback. Never derive an
 ID from a path or mutate runtime files directly; use the exact opaque ID from
