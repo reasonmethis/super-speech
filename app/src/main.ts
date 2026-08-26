@@ -3,7 +3,9 @@ import {
   ENGINE_STATUS_VERSION,
   INITIAL_STATUS,
   moveQueueItemBefore,
+  playbackPresentation,
   timelineItems,
+  type PlaybackPresentation,
   type RuntimeStatus,
   type TimelineItem,
 } from "./runtime";
@@ -111,6 +113,11 @@ interface ChunkPointerGesture {
   moved: boolean;
 }
 
+interface PendingChunkExpansion {
+  itemId: string;
+  timeoutId: number;
+}
+
 let currentStatus = desktopApi ? INITIAL_STATUS : demoStatus;
 let commandPending = false;
 let pendingSelection: PendingSelection | null = null;
@@ -127,11 +134,13 @@ let queueMutationGeneration = 0;
 let queuePointerDrag: QueuePointerDrag | null = null;
 let chunkPointerGesture: ChunkPointerGesture | null = null;
 const suppressedChunkClicks = new WeakSet<HTMLButtonElement>();
+let pendingChunkExpansion: PendingChunkExpansion | null = null;
 let openMenuItemId: string | null = null;
 
 const POINTER_GESTURE_THRESHOLD = 5;
 const QUEUE_REORDER_ANIMATION_MS = 140;
 const QUEUE_STATUS_CONFIRMATION_MS = 1_500;
+const CHUNK_DOUBLE_CLICK_MS = 400;
 
 function requiredElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -163,11 +172,8 @@ function timelineAction(item: TimelineItem, pending: boolean, failed: boolean): 
   if (failed) {
     return "Could not start / Try again";
   }
-  if (item.kind === "history") {
-    return "Double-click to replay";
-  }
-  if (item.kind === "upcoming") {
-    return "Double-click to play";
+  if (item.kind !== "current") {
+    return "";
   }
   return currentStatus.state === "paused" ? "Paused" : "Speaking";
 }
@@ -247,51 +253,57 @@ function chunkActionLabel(item: TimelineItem, expanded: boolean): string {
   return `${expanded ? "Collapse" : "Expand"} full text for ${itemReference(item)}`;
 }
 
-function statusCopy(status: RuntimeStatus): {
+function statusCopy(presentation: PlaybackPresentation): {
   label: string;
   title?: string;
   body?: string;
 } {
-  if (status.state === "setup_required") {
+  if (presentation.state === "setup_required") {
     return {
       label: "Install incomplete",
       title: "Speech files are missing",
       body: "Reinstall Super Speech to restore its bundled engine and voices.",
     };
   }
-  if (status.state === "stopped") {
+  if (presentation.state === "stopped") {
     return {
       label: "Engine stopped",
       title: "Super Speech could not start",
       body: "Open the runtime folder from the tray and inspect engine.log for details.",
     };
   }
-  if (status.state === "loading") {
+  if (presentation.state === "loading") {
     return {
       label: "Loading",
       title: "Preparing your voice",
       body: "Kokoro is loading locally. This normally takes a few seconds.",
     };
   }
-  if (status.state === "paused") {
-    return status.current
+  if (presentation.state === "paused") {
+    return presentation.item
       ? {
           label: "Paused",
-          title: formatVoice(status.current.voice),
-          body: status.current.text,
+          title: formatVoice(presentation.item.voice),
+          body: presentation.item.text,
         }
       : {
           label: "Paused",
-          title: "Ready when you are",
-          body: "Your next voice reply will appear here as soon as it starts.",
+          title: "Playback paused",
+          body: "New speech will wait here until you resume.",
         };
   }
-  if (status.state === "playing" && status.current) {
-    return {
-      label: "Speaking",
-      title: formatVoice(status.current.voice),
-      body: status.current.text,
-    };
+  if (presentation.state === "playing") {
+    return presentation.item
+      ? {
+          label: "Speaking",
+          title: formatVoice(presentation.item.voice),
+          body: presentation.item.text,
+        }
+      : {
+          label: "Speaking",
+          title: "Preparing speech",
+          body: "Your selected voice is being prepared locally.",
+        };
   }
   return {
     label: "Ready",
@@ -302,27 +314,27 @@ function statusCopy(status: RuntimeStatus): {
 
 type PlaybackAction = "pause" | "resume" | "setup" | "ready";
 
-function playbackAction(status: RuntimeStatus): PlaybackAction {
-  if (status.state === "setup_required") {
+function playbackAction(state: PlaybackPresentation["state"]): PlaybackAction {
+  if (state === "setup_required") {
     return "setup";
   }
-  if (status.state === "paused") {
+  if (state === "paused") {
     return "resume";
   }
-  return status.state === "playing" ? "pause" : "ready";
+  return state === "playing" ? "pause" : "ready";
 }
 
-function playbackIconMarkup(status: RuntimeStatus): string {
-  if (status.state === "setup_required") {
+function playbackIconMarkup(state: PlaybackPresentation["state"]): string {
+  if (state === "setup_required") {
     return '<svg viewBox="0 0 32 32"><path d="M16 7v14m-6-5 6 6 6-6M8 25h16"/></svg>';
   }
-  if (status.state === "paused") {
+  if (state === "paused") {
     return '<svg viewBox="0 0 32 32"><path class="solid" d="m8 5 19 11L8 27Z"/></svg>';
   }
-  if (status.state === "playing") {
+  if (state === "playing") {
     return '<svg viewBox="0 0 32 32"><rect class="solid" x="7" y="5" width="7" height="22" rx="2.5"/><rect class="solid" x="18" y="5" width="7" height="22" rx="2.5"/></svg>';
   }
-  if (status.state === "stopped") {
+  if (state === "stopped") {
     return '<svg viewBox="0 0 32 32"><path d="M16 8v9m0 6v1"/></svg>';
   }
   return '<img class="idle-icon" src="./icon.svg" alt="">';
@@ -331,12 +343,16 @@ function playbackIconMarkup(status: RuntimeStatus): string {
 function render(status: RuntimeStatus): void {
   reconcileCommands(status);
   currentStatus = status;
-  const copy = statusCopy(status);
-  const action = playbackAction(status);
+  const presentation = playbackPresentation(
+    status,
+    pendingSelection?.sourceId ?? null,
+  );
+  const copy = statusCopy(presentation);
+  const action = playbackAction(presentation.state);
   const showPlaybackCopy = copy.title !== undefined;
-  document.body.dataset.state = status.state;
+  document.body.dataset.state = presentation.state;
 
-  statusDot.className = `status-dot state-${status.state}`;
+  statusDot.className = `status-dot state-${presentation.state}`;
   statusLabel.textContent = copy.label;
   playbackCopy.classList.toggle("is-hidden", !showPlaybackCopy);
   playbackTitle.textContent = copy.title ?? "";
@@ -346,15 +362,18 @@ function render(status: RuntimeStatus): void {
     pause: "Pause speech",
     resume: "Resume speech",
     setup: "Open setup guide",
-    ready: status.state === "loading" ? "Preparing speech" : "Ready for speech",
+    ready: presentation.state === "loading" ? "Preparing speech" : "Ready for speech",
   };
   playbackButton.dataset.action = action;
   playbackButton.setAttribute("aria-label", actionLabels[action]);
   playbackButton.disabled = commandPending || pendingQueueMutation !== null || action === "ready";
-  playbackButton.setAttribute("aria-busy", String(commandPending || status.state === "loading"));
-  playbackIcon.innerHTML = playbackIconMarkup(status);
+  playbackButton.setAttribute(
+    "aria-busy",
+    String(commandPending || pendingSelection !== null || presentation.state === "loading"),
+  );
+  playbackIcon.innerHTML = playbackIconMarkup(presentation.state);
 
-  const current = status.current;
+  const current = presentation.item;
   metadataRow.classList.toggle("is-hidden", !current);
   if (current) {
     voiceLabel.textContent = formatVoice(current.voice);
@@ -558,6 +577,34 @@ function cancelChunkPointerGesture(pointerId?: number): void {
     return;
   }
   chunkPointerGesture = null;
+}
+
+function cancelPendingChunkExpansion(): void {
+  if (pendingChunkExpansion) {
+    window.clearTimeout(pendingChunkExpansion.timeoutId);
+    pendingChunkExpansion = null;
+  }
+}
+
+function scheduleChunkExpansion(itemId: string): void {
+  cancelPendingChunkExpansion();
+  const expansion: PendingChunkExpansion = {
+    itemId,
+    timeoutId: window.setTimeout(() => {
+      if (pendingChunkExpansion !== expansion) {
+        return;
+      }
+      pendingChunkExpansion = null;
+      const expanding = expandedItemId !== itemId;
+      setExpandedItem(expanding ? itemId : null);
+      if (expanding) {
+        queueList.querySelector<HTMLElement>(
+          `[data-item-id="${itemId}"]`,
+        )?.scrollIntoView({ block: "nearest" });
+      }
+    }, CHUNK_DOUBLE_CLICK_MS),
+  };
+  pendingChunkExpansion = expansion;
 }
 
 function applyQueueVisualOrder(visualOrder: readonly string[]): void {
@@ -903,6 +950,13 @@ function createMenuAction(
 }
 
 function renderTimeline(items: TimelineItem[], historyTotal: number): void {
+  const pendingExpansionId = pendingChunkExpansion?.itemId;
+  if (
+    pendingExpansionId &&
+    !items.some((item) => item.id === pendingExpansionId)
+  ) {
+    cancelPendingChunkExpansion();
+  }
   if (!items.some((item) => item.id === expandedItemId)) {
     expandedItemId = null;
   }
@@ -1027,17 +1081,14 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
         return;
       }
       if (event.detail > 1) {
+        cancelPendingChunkExpansion();
         return;
       }
-      const expanding = expandedItemId !== item.id;
-      setExpandedItem(expanding ? item.id : null);
-      if (expanding) {
-        row.scrollIntoView({ block: "nearest" });
-      }
+      scheduleChunkExpansion(item.id);
     });
     chunk.addEventListener("dblclick", (event) => {
       event.preventDefault();
-      setExpandedItem(item.id);
+      cancelPendingChunkExpansion();
       void playTimelineItem(item);
     });
 
@@ -1164,7 +1215,10 @@ function updateTimelineRows(items: TimelineItem[]): void {
     );
     const meta = row.querySelector<HTMLElement>(".queue-meta");
     if (meta) {
-      meta.textContent = `${formatVoice(item.voice)}  /  ${timelineAction(item, pending, failed)}`;
+      const action = timelineAction(item, pending, failed);
+      meta.textContent = action
+        ? `${formatVoice(item.voice)}  /  ${action}`
+        : formatVoice(item.voice);
     }
   }
 }
@@ -1393,7 +1447,9 @@ async function refreshStatus(): Promise<void> {
 }
 
 async function runPlaybackAction(): Promise<void> {
-  const action = playbackAction(currentStatus);
+  const action = playbackAction(
+    playbackPresentation(currentStatus, pendingSelection?.sourceId ?? null).state,
+  );
   if (commandPending || pendingQueueMutation || queuePointerDrag || action === "ready") {
     return;
   }
@@ -1485,6 +1541,7 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     cancelQueuePointerDrag();
     cancelChunkPointerGesture();
+    cancelPendingChunkExpansion();
     setOpenActionMenu(null);
   } else {
     void refreshStatus();
@@ -1553,6 +1610,7 @@ document.addEventListener("pointerdown", (event) => {
 window.addEventListener("blur", () => {
   cancelQueuePointerDrag();
   cancelChunkPointerGesture();
+  cancelPendingChunkExpansion();
   setOpenActionMenu(null);
 });
 

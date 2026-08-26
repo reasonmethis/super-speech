@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   ENGINE_STATUS_VERSION,
   moveQueueItemBefore,
+  playbackPresentation,
   parseEngineStatus,
   parseEngineProcessStatus,
   parsePlayAcceptance,
@@ -59,6 +60,48 @@ test("normalizes an engine play acknowledgement", () => {
     acceptedAt: 12.5,
   });
   assert.equal(parsePlayAcceptance({ id: "008-bm_fable-say" }), null);
+});
+
+test("shows ready only when playback has no active or waiting work", () => {
+  const waiting = {
+    id: "002-af_heart-say",
+    filename: "002-af_heart-say.txt",
+    text: "Waiting",
+    voice: "af_heart",
+  };
+
+  assert.deepEqual(
+    playbackPresentation({ ...status, state: "idle" }, null),
+    { state: "idle", item: null },
+  );
+  assert.deepEqual(
+    playbackPresentation({
+      ...status,
+      state: "idle",
+      queue_count: 1,
+      queue: [waiting],
+    }, null),
+    { state: "playing", item: waiting },
+  );
+});
+
+test("presents a selected item as playing before the engine starts audio", () => {
+  const selected = {
+    id: "007-bm_fable-say",
+    filename: "007-bm_fable-say.txt",
+    text: "Selected",
+    voice: "bm_fable",
+  };
+
+  assert.deepEqual(
+    playbackPresentation({
+      ...status,
+      state: "paused",
+      history_count: 1,
+      history: [selected],
+    }, selected.id),
+    { state: "playing", item: selected },
+  );
 });
 
 test("keeps newest waiting speech above current speech and history", () => {

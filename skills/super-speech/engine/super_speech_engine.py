@@ -115,7 +115,7 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
-ENGINE_VERSION = "0.4.4"
+ENGINE_VERSION = "0.4.5"
 STATUS_VERSION = 5
 
 
@@ -983,7 +983,7 @@ def publish_status(
             ),
         }
 
-    if playing and playback_state in {"idle", "ready"}:
+    if (playing or queue_items) and playback_state in {"idle", "ready"}:
         playback_state = "playing"
     if PAUSE.exists() and playback_state in {"idle", "playing", "ready"}:
         playback_state = "paused"

@@ -549,7 +549,7 @@ body[data-state="loading"] .playback-copy {
   display: grid;
   width: 100%;
   min-height: 51px;
-  grid-template-columns: 26px minmax(0, 1fr) 38px;
+  grid-template-columns: 28px minmax(0, 1fr) 28px;
   align-items: stretch;
   border: 1px solid var(--line);
   border-radius: 13px;
@@ -557,10 +557,6 @@ body[data-state="loading"] .playback-copy {
   color: inherit;
   flex: 0 0 auto;
   transition: border-color 140ms ease, background 140ms ease;
-}
-
-.queue-item.is-upcoming {
-  grid-template-columns: 26px minmax(0, 1fr) 38px;
 }
 
 .queue-item:not(.is-upcoming) .queue-chunk {
@@ -689,8 +685,8 @@ body[data-state="loading"] .playback-copy {
 .queue-menu-button span,
 .queue-menu-button span::before,
 .queue-menu-button span::after {
-  width: 3px;
-  height: 3px;
+  width: 2px;
+  height: 2px;
   border-radius: 50%;
   background: #858194;
   content: "";
@@ -707,19 +703,19 @@ body[data-state="loading"] .playback-copy {
 }
 
 .queue-menu-button span::before {
-  top: -6px;
+  top: -5px;
 }
 
 .queue-menu-button span::after {
-  top: 6px;
+  top: 5px;
 }
 
 .queue-action-menu {
   position: fixed;
   z-index: 12;
   display: grid;
-  min-width: 128px;
-  padding: 5px;
+  min-width: 104px;
+  padding: 4px;
   border: 1px solid rgba(255, 255, 255, 0.11);
   border-radius: 10px;
   background: #1b1d28;
@@ -732,9 +728,11 @@ body[data-state="loading"] .playback-copy {
 
 .queue-menu-action {
   width: 100%;
-  padding: 7px 9px;
+  padding: 6px 8px;
   border-radius: 7px;
   color: #d7d3df;
+  font-size: 10.5px;
+  line-height: 1.25;
   cursor: pointer;
   text-align: left;
 }

@@ -509,9 +509,18 @@ try {
   );
   const menuRow = remainingRows.first();
   const menuRowBounds = await menuRow.boundingBox();
+  const dragHandleBounds = await menuRow.locator(".queue-drag-handle").boundingBox();
+  const actionAreaBounds = await menuRow.locator(".chunk-actions").boundingBox();
   const menuButton = menuRow.locator(".queue-menu-button");
   const menuButtonBounds = await menuButton.boundingBox();
-  assert(menuRowBounds && menuButtonBounds, "The row action button must be visible");
+  assert(
+    menuRowBounds && dragHandleBounds && actionAreaBounds && menuButtonBounds,
+    "The row controls must be visible",
+  );
+  assert(
+    Math.abs(dragHandleBounds.width - actionAreaBounds.width) < 0.5,
+    "The row's left and right control areas must be symmetric",
+  );
   assert(
     Math.abs(
       menuRowBounds.y + menuRowBounds.height / 2 -
@@ -543,6 +552,21 @@ try {
     await visibleActions.locator(".queue-menu-action").allTextContents(),
     ["Play", "Delete"],
   );
+  assert.equal(
+    await visibleActions.locator(".queue-menu-action").first().evaluate(
+      (action) => getComputedStyle(action).fontSize,
+    ),
+    "10.5px",
+  );
+  assert.equal(
+    await menuButton.locator("span").evaluate((dot) => getComputedStyle(dot).width),
+    "2px",
+  );
+  assert.equal(
+    await menuRow.locator(".queue-meta").textContent(),
+    "Heart",
+    "Waiting rows must not repeat the double-click instruction",
+  );
   if (process.env.SUPER_SPEECH_SCREENSHOT) {
     const screenshot = path.parse(process.env.SUPER_SPEECH_SCREENSHOT);
     await page.screenshot({
@@ -562,9 +586,8 @@ try {
   const historyBounds = await historyPlay.boundingBox();
   assert(historyBounds, "Archived card must be visible for the gesture test");
   await historyPlay.click();
-  assert.equal(
-    await page.locator(`[data-item-id="${secondId}"].is-expanded`).count(),
-    1,
+  await waitFor(
+    async () => await page.locator(`[data-item-id="${secondId}"].is-expanded`).count() === 1,
     "A single chunk click did not expand its text",
   );
   await new Promise((resolve) => setTimeout(resolve, 800));
@@ -572,6 +595,11 @@ try {
     status().current?.id,
     playbackBeforeHistoryGesture.current?.id,
     "A single chunk click started playback",
+  );
+  await historyPlay.click();
+  await waitFor(
+    async () => await page.locator(`[data-item-id="${secondId}"].is-expanded`).count() === 0,
+    "A second single click did not collapse the chunk",
   );
   const historyPoint = {
     x: historyBounds.x + historyBounds.width / 2,
@@ -657,15 +685,21 @@ try {
 
   const historyCountBeforeReplay = status().history_count;
   await historyPlay.dblclick();
+  assert.equal(
+    await page.locator("body").getAttribute("data-state"),
+    "playing",
+    "A selected chunk did not enter the playing presentation immediately",
+  );
+  assert.equal(await page.locator("#playback-title").textContent(), "Heart");
+  assert.equal(
+    await page.locator(`[data-item-id="${secondId}"].is-expanded`).count(),
+    0,
+    "Double-clicking a chunk also expanded it",
+  );
   await waitFor(
     () => status().current?.id === secondId,
     "Double-clicking a History chunk did not start it",
     30_000,
-  );
-  assert.equal(
-    await page.locator(`[data-item-id="${secondId}"].is-expanded`).count(),
-    1,
-    "Double-clicking a chunk did not leave its full text expanded",
   );
   assert.equal(
     status().history_count,

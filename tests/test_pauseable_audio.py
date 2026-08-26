@@ -145,6 +145,29 @@ def test_status_stays_playing_while_the_current_item_waits_for_its_next_piece(
     assert status["current"]["id"] == current.stem
 
 
+def test_status_stays_playing_while_queued_audio_is_being_prepared(
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_status_preparing")
+    configure_runtime(engine, tmp_path)
+    queued = engine.QUEUE / "001-af_heart-say.txt"
+    queued.write_text("Still being prepared", encoding="utf-8")
+
+    engine.publish_status("idle", engine.State(), force=True)
+    status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
+
+    assert status["state"] == "playing"
+    assert status["current"] is None
+    assert status["queue"][0]["id"] == queued.stem
+
+    queued.unlink()
+    engine.publish_status("idle", engine.State(), force=True)
+    status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
+
+    assert status["state"] == "idle"
+    assert status["queue"] == []
+
+
 def test_status_command_retries_a_transient_windows_read_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

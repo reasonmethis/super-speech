@@ -56,6 +56,13 @@ export interface PlayAcceptance {
   acceptedAt: number;
 }
 
+export type PlaybackPresentationState = Exclude<RuntimeState, "ready">;
+
+export interface PlaybackPresentation {
+  state: PlaybackPresentationState;
+  item: QueueItem | null;
+}
+
 export function parsePlayAcceptance(value: unknown): PlayAcceptance | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -64,6 +71,35 @@ export function parsePlayAcceptance(value: unknown): PlayAcceptance | null {
   return typeof acceptance.id === "string" && typeof acceptance.accepted_at === "number"
     ? { id: acceptance.id, acceptedAt: acceptance.accepted_at }
     : null;
+}
+
+export function playbackPresentation(
+  status: EngineStatus,
+  selectedId: string | null,
+): PlaybackPresentation {
+  const selectedItem = selectedId
+    ? [status.current, ...status.queue, ...status.history].find(
+        (item) => item?.id === selectedId,
+      ) ?? null
+    : null;
+  if (status.state === "setup_required" || status.state === "stopped") {
+    return { state: status.state, item: null };
+  }
+  if (selectedItem) {
+    return { state: "playing", item: selectedItem };
+  }
+
+  const activeItem = status.current ?? status.queue[0] ?? null;
+  if (status.state === "paused") {
+    return { state: "paused", item: activeItem };
+  }
+  if (status.state === "loading") {
+    return { state: "loading", item: activeItem };
+  }
+  if (status.state === "playing" || activeItem || status.queue_count > 0) {
+    return { state: "playing", item: activeItem };
+  }
+  return { state: "idle", item: null };
 }
 
 const RUNTIME_STATES = new Set<RuntimeState>([
