@@ -52,6 +52,7 @@ mac:
 nsis:
   oneClick: true
   perMachine: false
+  include: build/installer.nsh
   deleteAppDataOnUninstall: false
   runAfterFinish: true
 npmRebuild: false
