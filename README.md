@@ -57,11 +57,14 @@ archive entries appear under History and can be replayed without
 changing the remaining queue or adding duplicate History rows. History includes
 completed, skipped, and cleared items. `Clear all` archives every waiting item
 without changing the current item or playback state. A row's three-dot menu
-uses `Play` for waiting and History rows. `Delete` removes a waiting item from
+uses `Play` for waiting and History rows. `Change voice` plays the same text
+with another bundled voice. `Delete` removes a waiting item from
 the active queue and keeps it in History; deleting it again from History removes
-it permanently. Drag a waiting row's grip to move the card directly,
-or drop it on History to archive it; the grip also supports the arrow, Home,
-and End keys.
+it permanently. Drag a Waiting or History row's grip to reorder it directly;
+a Waiting row can also be dropped on History to archive it. The grips support
+the arrow, Home, and End keys. Current speech is the only row without a grip.
+An empty active timeline is always Idle, so Playing and Paused always identify
+an active speech item.
 
 In desktop mode, mutable state stays in `~/.super-speech/`. The installed model
 and engine are read-only application resources. A headless installation keeps

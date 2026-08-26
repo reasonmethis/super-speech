@@ -98,6 +98,10 @@ async function assertDragClean(page) {
     items.map((item) => item.getAttribute("data-item-id"))
   );
   assert.equal(new Set(ids).size, ids.length, "Waiting cards must have unique IDs");
+  const historyIds = await page.locator(".queue-item.is-history").evaluateAll((items) =>
+    items.map((item) => item.getAttribute("data-item-id"))
+  );
+  assert.equal(new Set(historyIds).size, historyIds.length, "History cards must have unique IDs");
 }
 
 async function actionMenuIsFullyVisible(page) {
@@ -221,6 +225,16 @@ try {
       { section: "history", title: "History" },
     ],
     "Current, Waiting, and History must have explicit timeline boundaries",
+  );
+  assert.equal(
+    await page.locator(".queue-item.is-current .queue-drag-handle").count(),
+    0,
+    "Current speech must be the only row without a reorder handle",
+  );
+  assert.equal(
+    await page.locator(".queue-item.is-upcoming:not(:has(.queue-drag-handle))").count(),
+    0,
+    "Every waiting row must have a reorder handle",
   );
   await waitFor(
     async () => await page.locator("#visible-section-label").textContent() === "Current",
@@ -614,12 +628,21 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 800));
   assert.equal(await visibleActions.count(), 1, "The row action menu did not open");
   assert(
+    await visibleActions.evaluate((menu) => menu.contains(document.activeElement)),
+    "Opening row actions must move keyboard focus into the popover",
+  );
+  assert(
     await actionMenuIsFullyVisible(page),
     "The row action menu was clipped or covered",
   );
   assert.deepEqual(
     await visibleActions.locator(".queue-menu-action").allTextContents(),
     ["Play", "Copy text", "Delete"],
+  );
+  assert(
+    (await visibleActions.locator(".queue-menu-voice").getAttribute("aria-label"))
+      ?.startsWith("Change voice for waiting speech"),
+    "Waiting speech must offer a voice selector",
   );
   assert.equal(
     await visibleActions.locator(".queue-menu-action").first().evaluate(
@@ -648,7 +671,12 @@ try {
       globalThis.__superSpeechSmokeClipboard = text;
     };
   });
-  await visibleActions.getByRole("menuitem", { name: "Copy text" }).click();
+  await visibleActions.getByRole("button", { name: "Copy text" }).click();
+  assert.equal(
+    await menuButton.evaluate((button) => button === document.activeElement),
+    true,
+    "Copy text must return focus to the row action button",
+  );
   assert.equal(
     await electronApp.evaluate(() => globalThis.__superSpeechSmokeClipboard),
     status().queue.find((item) => item.id === menuRowId)?.text,
@@ -667,6 +695,11 @@ try {
     await visibleActions.locator(".queue-menu-action").allTextContents(),
     ["Play", "Copy text", "Delete"],
     "History must use the same Play label and expose Delete",
+  );
+  assert.equal(
+    await visibleActions.locator(".queue-menu-voice option").first().textContent(),
+    "Change voice",
+    "History must offer the same voice selector",
   );
   await page.locator("#speech-heading").click();
   if (process.env.SUPER_SPEECH_SCREENSHOT) {
@@ -767,7 +800,7 @@ try {
   const deletedId = await deleteRow.getAttribute("data-item-id");
   assert(deletedId, "A waiting item must be available for the Delete action");
   await deleteRow.locator(".queue-menu-button").click();
-  await page.locator("#queue-action-menu").getByRole("menuitem", { name: "Delete" }).click();
+  await page.locator("#queue-action-menu").getByRole("button", { name: "Delete" }).click();
   await waitFor(
     async () => await page.locator(`[data-item-id="${deletedId}"].is-history`).count() === 1,
     "The Delete menu action did not remove the item from the waiting queue",
@@ -776,10 +809,90 @@ try {
     () => !status().queue.some(({ id }) => id === deletedId),
     "The engine did not persist the Delete menu action",
   );
+  const historyRows = page.locator(".queue-item.is-history");
+  await waitFor(
+    async () => await historyRows.count() >= 2,
+    "History did not expose enough rows to test reordering",
+  );
+  assert.equal(
+    await page.locator(".queue-item.is-history:not(:has(.queue-drag-handle))").count(),
+    0,
+    "Every History row must have a reorder handle",
+  );
+  await historyRows.nth(1).scrollIntoViewIfNeeded();
+  await historyRows.nth(0).scrollIntoViewIfNeeded();
+  const firstHistoryId = await historyRows.nth(0).getAttribute("data-item-id");
+  const secondHistoryId = await historyRows.nth(1).getAttribute("data-item-id");
+  const firstHistoryBounds = await historyRows.nth(0).boundingBox();
+  const secondHistoryBounds = await historyRows.nth(1).boundingBox();
+  const firstHistoryHandle = historyRows.nth(0).locator(".queue-drag-handle");
+  await historyRows.nth(0).evaluate((row) => {
+    row.dataset.smokeNode = "history-source";
+  });
+  const firstHistoryHandleBounds = await firstHistoryHandle.boundingBox();
+  assert(
+    firstHistoryId && secondHistoryId && firstHistoryBounds &&
+      secondHistoryBounds && firstHistoryHandleBounds,
+    "History reorder rows and handle must be visible",
+  );
+  const historyGrab = {
+    x: firstHistoryHandleBounds.x + firstHistoryHandleBounds.width / 2,
+    y: firstHistoryHandleBounds.y + firstHistoryHandleBounds.height / 2,
+  };
+  const historyGrabOffsetY = historyGrab.y - firstHistoryBounds.y;
+  const historyDestinationY = secondHistoryBounds.y + secondHistoryBounds.height / 2 + 1 +
+    historyGrabOffsetY - firstHistoryBounds.height / 2;
+  await page.mouse.move(historyGrab.x, historyGrab.y);
+  await page.mouse.down();
+  await page.mouse.move(historyGrab.x, historyGrab.y + 6);
+  await waitFor(
+    async () => await page.locator(".queue-drag-ghost").count() === 1,
+    "History drag did not activate",
+  );
+  await page.mouse.move(historyGrab.x, historyDestinationY, { steps: 4 });
+  assert.equal(
+    await historyRows.nth(0).getAttribute("data-item-id"),
+    secondHistoryId,
+    "History did not preview the new order",
+  );
+  await page.mouse.up();
+  await assertDragClean(page);
+  assert.deepEqual(
+    await historyRows.evaluateAll((rows) =>
+      rows.slice(0, 2).map((row) => row.getAttribute("data-item-id"))
+    ),
+    [secondHistoryId, firstHistoryId],
+    "Releasing a History reorder must preserve its optimistic order",
+  );
+  assert.equal(
+    await page.locator(`[data-item-id="${firstHistoryId}"]`).getAttribute("data-smoke-node"),
+    "history-source",
+    "Releasing a History reorder must preserve the dragged row node",
+  );
+  await waitFor(
+    () => status().history[0]?.id === secondHistoryId && status().history[1]?.id === firstHistoryId,
+    "The engine did not persist the History reorder",
+  );
+  await waitFor(
+    () => page.locator(`[data-item-id="${firstHistoryId}"] .queue-drag-handle`).isEnabled(),
+    "The renderer did not finish reconciling the History reorder",
+  );
+  assert.deepEqual(
+    await historyRows.evaluateAll((rows) =>
+      rows.slice(0, 2).map((row) => row.getAttribute("data-item-id"))
+    ),
+    [secondHistoryId, firstHistoryId],
+    "Engine reconciliation changed the settled History order",
+  );
+  assert.equal(
+    await page.locator(`[data-item-id="${firstHistoryId}"]`).getAttribute("data-smoke-node"),
+    "history-source",
+    "Engine reconciliation replaced the settled History row node",
+  );
   const historyCountBeforeDelete = status().history_count;
   const historyDeleteRow = page.locator(`[data-item-id="${deletedId}"].is-history`);
   await historyDeleteRow.locator(".queue-menu-button").click();
-  await page.locator("#queue-action-menu").getByRole("menuitem", { name: "Delete" }).click();
+  await page.locator("#queue-action-menu").getByRole("button", { name: "Delete" }).click();
   await waitFor(
     async () => await historyDeleteRow.count() === 0,
     "Delete did not remove the History row",
@@ -790,7 +903,8 @@ try {
   );
 
   const historyCountBeforeReplay = status().history_count;
-  await historyPlay.dblclick();
+  await page.locator(`[data-item-id="${secondId}"].is-history .queue-menu-button`).click();
+  await page.locator("#queue-action-menu").getByRole("button", { name: "Play" }).click();
   assert.equal(
     await page.locator("body").getAttribute("data-state"),
     "playing",
@@ -800,11 +914,19 @@ try {
   assert.equal(
     await page.locator(`[data-item-id="${secondId}"].is-expanded`).count(),
     0,
-    "Double-clicking a chunk also expanded it",
+    "Playing a chunk from its action menu changed its expansion",
   );
   await waitFor(
-    () => status().current?.id === secondId,
-    "Double-clicking a History chunk did not start it",
+    async () => {
+      assert.equal(
+        await page.locator("body").getAttribute("data-state"),
+        "playing",
+        "The selected presentation reverted before History playback started",
+      );
+      assert.equal(await page.locator("#playback-title").textContent(), "Heart");
+      return status().current?.id === secondId;
+    },
+    "The History Play action did not start the chunk",
     30_000,
   );
   assert.equal(
@@ -871,6 +993,39 @@ try {
     "Jump-to-here changed row order instead of changing section membership",
   );
   assert(!status().queue.some(({ id }) => id === olderWaiting.id));
+  runEngine("pause");
+
+  const currentBeforeVoiceChange = status().current;
+  assert(currentBeforeVoiceChange, "Voice change requires current speech");
+  const currentMenuButton = page.locator(
+    `[data-item-id="${currentBeforeVoiceChange.id}"].is-current .queue-menu-button`,
+  );
+  await currentMenuButton.click();
+  assert.deepEqual(
+    await page.locator("#queue-action-menu .queue-menu-action").allTextContents(),
+    ["Resume", "Copy text"],
+    "Current actions must omit Play and Delete",
+  );
+  assert.equal(
+    await page.locator("#queue-action-menu .queue-menu-voice").count(),
+    1,
+    "Current speech must offer Change voice",
+  );
+  const currentVoiceSelect = page.locator("#queue-action-menu .queue-menu-voice");
+  await currentVoiceSelect.selectOption("bm_fable");
+  assert.equal(
+    await page.locator("body").getAttribute("data-state"),
+    "playing",
+    "Changing voice must enter the playing presentation immediately",
+  );
+  assert.equal(await page.locator("#playback-title").textContent(), "Fable");
+  await waitFor(
+    () => status().current?.voice === "bm_fable",
+    "The engine did not start current speech with the selected voice",
+    30_000,
+  );
+  assert.equal(status().current?.text, currentBeforeVoiceChange.text);
+  assert.notEqual(status().current?.id, currentBeforeVoiceChange.id);
   runEngine("pause");
 
   console.log("Super Speech pointer drag and cancellation smoke test passed");

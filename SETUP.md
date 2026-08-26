@@ -93,6 +93,7 @@ or the bounded `history` list:
 
 ```powershell
 & $engine play '014-af_heart-say'
+& $engine play '014-af_heart-say' --voice bm_fable
 ```
 
 The same command works in desktop and headless installations. Selecting an
@@ -107,16 +108,19 @@ command waits for engine acknowledgement and prints the resulting ID as JSON.
 History is an archive, not a completion log. It can contain items that
 finished, were skipped, or were cleared before playback.
 
-Use exact `queue` IDs to reorder or archive waiting items:
+Use exact IDs to reorder Waiting or recent History items, archive Waiting, or
+delete History:
 
 ```powershell
 & $engine move '016-af_bella-say' '015-bm_fable-say'
 & $engine move '015-bm_fable-say'
+& $engine move-history '014-af_heart-say' '013-bm_george-say'
 & $engine archive '016-af_bella-say'
 & $engine delete '014-af_heart-say'
 ```
 
 The first command inserts one item before another. Omitting the second ID moves
 the item to the end. `archive` moves only that waiting item into History. These
-commands never rename IDs or change current playback. `delete` permanently
+commands never rename IDs or change current playback. `move-history` persists
+manual ordering within the recent History view. `delete` permanently
 removes one exact History ID without changing the waiting queue.

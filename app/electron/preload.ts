@@ -5,9 +5,11 @@ const api: DesktopApi = {
   getStatus: () => ipcRenderer.invoke(IPC_CHANNELS.getStatus),
   getVersions: () => ipcRenderer.invoke(IPC_CHANNELS.getVersions),
   setPaused: (paused) => ipcRenderer.invoke(IPC_CHANNELS.setPaused, paused),
-  playChunk: (id) => ipcRenderer.invoke(IPC_CHANNELS.playChunk, id),
+  playChunk: (id, voice) => ipcRenderer.invoke(IPC_CHANNELS.playChunk, id, voice),
   moveQueueItem: (id, beforeId) =>
     ipcRenderer.invoke(IPC_CHANNELS.moveQueueItem, id, beforeId),
+  moveHistoryItem: (id, beforeId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.moveHistoryItem, id, beforeId),
   archiveQueueItem: (id) => ipcRenderer.invoke(IPC_CHANNELS.archiveQueueItem, id),
   deleteHistoryItem: (id) => ipcRenderer.invoke(IPC_CHANNELS.deleteHistoryItem, id),
   copyText: (text) => ipcRenderer.invoke(IPC_CHANNELS.copyText, text),

@@ -28,7 +28,7 @@ behavior. Signal files in BASE are the engine's private process protocol:
                never truncates the currently playing chunk
   PLAY.*.json - select a queued or recent chunk by ID; selecting waiting speech
                 archives the current item and older waiting items first
-  QUEUE_COMMAND.*.json - reorder/archive waiting speech or delete History by ID
+  QUEUE_COMMAND.*.json - reorder/archive Waiting or reorder/delete History by ID
   WARMUP     - synthesize a throwaway phrase to pay the first-inference cost
 
 Env:
@@ -78,6 +78,7 @@ CLEAR = BASE / "CLEAR"
 PLAY = BASE / "PLAY.json"
 QUEUE_COMMAND = BASE / "QUEUE_COMMAND.json"
 QUEUE_ORDER = BASE / "queue-order.json"
+HISTORY_ORDER = BASE / "history-order.json"
 WARMUP = BASE / "WARMUP"
 HEARTBEAT = BASE / "engine.alive"
 STATUS = BASE / "status.json"
@@ -117,7 +118,7 @@ SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
 ENGINE_VERSION = "0.4.7"
 STATUS_VERSION = 7
-QUEUE_ACTIONS = frozenset({"move", "archive", "delete"})
+QUEUE_ACTIONS = frozenset({"move", "move_history", "archive", "delete"})
 
 
 class EngineInstanceLock:
@@ -550,10 +551,12 @@ def play_ack_path(request_id: str) -> Path:
     return BASE / f"PLAY_ACK.{request_id}.json"
 
 
-def request_play(chunk_id: str) -> str:
+def request_play(chunk_id: str, voice: str | None = None) -> str:
     """Atomically publish one uniquely acknowledged selection request."""
     if not re.fullmatch(r"[A-Za-z0-9_-]+", chunk_id):
         raise ValueError("chunk ID contains invalid characters")
+    if voice is not None and not re.fullmatch(r"[ab][fm]_[a-z0-9_]+", voice):
+        raise ValueError("invalid Kokoro voice")
     if not engine_is_running():
         raise RuntimeError("engine is not running")
 
@@ -565,7 +568,8 @@ def request_play(chunk_id: str) -> str:
     )
     try:
         temp_path.write_text(
-            json.dumps({"id": chunk_id, "request_id": request_id}), encoding="utf-8"
+            json.dumps({"id": chunk_id, "voice": voice, "request_id": request_id}),
+            encoding="utf-8",
         )
         os.replace(temp_path, request_path)
     finally:
@@ -590,19 +594,24 @@ def claim_play_requests() -> list[Path]:
     return claimed
 
 
-def read_play_claim(claimed: Path) -> tuple[str, str] | None:
+def read_play_claim(claimed: Path) -> tuple[str, str | None, str] | None:
     try:
         payload = json.loads(claimed.read_text(encoding="utf-8"))
         chunk_id = payload.get("id")
+        voice = payload.get("voice")
         request_id = payload.get("request_id")
         if not isinstance(chunk_id, str) or not re.fullmatch(
             r"[A-Za-z0-9_-]+", chunk_id
         ):
             raise ValueError("invalid chunk ID")
+        if voice is not None and not (
+            isinstance(voice, str) and re.fullmatch(r"[ab][fm]_[a-z0-9_]+", voice)
+        ):
+            raise ValueError("invalid Kokoro voice")
         if not isinstance(request_id, str):
             raise ValueError("invalid play request ID")
         play_ack_path(request_id)
-        return chunk_id, request_id
+        return chunk_id, voice, request_id
     except (OSError, ValueError, json.JSONDecodeError) as error:
         log(f"invalid play request: {error}")
         return None
@@ -610,7 +619,7 @@ def read_play_claim(claimed: Path) -> tuple[str, str] | None:
         claimed.unlink(missing_ok=True)
 
 
-def take_play_request() -> tuple[str, str] | None:
+def take_play_request() -> tuple[str, str | None, str] | None:
     claimed = claim_play_requests()
     if not claimed:
         return None
@@ -618,7 +627,7 @@ def take_play_request() -> tuple[str, str] | None:
     for superseded in claimed[:-1]:
         request = read_play_claim(superseded)
         if request is not None:
-            _, request_id = request
+            _, _, request_id = request
             publish_play_ack(request_id, error="superseded by a newer play request")
     return read_play_claim(claimed[-1])
 
@@ -705,7 +714,7 @@ def request_queue_command(
     for value in (chunk_id, before_id):
         if value is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", value):
             raise ValueError("chunk ID contains invalid characters")
-    if action != "move" and before_id is not None:
+    if action not in {"move", "move_history"} and before_id is not None:
         raise ValueError(f"{action} does not accept a destination")
     if not engine_is_running():
         raise RuntimeError("engine is not running")
@@ -767,7 +776,7 @@ def read_queue_claim(claimed: Path) -> tuple[str, str, str | None, str] | None:
                 raise ValueError("invalid chunk ID")
         if not isinstance(chunk_id, str):
             raise ValueError("invalid chunk ID")
-        if action != "move" and before_id is not None:
+        if action not in {"move", "move_history"} and before_id is not None:
             raise ValueError(f"{action} does not accept a destination")
         if not isinstance(request_id, str):
             raise ValueError("invalid queue request ID")
@@ -826,6 +835,7 @@ def prune_queue_acknowledgements(max_age: float = 300.0) -> None:
 
 def archive(path: Path) -> bool:
     destination = SPOKEN / path.name
+    history_item_exists = destination.exists()
     try:
         SPOKEN.mkdir(parents=True, exist_ok=True)
         os.replace(str(path), str(destination))
@@ -834,6 +844,14 @@ def archive(path: Path) -> bool:
         except OSError as order_error:
             # The live queue is still authoritative if its optional order file cannot update
             log(f"queue order update error after archiving {path.name}: {order_error}")
+        try:
+            if history_item_exists:
+                save_history_order()
+            else:
+                previous = [item for item in history_files_in_order() if item != destination]
+                save_history_order([destination, *previous])
+        except OSError as order_error:
+            log(f"history order update error after archiving {path.name}: {order_error}")
         invalidate_history()
         return True
     except FileNotFoundError as error:
@@ -891,6 +909,7 @@ _history_lock = threading.Lock()
 _history_dirty = True
 _history_count = 0
 _history_items: list[dict[str, object]] = []
+_history_order_lock = threading.RLock()
 
 
 def invalidate_history() -> None:
@@ -899,14 +918,61 @@ def invalidate_history() -> None:
         _history_dirty = True
 
 
+def history_files_in_order() -> list[Path]:
+    """Return archived files in their saved display order."""
+    with _history_order_lock:
+        live = {path.stem: path for path in SPOKEN.glob("*.txt")}
+        try:
+            payload = json.loads(HISTORY_ORDER.read_text(encoding="utf-8"))
+            saved_ids = (
+                payload.get("ids", [])
+                if isinstance(payload, dict) and payload.get("version") == 1
+                else []
+            )
+            if not isinstance(saved_ids, list) or not all(
+                isinstance(chunk_id, str) for chunk_id in saved_ids
+            ):
+                saved_ids = []
+        except (OSError, ValueError, json.JSONDecodeError):
+            saved_ids = []
+        ordered = [live.pop(chunk_id) for chunk_id in saved_ids if chunk_id in live]
+        ordered.extend(sorted(live.values(), key=history_sort_key, reverse=True))
+        return ordered
+
+
+def save_history_order(paths: list[Path] | None = None) -> None:
+    """Atomically persist the order of archived files."""
+    with _history_order_lock:
+        ordered = paths if paths is not None else history_files_in_order()
+        live_ids = {path.stem for path in SPOKEN.glob("*.txt")}
+        ids = [path.stem for path in ordered if path.stem in live_ids]
+        missing = sorted(
+            (path for path in SPOKEN.glob("*.txt") if path.stem not in ids),
+            key=history_sort_key,
+            reverse=True,
+        )
+        ids.extend(path.stem for path in missing)
+        if not ids:
+            HISTORY_ORDER.unlink(missing_ok=True)
+            return
+        temp_path = HISTORY_ORDER.with_name(
+            f"{HISTORY_ORDER.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        try:
+            temp_path.write_text(
+                json.dumps({"version": 1, "ids": ids}), encoding="utf-8"
+            )
+            os.replace(temp_path, HISTORY_ORDER)
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+
 def history_snapshot() -> tuple[int, list[dict[str, object]]]:
     """Return the cached bounded archive view, refreshing only after an archive move."""
     global _history_dirty, _history_count, _history_items
     with _history_lock:
         if _history_dirty:
-            history_files = sorted(
-                SPOKEN.glob("*.txt"), key=history_sort_key, reverse=True
-            )
+            history_files = history_files_in_order()
             items: list[dict[str, object]] = []
             for path in history_files[:HISTORY_LIMIT]:
                 try:
@@ -984,10 +1050,13 @@ def publish_status(
             ),
         }
 
-    if (playing or queue_items) and playback_state in {"idle", "ready"}:
-        playback_state = "playing"
-    if PAUSE.exists() and playback_state in {"idle", "playing", "ready"}:
-        playback_state = "paused"
+    if playback_state not in {"loading", "setup_required", "stopped"}:
+        has_work = current is not None or bool(queue_items)
+        playback_state = (
+            "paused" if has_work and PAUSE.exists()
+            else "playing" if has_work
+            else "idle"
+        )
     history_count, history_items = history_snapshot()
 
     payload = {
@@ -1031,6 +1100,15 @@ def _queue_history_replay(source: Path) -> Path:
         target.unlink(missing_ok=True)
         raise
     return target
+
+
+def _queue_voice_variant(source: Path, voice: str) -> Path:
+    """Queue the same text and gap under a new voice-specific ID."""
+    if AVAILABLE_VOICES and voice not in AVAILABLE_VOICES:
+        raise ValueError(f"unknown Kokoro voice: {voice}")
+    gap = gap_from_name(source.name)
+    gap_ms = round(gap * 1000) if gap is not None else None
+    return enqueue_text(source.read_text(encoding="utf-8"), voice, gap_ms)
 
 
 def _discard_buffer(buf: "queue.Queue") -> int:
@@ -1091,12 +1169,16 @@ def process_play_request(buf: "queue.Queue", st: State) -> str | None:
     request = take_play_request()
     if request is None:
         return None
-    chunk_id, request_id = request
+    chunk_id, requested_voice, request_id = request
 
     # Discard audio rendered for the old order but keep source files queued for a clean restart
     with st.lock:
         playing = st.playing
-    if playing and Path(playing).stem == chunk_id:
+    if (
+        playing
+        and Path(playing).stem == chunk_id
+        and (requested_voice is None or requested_voice == voice_from_name(playing))
+    ):
         STOP.unlink(missing_ok=True)
         PAUSE.unlink(missing_ok=True)
         with st.lock:
@@ -1111,7 +1193,11 @@ def process_play_request(buf: "queue.Queue", st: State) -> str | None:
         replayed_from = _find_chunk(SPOKEN, chunk_id)
         if replayed_from is not None:
             try:
-                target = _queue_history_replay(replayed_from)
+                target = (
+                    _queue_voice_variant(replayed_from, requested_voice)
+                    if requested_voice and requested_voice != voice_from_name(replayed_from.name)
+                    else _queue_history_replay(replayed_from)
+                )
             except (OSError, RuntimeError, ValueError) as error:
                 log(f"could not replay {chunk_id}: {error}")
                 publish_play_ack(request_id, error=f"could not replay {chunk_id}")
@@ -1120,6 +1206,31 @@ def process_play_request(buf: "queue.Queue", st: State) -> str | None:
         log(f"PLAY ignored; chunk not found: {chunk_id}")
         publish_play_ack(request_id, error=f"chunk not found: {chunk_id}")
         return None
+
+    if (
+        replayed_from is None
+        and requested_voice
+        and requested_voice != voice_from_name(target.name)
+    ):
+        original = target
+        ordered = queue_files_in_order()
+        try:
+            position = ordered.index(original)
+            target = _queue_voice_variant(original, requested_voice)
+            ordered[position] = target
+            save_queue_order(ordered)
+            if not archive(original):
+                raise RuntimeError(f"could not archive original chunk: {chunk_id}")
+        except (OSError, RuntimeError, ValueError) as error:
+            if target != original:
+                target.unlink(missing_ok=True)
+                try:
+                    save_queue_order()
+                except OSError as order_error:
+                    log(f"queue order recovery error: {order_error}")
+            log(f"could not change voice for {chunk_id}: {error}")
+            publish_play_ack(request_id, error=f"could not change voice for {chunk_id}")
+            return None
 
     archived: list[Path] = []
     if replayed_from is None:
@@ -1207,8 +1318,35 @@ def apply_queue_command(
             history_item.unlink()
         except OSError as error:
             raise RuntimeError(f"could not delete history chunk: {chunk_id}") from error
+        try:
+            save_history_order()
+        except OSError as order_error:
+            log(f"history order update error after deleting {history_item.name}: {order_error}")
         invalidate_history()
         log(f"QUEUE delete {history_item.name}")
+        return
+
+    if action == "move_history":
+        ordered_history = history_files_in_order()
+        source = next((path for path in ordered_history if path.stem == chunk_id), None)
+        if source is None:
+            raise ValueError(f"history chunk not found: {chunk_id}")
+        if before_id == chunk_id:
+            return
+        ordered_history.remove(source)
+        if before_id is None:
+            ordered_history.insert(min(HISTORY_LIMIT - 1, len(ordered_history)), source)
+        else:
+            destination = next(
+                (path for path in ordered_history if path.stem == before_id),
+                None,
+            )
+            if destination is None:
+                raise ValueError(f"history destination not found: {before_id}")
+            ordered_history.insert(ordered_history.index(destination), source)
+        save_history_order(ordered_history)
+        invalidate_history()
+        log(f"QUEUE move History {source.name} before {before_id or 'visible end'}")
         return
 
     ordered = queue_files_in_order()
@@ -1763,12 +1901,22 @@ def cli(argv: list[str] | None = None) -> int:
     commands.add_parser("resume", help="resume from the current audio sample")
     play = commands.add_parser("play", help="play a queued or recent chunk by ID")
     play.add_argument("chunk_id", help="chunk ID from status output")
+    play.add_argument("--voice", help="play the same text with another Kokoro voice")
     move = commands.add_parser("move", help="move a waiting chunk before another ID")
     move.add_argument("chunk_id", help="waiting chunk ID from status output")
     move.add_argument(
         "before_id",
         nargs="?",
         help="waiting chunk ID to insert before; omit to move to the end",
+    )
+    move_history = commands.add_parser(
+        "move-history", help="reorder one recent History chunk"
+    )
+    move_history.add_argument("chunk_id", help="History chunk ID from status output")
+    move_history.add_argument(
+        "before_id",
+        nargs="?",
+        help="History chunk ID to insert before; omit to move it last on screen",
     )
     archive_command = commands.add_parser(
         "archive", help="move one waiting chunk to History"
@@ -1801,14 +1949,15 @@ def cli(argv: list[str] | None = None) -> int:
             resume()
         elif args.command == "play":
             start_engine()
-            request_id = request_play(args.chunk_id)
+            request_id = request_play(args.chunk_id, args.voice)
             print(json.dumps(wait_for_play_ack(request_id)))
-        elif args.command in {"move", "archive", "delete"}:
+        elif args.command in {"move", "move-history", "archive", "delete"}:
             start_engine()
+            action = "move_history" if args.command == "move-history" else args.command
             request_id = request_queue_command(
-                args.command,
+                action,
                 args.chunk_id,
-                args.before_id if args.command == "move" else None,
+                args.before_id if action in {"move", "move_history"} else None,
             )
             wait_for_queue_ack(request_id)
         else:

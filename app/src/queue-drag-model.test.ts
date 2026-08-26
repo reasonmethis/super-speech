@@ -118,7 +118,7 @@ test("a terminal transition emits at most one engine command", () => {
   assert.deepEqual(finished, {
     state: null,
     visualOrder: ["middle", "newest", "oldest"],
-    command: { type: "move", id: "middle", beforeId: null },
+    command: { type: "move", kind: "upcoming", id: "middle", beforeId: null },
   });
   assert.deepEqual(
     transitionQueueDrag(finished.state, {
@@ -222,6 +222,51 @@ test("every source and destination round-trips through engine playback order", (
       }
     }
   }
+});
+
+test("History drag commands round-trip through matching visual and engine order", () => {
+  const visualOrder = ["newest", "middle", "oldest"];
+  for (const sourceId of visualOrder) {
+    for (const beforeId of [...visualOrder, null]) {
+      const state = startQueueDrag(1, sourceId, visualOrder, "history");
+      assert(state);
+      const preview = transitionQueueDrag(state, {
+        type: "preview-queue",
+        pointerId: 1,
+        beforeId,
+      });
+      const finished = transitionQueueDrag(preview.state, {
+        type: "finish",
+        pointerId: 1,
+        commit: true,
+      });
+      assert(finished.visualOrder);
+      if (!finished.command || finished.command.type !== "move") {
+        assert.deepEqual(finished.visualOrder, visualOrder);
+        continue;
+      }
+      const persisted = moveQueueItemBefore(
+        visualOrder.map((id) => ({ id })),
+        finished.command.id,
+        finished.command.beforeId,
+      ).map(({ id }) => id);
+      assert.deepEqual(persisted, finished.visualOrder);
+    }
+  }
+});
+
+test("History-origin drags cannot enter the archive drop phase", () => {
+  const state = startQueueDrag(1, "middle", initialOrder, "history");
+  assert(state);
+
+  const transition = transitionQueueDrag(state, {
+    type: "preview-history",
+    pointerId: 1,
+  });
+
+  assert.equal(transition.state, state);
+  assert.equal(transition.visualOrder, null);
+  assert.equal(transition.command, null);
 });
 
 test("stale pointer events cannot affect a newer session", () => {

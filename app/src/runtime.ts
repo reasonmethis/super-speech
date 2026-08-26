@@ -3,11 +3,42 @@ export type RuntimeState =
   | "playing"
   | "paused"
   | "idle"
-  | "ready"
   | "setup_required"
   | "stopped";
 
 export const ENGINE_STATUS_VERSION = 7 as const;
+
+// Labels for the SHA-pinned Kokoro v1.0 voice archive bundled by prepare_resources
+export const VOICE_OPTIONS = [
+  ["af_alloy", "Alloy", "US female"],
+  ["af_aoede", "Aoede", "US female"],
+  ["af_bella", "Bella", "US female"],
+  ["af_heart", "Heart", "US female"],
+  ["af_jessica", "Jessica", "US female"],
+  ["af_kore", "Kore", "US female"],
+  ["af_nicole", "Nicole", "US female"],
+  ["af_nova", "Nova", "US female"],
+  ["af_river", "River", "US female"],
+  ["af_sarah", "Sarah", "US female"],
+  ["af_sky", "Sky", "US female"],
+  ["am_adam", "Adam", "US male"],
+  ["am_echo", "Echo", "US male"],
+  ["am_eric", "Eric", "US male"],
+  ["am_fenrir", "Fenrir", "US male"],
+  ["am_liam", "Liam", "US male"],
+  ["am_michael", "Michael", "US male"],
+  ["am_onyx", "Onyx", "US male"],
+  ["am_puck", "Puck", "US male"],
+  ["am_santa", "Santa", "US male"],
+  ["bf_alice", "Alice", "UK female"],
+  ["bf_emma", "Emma", "UK female"],
+  ["bf_isabella", "Isabella", "UK female"],
+  ["bf_lily", "Lily", "UK female"],
+  ["bm_daniel", "Daniel", "UK male"],
+  ["bm_fable", "Fable", "UK male"],
+  ["bm_george", "George", "UK male"],
+  ["bm_lewis", "Lewis", "UK male"],
+] as const;
 
 export interface QueueItem {
   id: string;
@@ -44,6 +75,20 @@ export interface RuntimeStatus extends EngineStatus {
   installed: boolean;
 }
 
+export function statusAfterPauseCommand(
+  status: RuntimeStatus,
+  paused: boolean,
+): RuntimeStatus {
+  if (["loading", "setup_required", "stopped"].includes(status.state)) {
+    return status;
+  }
+  const hasWork = status.current !== null || status.queue.length > 0;
+  return {
+    ...status,
+    state: hasWork ? (paused ? "paused" : "playing") : "idle",
+  };
+}
+
 export type TimelineItemKind = "current" | "upcoming" | "history";
 
 export interface TimelineItem extends QueueItem {
@@ -56,12 +101,28 @@ export interface PlayAcceptance {
   acceptedAt: number;
 }
 
-export type PlaybackPresentationState = Exclude<RuntimeState, "ready">;
+export type PlayAcceptanceState = "pending" | "applied" | "failed";
 
-export interface PlaybackPresentation {
-  state: PlaybackPresentationState;
-  item: QueueItem | null;
+export function playAcceptanceState(
+  status: EngineStatus,
+  acceptance: PlayAcceptance,
+): PlayAcceptanceState {
+  if (status.current?.id === acceptance.id) {
+    return "applied";
+  }
+  if (status.updated_at < acceptance.acceptedAt) {
+    return "pending";
+  }
+  if (status.queue.some(({ id }) => id === acceptance.id)) {
+    return "pending";
+  }
+  return status.history.some(({ id }) => id === acceptance.id) ? "applied" : "failed";
 }
+
+export type PlaybackPresentation =
+  | { state: "playing" | "paused"; item: QueueItem }
+  | { state: "loading"; item: QueueItem | null }
+  | { state: "idle" | "setup_required" | "stopped"; item: null };
 
 export function parsePlayAcceptance(value: unknown): PlayAcceptance | null {
   if (!value || typeof value !== "object") {
@@ -75,31 +136,31 @@ export function parsePlayAcceptance(value: unknown): PlayAcceptance | null {
 
 export function playbackPresentation(
   status: EngineStatus,
-  selectedId: string | null,
+  selectedItem: QueueItem | null,
 ): PlaybackPresentation {
-  const selectedItem = selectedId
-    ? [status.current, ...status.queue, ...status.history].find(
-        (item) => item?.id === selectedId,
-      ) ?? null
-    : null;
-  if (status.state === "setup_required" || status.state === "stopped") {
-    return { state: status.state, item: null };
+  if (status.state === "setup_required") {
+    return { state: "setup_required", item: null };
   }
   if (selectedItem) {
     return { state: "playing", item: selectedItem };
   }
+  if (status.state === "stopped") {
+    return { state: "stopped", item: null };
+  }
 
   const activeItem = status.current ?? status.queue[0] ?? null;
+  if (!activeItem) {
+    return status.state === "loading"
+      ? { state: "loading", item: null }
+      : { state: "idle", item: null };
+  }
   if (status.state === "paused") {
     return { state: "paused", item: activeItem };
   }
   if (status.state === "loading") {
     return { state: "loading", item: activeItem };
   }
-  if (status.state === "playing" || activeItem || status.queue_count > 0) {
-    return { state: "playing", item: activeItem };
-  }
-  return { state: "idle", item: null };
+  return { state: "playing", item: activeItem };
 }
 
 const RUNTIME_STATES = new Set<RuntimeState>([
@@ -107,7 +168,6 @@ const RUNTIME_STATES = new Set<RuntimeState>([
   "playing",
   "paused",
   "idle",
-  "ready",
   "setup_required",
   "stopped",
 ]);
@@ -252,8 +312,9 @@ export interface DesktopApi {
   getStatus(): Promise<RuntimeStatus>;
   getVersions(): Promise<VersionInfo>;
   setPaused(paused: boolean): Promise<RuntimeStatus>;
-  playChunk(id: string): Promise<PlayAcceptance>;
+  playChunk(id: string, voice?: string): Promise<PlayAcceptance>;
   moveQueueItem(id: string, beforeId: string | null): Promise<void>;
+  moveHistoryItem(id: string, beforeId: string | null): Promise<void>;
   archiveQueueItem(id: string): Promise<void>;
   deleteHistoryItem(id: string): Promise<void>;
   copyText(text: string): Promise<void>;
@@ -276,6 +337,7 @@ export const IPC_CHANNELS = {
   setPaused: "runtime:set-paused",
   playChunk: "runtime:play-chunk",
   moveQueueItem: "runtime:move-queue-item",
+  moveHistoryItem: "runtime:move-history-item",
   archiveQueueItem: "runtime:archive-queue-item",
   deleteHistoryItem: "runtime:delete-history-item",
   copyText: "runtime:copy-text",

@@ -49,6 +49,8 @@ work session without having to reconstruct the product decisions.
 - [x] Add permanent deletion for individual History items
 - [x] Add clear controls to the desktop UI
 - [x] Add mouse and keyboard queue reordering
+- [x] Add mouse and keyboard reordering for recent History
+- [x] Change one item's voice and play the same text
 - Show when each chunk was queued, when it started, and when it finished
 - Preserve enough rendered audio history to make replay instant
 - Record completed, skipped, and cleared outcomes before labeling history as played
@@ -70,7 +72,7 @@ work session without having to reconstruct the product decisions.
 
 ## P2: playback and voice settings
 
-- Voice picker with short local previews
+- Add short local previews to the per-item voice picker
 - Default voice, speaking speed, output device, and volume controls
 - Global pause/resume shortcut
 - Optional mini-player that stays above other windows

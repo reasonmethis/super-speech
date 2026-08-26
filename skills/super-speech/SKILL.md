@@ -200,8 +200,9 @@ The CLI owns playback controls. Do not create or remove runtime files directly:
 |---|---|
 | `pause` | Pause immediately at the current audio sample |
 | `resume` | Resume from the same sample |
-| `play <id>` | Play an exact `current`, `queue`, or `history` ID from `status` |
+| `play <id> [--voice VOICE]` | Play an exact ID, optionally with another bundled voice |
 | `move <id> [before-id]` | Reorder a waiting item; omit `before-id` to move it last |
+| `move-history <id> [before-id]` | Reorder a recent History item |
 | `archive <id>` | Move one waiting item into History |
 | `delete <id>` | Permanently remove one History item |
 | `skip` | Archive the current chunk and continue |
@@ -218,6 +219,10 @@ the original archive remains available and replay does not add duplicate History
 rows. Selecting while paused resumes playback. Never derive an
 ID from a path or mutate runtime files directly; use the exact opaque ID from
 `status`.
+
+Passing `--voice` keeps the exact text and requested gap, creates the required
+voice-specific queue ID, and starts that version. The original History entry
+remains available when changing the voice of archived speech.
 
 The command waits for the engine to accept or reject the ID. On success it
 prints JSON containing the exact resulting queue ID and acceptance time; a

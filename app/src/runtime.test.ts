@@ -3,11 +3,13 @@ import test from "node:test";
 import {
   ENGINE_STATUS_VERSION,
   moveQueueItemBefore,
+  playAcceptanceState,
   playbackPresentation,
   parseEngineStatus,
   parseEngineProcessStatus,
   parsePlayAcceptance,
   statusForEngineProcess,
+  statusAfterPauseCommand,
   timelineItems,
   type EngineStatus,
 } from "./runtime.ts";
@@ -62,7 +64,39 @@ test("normalizes an engine play acknowledgement", () => {
   assert.equal(parsePlayAcceptance({ id: "008-bm_fable-say" }), null);
 });
 
-test("shows ready only when playback has no active or waiting work", () => {
+test("does not mistake an existing History row for started playback", () => {
+  const archived = {
+    id: "008-bm_fable-say",
+    filename: "008-bm_fable-say.txt",
+    text: "Play this again",
+    voice: "bm_fable",
+  };
+  const acceptance = { id: archived.id, acceptedAt: 12 };
+
+  assert.equal(
+    playAcceptanceState(
+      { ...status, state: "paused", updated_at: 11, history_count: 1, history: [archived] },
+      acceptance,
+    ),
+    "pending",
+  );
+  assert.equal(
+    playAcceptanceState(
+      { ...status, state: "playing", updated_at: 13, queue_count: 1, queue: [archived], history_count: 1, history: [archived] },
+      acceptance,
+    ),
+    "pending",
+  );
+  assert.equal(
+    playAcceptanceState(
+      { ...status, state: "playing", updated_at: 13, current: { ...archived, piece: 1, piece_count: 1, elapsed_seconds: 0 }, history_count: 1, history: [archived] },
+      acceptance,
+    ),
+    "applied",
+  );
+});
+
+test("makes active playback states impossible without active speech", () => {
   const waiting = {
     id: "002-af_heart-say",
     filename: "002-af_heart-say.txt",
@@ -75,6 +109,14 @@ test("shows ready only when playback has no active or waiting work", () => {
     { state: "idle", item: null },
   );
   assert.deepEqual(
+    playbackPresentation({ ...status, state: "paused" }, null),
+    { state: "idle", item: null },
+  );
+  assert.deepEqual(
+    playbackPresentation({ ...status, state: "playing" }, null),
+    { state: "idle", item: null },
+  );
+  assert.deepEqual(
     playbackPresentation({
       ...status,
       state: "idle",
@@ -83,6 +125,27 @@ test("shows ready only when playback has no active or waiting work", () => {
     }, null),
     { state: "playing", item: waiting },
   );
+});
+
+test("reflects pause commands immediately without creating an empty paused state", () => {
+  const waiting = {
+    id: "002-af_heart-say",
+    filename: "002-af_heart-say.txt",
+    text: "Waiting",
+    voice: "af_heart",
+  };
+  const active = {
+    ...status,
+    state: "playing" as const,
+    engine_running: true,
+    installed: true,
+    queue_count: 1,
+    queue: [waiting],
+  };
+
+  assert.equal(statusAfterPauseCommand(active, true).state, "paused");
+  assert.equal(statusAfterPauseCommand({ ...active, queue_count: 0, queue: [] }, true).state, "idle");
+  assert.equal(statusAfterPauseCommand({ ...active, state: "loading" }, true).state, "loading");
 });
 
 test("presents a selected item as playing before the engine starts audio", () => {
@@ -99,7 +162,20 @@ test("presents a selected item as playing before the engine starts audio", () =>
       state: "paused",
       history_count: 1,
       history: [selected],
-    }, selected.id),
+    }, selected),
+    { state: "playing", item: selected },
+  );
+});
+
+test("presents a selection immediately while a stopped engine restarts", () => {
+  const selected = {
+    id: "007-bm_fable-say",
+    filename: "007-bm_fable-say.txt",
+    text: "Selected",
+    voice: "bm_fable",
+  };
+  assert.deepEqual(
+    playbackPresentation(status, selected),
     { state: "playing", item: selected },
   );
 });

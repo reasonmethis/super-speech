@@ -30,6 +30,7 @@ import {
   parseEngineStatus,
   parseEngineProcessStatus,
   parsePlayAcceptance,
+  statusAfterPauseCommand,
   statusForEngineProcess,
   type EngineProcessStatus,
   type PlayAcceptance,
@@ -182,7 +183,6 @@ function getStatus(): RuntimeStatus {
   const base = runtimeDir();
   const installed = modelsInstalled(modelDirectory());
   const ownedEngineRunning = ownedEngine !== null && ownedEngine.exitCode === null;
-  const paused = existsSync(path.join(base, "PAUSE"));
   const storedSnapshot = readStatusSnapshot(base);
   const storedEngine = parseEngineStatus(storedSnapshot);
   const storedProcess = parseEngineProcessStatus(storedSnapshot);
@@ -196,15 +196,13 @@ function getStatus(): RuntimeStatus {
     state = "setup_required";
   } else if (engineStartFailed) {
     state = "stopped";
-  } else if (paused) {
-    state = "paused";
   } else if (engineRunning) {
     state = engine?.state ?? "loading";
   } else {
-    state = "ready";
+    state = "idle";
   }
 
-  return {
+  const status: RuntimeStatus = {
     version: ENGINE_STATUS_VERSION,
     state,
     updated_at: engine?.updated_at ?? 0,
@@ -217,6 +215,7 @@ function getStatus(): RuntimeStatus {
     history_count: engine?.history_count ?? 0,
     history: engine?.history ?? [],
   };
+  return statusAfterPauseCommand(status, existsSync(path.join(base, "PAUSE")));
 }
 
 function runEngineCommand(...arguments_: string[]): Promise<string> {
@@ -255,8 +254,8 @@ function runEngineCommand(...arguments_: string[]): Promise<string> {
   });
 }
 
-async function playChunk(id: string): Promise<PlayAcceptance> {
-  const output = await runEngineCommand("play", id);
+async function playChunk(id: string, voice?: string): Promise<PlayAcceptance> {
+  const output = await runEngineCommand("play", id, ...(voice ? ["--voice", voice] : []));
   const acceptance = parsePlayAcceptance(JSON.parse(output));
   if (!acceptance) {
     throw new Error("Engine returned an incomplete play acknowledgement");
@@ -266,6 +265,10 @@ async function playChunk(id: string): Promise<PlayAcceptance> {
 
 async function moveQueueItem(id: string, beforeId: string | null): Promise<void> {
   await runEngineCommand("move", id, ...(beforeId ? [beforeId] : []));
+}
+
+async function moveHistoryItem(id: string, beforeId: string | null): Promise<void> {
+  await runEngineCommand("move-history", id, ...(beforeId ? [beforeId] : []));
 }
 
 async function archiveQueueItem(id: string): Promise<void> {
@@ -471,8 +474,9 @@ function runSmokeTest(): void {
 
 async function setPaused(paused: boolean): Promise<RuntimeStatus> {
   await runEngineCommand(paused ? "pause" : "resume");
-  refreshTrayMenu();
-  return getStatus();
+  const status = statusAfterPauseCommand(getStatus(), paused);
+  refreshTrayMenu(status);
+  return status;
 }
 
 function assetPath(name: string): string {
@@ -551,16 +555,18 @@ function createWindow(): void {
   }
 }
 
-function refreshTrayMenu(): void {
+function refreshTrayMenu(status = getStatus()): void {
   if (!tray) {
     return;
   }
-  const paused = existsSync(path.join(runtimeDir(), "PAUSE"));
+  const paused = status.state === "paused";
+  const hasWork = status.current !== null || status.queue_count > 0;
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: "Open Super Speech", click: showWindow },
       {
         label: paused ? "Resume Speech" : "Pause Speech",
+        enabled: hasWork,
         click: () => void setPaused(!paused),
       },
       { label: "Open runtime folder", click: () => void shell.openPath(runtimeDir()) },
@@ -590,10 +596,16 @@ function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.getStatus, getStatus);
   ipcMain.handle(IPC_CHANNELS.getVersions, getVersions);
   ipcMain.handle(IPC_CHANNELS.setPaused, (_event, paused: boolean) => setPaused(paused));
-  ipcMain.handle(IPC_CHANNELS.playChunk, (_event, id: string) => playChunk(id));
+  ipcMain.handle(IPC_CHANNELS.playChunk, (_event, id: string, voice?: string) =>
+    playChunk(id, voice)
+  );
   ipcMain.handle(
     IPC_CHANNELS.moveQueueItem,
     (_event, id: string, beforeId: string | null) => moveQueueItem(id, beforeId),
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.moveHistoryItem,
+    (_event, id: string, beforeId: string | null) => moveHistoryItem(id, beforeId),
   );
   ipcMain.handle(IPC_CHANNELS.archiveQueueItem, (_event, id: string) =>
     archiveQueueItem(id)

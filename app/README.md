@@ -4,8 +4,9 @@ Start with the canonical project overview in [../README.md](../README.md).
 This document covers development and packaging for the Electron app.
 
 The renderer is plain TypeScript and CSS. A sandboxed preload bridge exposes
-status, pause, identifier-based playback selection, queue reordering, archival,
-clearing, setup, and window controls without giving the renderer Node.js or
+status, pause, identifier-based playback and voice selection, Waiting and
+History reordering, archival, deletion, clearing, setup, and window controls
+without giving the renderer Node.js or
 filesystem access. Electron forwards those commands to the engine CLI; the
 frozen Python sidecar remains authoritative for synthesis, queue order, replay,
 and the current sample cursor. Playback selection returns the engine's exact
@@ -56,12 +57,13 @@ Run the Electron mouse test after changing queue interactions:
 npm run test:drag
 ```
 
-It uses real pointer input to reorder and archive cards, verifies single-click
-expansion, double-click-only playback, row action menus, and stable
+It uses real pointer input to reorder Waiting and History cards and archive
+Waiting cards, verifies single-click expansion, double-click-only playback,
+voice changes, row action menus, and stable
 playback-control geometry. It also verifies that Current is initially visible,
 the three timeline sections remain explicit, and menus stay inside the visible
-speech viewport. Waiting and History menus both use `Play`; History also supports
-permanent deletion. The test then checks cancellation when the pointer loses its
+speech viewport. Waiting and History menus both use `Play`, `Change voice`, and
+`Delete`; History deletion is permanent. The test then checks cancellation when the pointer loses its
 primary button, the window loses focus, or polling replaces the timeline. The
 test runs against a temporary runtime with silent audio and verifies the result
 in both the renderer and the engine queue.

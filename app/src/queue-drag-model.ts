@@ -4,6 +4,7 @@ interface QueueDragBase {
   pointerId: number;
   sourceId: string;
   initialVisualOrder: readonly string[];
+  kind: "upcoming" | "history";
 }
 
 export type QueueDragState =
@@ -13,12 +14,18 @@ export type QueueDragState =
       previewVisualOrder: readonly string[];
     })
   | (QueueDragBase & {
+      kind: "upcoming";
       phase: "history";
       previewVisualOrder: readonly string[];
     });
 
 export type QueueDragCommand =
-  | { type: "move"; id: string; beforeId: string | null }
+  | {
+      type: "move";
+      kind: "upcoming" | "history";
+      id: string;
+      beforeId: string | null;
+    }
   | { type: "archive"; id: string };
 
 export type QueueDragEvent =
@@ -54,6 +61,7 @@ export function startQueueDrag(
   pointerId: number,
   sourceId: string,
   visualOrder: readonly string[],
+  kind: "upcoming" | "history" = "upcoming",
 ): QueueDragState | null {
   if (!visualOrder.includes(sourceId) || new Set(visualOrder).size !== visualOrder.length) {
     return null;
@@ -63,6 +71,7 @@ export function startQueueDrag(
     pointerId,
     sourceId,
     initialVisualOrder: [...visualOrder],
+    kind,
   };
 }
 
@@ -92,15 +101,18 @@ function settleDrag(state: QueueDragState, commit: boolean): QueueDragTransition
       command: null,
     };
   }
-  const playbackOrder = [...state.previewVisualOrder].reverse();
-  const sourceIndex = playbackOrder.indexOf(state.sourceId);
+  const engineOrder = state.kind === "upcoming"
+    ? [...state.previewVisualOrder].reverse()
+    : [...state.previewVisualOrder];
+  const sourceIndex = engineOrder.indexOf(state.sourceId);
   return {
     state: null,
     visualOrder: state.previewVisualOrder,
     command: {
       type: "move",
+      kind: state.kind,
       id: state.sourceId,
-      beforeId: playbackOrder[sourceIndex + 1] ?? null,
+      beforeId: engineOrder[sourceIndex + 1] ?? null,
     },
   };
 }
@@ -119,6 +131,9 @@ export function transitionQueueDrag(
     return settleDrag(state, event.commit);
   }
   if (event.type === "preview-history") {
+    if (state.kind !== "upcoming") {
+      return { state, ...NO_CHANGE };
+    }
     const previewVisualOrder = state.phase === "queue"
       ? state.previewVisualOrder
       : state.initialVisualOrder;
@@ -128,6 +143,7 @@ export function transitionQueueDrag(
         pointerId: state.pointerId,
         sourceId: state.sourceId,
         initialVisualOrder: state.initialVisualOrder,
+        kind: state.kind,
         previewVisualOrder,
       },
       visualOrder: previewVisualOrder,
@@ -147,6 +163,7 @@ export function transitionQueueDrag(
       pointerId: state.pointerId,
       sourceId: state.sourceId,
       initialVisualOrder: state.initialVisualOrder,
+      kind: state.kind,
       previewVisualOrder,
     },
     visualOrder: previewVisualOrder,

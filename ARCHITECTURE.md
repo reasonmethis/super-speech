@@ -71,8 +71,9 @@ runtime sizes.
 
 ## Playback protocol
 
-`super-speech-engine status` publishes a version 5 snapshot with the current
-speech item, the complete upcoming queue, and up to 50 newest archived items. A
+`super-speech-engine status` publishes a version 7 snapshot with the current
+speech item, the complete upcoming queue, and up to 50 recent archived items in
+their saved display order. A
 speech item is one `speak` invocation, one timeline row, and one replay target.
 Sentence pieces are an internal synthesis and buffering detail, not separate
 history entries. The current item remains active while the engine waits for its
@@ -82,7 +83,8 @@ can exceed the bounded
 The archive currently includes completed, skipped, and cleared items, so the
 UI calls it History rather than claiming every entry played to completion.
 
-`super-speech-engine play <id>` is the one selection command. The engine, not
+`super-speech-engine play <id> [--voice <voice>]` is the one selection command.
+The optional voice queues the same text and gap under that voice. The engine, not
 Electron, validates the identifier and owns every queue or archive mutation:
 
 - selecting the current item resumes it from the same sample when paused
@@ -104,7 +106,10 @@ filters that saved order against live queue files and appends new arrivals, so
 dragging never renames an ID and concurrent `speak` calls remain safe.
 `move <id> [before-id]` changes that order, while `archive <id>` moves one
 waiting item into History and `delete <id>` permanently removes one History
-item. All three use unique request files and exact acknowledgements. The engine
+item. History display order is likewise stored in `history-order.json`, and
+`move-history <id> [before-id]` reorders the bounded recent History view without
+renaming or moving archive files. These commands use unique request files and
+exact acknowledgements. The engine
 invalidates buffered waiting audio after queue-order mutations while preserving
 every rendered piece of the current item.
 
@@ -114,9 +119,12 @@ then places the current item above newest-first History. Section dividers and a
 fixed visible-section label identify Waiting, Current, and History, and a new
 current ID is scrolled into view once instead of on every status poll. When current playback
 finishes, the same row therefore crosses the divider without changing its
-position relative to the other rows. A visual drag is translated back into one
-engine `move` command. The renderer applies the result immediately and rolls it
-back only if the engine rejects the command.
+position relative to the other rows. Waiting and History drags translate back
+into `move` and `move-history` commands. The renderer applies the result
+immediately and rolls it back only if the engine rejects the command. Current
+speech is not reorderable. The status producer derives active state from the
+same current and queue snapshot, and the renderer uses a discriminated playback
+presentation, so Playing and Paused cannot exist without an active item.
 
 ## Distribution boundaries
 

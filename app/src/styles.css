@@ -202,8 +202,7 @@ button {
 }
 
 .status-dot.state-playing,
-.status-dot.state-idle,
-.status-dot.state-ready {
+.status-dot.state-idle {
   background: #55d69e;
   box-shadow: 0 0 0 3px rgba(85, 214, 158, 0.12), 0 0 13px rgba(85, 214, 158, 0.46);
 }
@@ -301,7 +300,6 @@ body[data-state="playing"] .ring-two {
 }
 
 body[data-state="idle"] .playback-button,
-body[data-state="ready"] .playback-button,
 body[data-state="loading"] .playback-button {
   border-color: transparent;
   background: transparent;
@@ -309,7 +307,6 @@ body[data-state="loading"] .playback-button {
 }
 
 body[data-state="idle"] .playback-button::after,
-body[data-state="ready"] .playback-button::after,
 body[data-state="loading"] .playback-button::after {
   display: none;
 }
@@ -336,7 +333,6 @@ body[data-state="loading"] .playback-icon {
 }
 
 body[data-state="idle"] .playback-icon,
-body[data-state="ready"] .playback-icon,
 body[data-state="loading"] .playback-icon,
 .playback-icon .idle-icon {
   width: 112px;
@@ -361,7 +357,6 @@ body[data-state="loading"] .playback-icon,
 }
 
 body[data-state="idle"] .playback-copy,
-body[data-state="ready"] .playback-copy,
 body[data-state="loading"] .playback-copy {
   padding-top: 36px;
 }
@@ -624,6 +619,30 @@ body[data-state="loading"] .playback-copy {
   outline: 0;
   background: transparent;
   color: inherit;
+}
+
+.queue-menu-voice {
+  width: 100%;
+  min-height: 32px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  outline: 0;
+  color: #d9d6e1;
+  background: transparent;
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.queue-menu-voice:hover,
+.queue-menu-voice:focus-visible {
+  background: rgba(255, 255, 255, 0.075);
+}
+
+.queue-menu-voice:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .queue-chunk {
