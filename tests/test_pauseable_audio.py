@@ -658,38 +658,86 @@ def test_playing_current_chunk_resumes_without_reordering(
     assert acceptance["id"] == current.stem
 
 
-def test_selecting_upcoming_chunk_preempts_without_archiving_current(
+def test_selecting_upcoming_chunk_archives_everything_older(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     engine = load_engine("super_speech_engine_play_upcoming")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     current = engine.QUEUE / "001-af_heart-say.txt"
+    older = engine.QUEUE / "002-af_heart-say.txt"
     selected = engine.QUEUE / "003-bm_fable-say.txt"
+    newer = engine.QUEUE / "004-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
+    older.write_text("Older waiting", encoding="utf-8")
     selected.write_text("Selected", encoding="utf-8")
+    newer.write_text("Newer waiting", encoding="utf-8")
     buffered: queue.Queue = queue.Queue()
     buffered.put("banked piece")
     state = engine.State()
     state.playing = current.name
-    state.claimed.update({current.name, selected.name})
+    state.claimed.update({current.name, older.name, selected.name})
 
     request_id = engine.request_play(selected.stem)
     assert engine.process_play_request(buffered, state) == "select"
     acceptance = engine.wait_for_play_ack(request_id, timeout=0.1)
 
-    assert current.is_file()
-    assert not (engine.SPOKEN / current.name).exists()
+    assert not current.exists()
+    assert not older.exists()
+    assert (engine.SPOKEN / current.name).read_text(encoding="utf-8") == "Current"
+    assert (engine.SPOKEN / older.name).read_text(encoding="utf-8") == "Older waiting"
     assert state.claimed == set()
     assert buffered.empty()
 
     assert engine.finish_chunk_playback(current, "select", False, state)
     assert state.playing is None
-    assert current.is_file()
-    assert not (engine.SPOKEN / current.name).exists()
     assert engine.claim_next_queued_chunk(state) == selected
-    assert engine.claim_next_queued_chunk(state) == current
+    assert engine.claim_next_queued_chunk(state) == newer
+    assert engine.claim_next_queued_chunk(state) is None
     assert acceptance["id"] == selected.stem
+
+
+def test_selecting_waiting_chunk_without_playback_archives_older_waiting_items(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_play_waiting")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    older = engine.QUEUE / "001-af_heart-say.txt"
+    selected = engine.QUEUE / "002-bm_fable-say.txt"
+    newer = engine.QUEUE / "003-af_heart-say.txt"
+    for path in (older, selected, newer):
+        path.write_text(path.stem, encoding="utf-8")
+
+    engine.request_play(selected.stem)
+    assert engine.process_play_request(queue.Queue(), engine.State()) == "select"
+
+    assert not older.exists()
+    assert (engine.SPOKEN / older.name).exists()
+    assert engine.queue_files_in_order() == [selected, newer]
+
+
+def test_selecting_waiting_chunk_rejects_an_archive_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_play_archive_failure")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    older = engine.QUEUE / "001-af_heart-say.txt"
+    selected = engine.QUEUE / "002-bm_fable-say.txt"
+    older.write_text("Older", encoding="utf-8")
+    selected.write_text("Selected", encoding="utf-8")
+    monkeypatch.setattr(engine, "archive", lambda _path: False)
+    state = engine.State()
+
+    request_id = engine.request_play(selected.stem)
+    assert engine.process_play_request(queue.Queue(), state) is None
+
+    with pytest.raises(RuntimeError, match="could not select"):
+        engine.wait_for_play_ack(request_id, timeout=0.1)
+    assert state.selection_name is None
+    assert older.exists()
+    assert selected.exists()
 
 
 def test_replaying_history_reuses_its_id_without_duplicating_history(

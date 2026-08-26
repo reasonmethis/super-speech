@@ -115,8 +115,8 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
-ENGINE_VERSION = "0.4.5"
-STATUS_VERSION = 5
+ENGINE_VERSION = "0.4.6"
+STATUS_VERSION = 6
 
 
 class EngineInstanceLock:
@@ -1066,6 +1066,25 @@ def _reset_waiting_buffer(buf: "queue.Queue", st: State) -> int:
         return discarded
 
 
+def _archive_older_queue_items(target: Path, playing: str | None) -> list[Path]:
+    """Archive the current chunk and each older waiting chunk before target."""
+    ordered = queue_files_in_order()
+    try:
+        target_index = ordered.index(target)
+    except ValueError as error:
+        raise ValueError(f"waiting chunk not found: {target.stem}") from error
+
+    archived = ordered[:target_index]
+    if playing and playing != target.name:
+        playing_path = next((path for path in ordered if path.name == playing), None)
+        if playing_path is not None and playing_path not in archived:
+            archived.append(playing_path)
+    for path in archived:
+        if not archive(path):
+            raise RuntimeError(f"could not archive older waiting chunk: {path.stem}")
+    return archived
+
+
 def process_play_request(buf: "queue.Queue", st: State) -> str | None:
     """Resolve one selected ID and return ``select`` when playback must yield."""
     request = take_play_request()
@@ -1101,6 +1120,15 @@ def process_play_request(buf: "queue.Queue", st: State) -> str | None:
         publish_play_ack(request_id, error=f"chunk not found: {chunk_id}")
         return None
 
+    archived: list[Path] = []
+    if replayed_from is None:
+        try:
+            archived = _archive_older_queue_items(target, playing)
+        except (RuntimeError, ValueError) as error:
+            log(f"could not select {chunk_id}: {error}")
+            publish_play_ack(request_id, error=f"could not select {chunk_id}")
+            return None
+
     STOP.unlink(missing_ok=True)
     PAUSE.unlink(missing_ok=True)
     with st.lock:
@@ -1111,7 +1139,10 @@ def process_play_request(buf: "queue.Queue", st: State) -> str | None:
         st.saw_stop = False
     publish_play_ack(request_id, result_id=target.stem)
     if replayed_from is None:
-        log(f"PLAY selected {target.name}; discarded {discarded} banked piece(s)")
+        log(
+            f"PLAY selected {target.name}; archived {len(archived)} older chunk(s); "
+            f"discarded {discarded} banked piece(s)"
+        )
     else:
         log(
             f"PLAY replay {replayed_from.name} as {target.name}; "

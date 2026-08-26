@@ -7,7 +7,7 @@ export type RuntimeState =
   | "setup_required"
   | "stopped";
 
-export const ENGINE_STATUS_VERSION = 5 as const;
+export const ENGINE_STATUS_VERSION = 6 as const;
 
 export interface QueueItem {
   id: string;
