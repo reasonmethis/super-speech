@@ -1121,13 +1121,17 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
         item.kind === "history" ? "Replay" : "Play",
         () => void playTimelineItem(item),
       ));
-      if (isUpcoming) {
-        menu.append(createMenuAction(
-          "Delete",
-          () => void archiveWaitingItem(item.id),
-          "is-delete",
-        ));
-      }
+    }
+    menu.append(createMenuAction(
+      "Copy text",
+      () => void desktopApi?.copyText(item.text),
+    ));
+    if (isUpcoming) {
+      menu.append(createMenuAction(
+        "Delete",
+        () => void archiveWaitingItem(item.id),
+        "is-delete",
+      ));
     }
     actions.append(menuButton, menu);
     rowControls.push(chunk, actions, accessibleText);

@@ -9,6 +9,7 @@ const api: DesktopApi = {
   moveQueueItem: (id, beforeId) =>
     ipcRenderer.invoke(IPC_CHANNELS.moveQueueItem, id, beforeId),
   archiveQueueItem: (id) => ipcRenderer.invoke(IPC_CHANNELS.archiveQueueItem, id),
+  copyText: (text) => ipcRenderer.invoke(IPC_CHANNELS.copyText, text),
   clearQueue: () => ipcRenderer.invoke(IPC_CHANNELS.clearQueue),
   openSetup: () => ipcRenderer.invoke(IPC_CHANNELS.openSetup),
   minimize: () => ipcRenderer.invoke(IPC_CHANNELS.minimize),

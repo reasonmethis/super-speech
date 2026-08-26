@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  clipboard,
   ipcMain,
   Menu,
   nativeImage,
@@ -593,6 +594,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.archiveQueueItem, (_event, id: string) =>
     archiveQueueItem(id)
   );
+  ipcMain.handle(IPC_CHANNELS.copyText, (_event, text: string) => clipboard.writeText(text));
   ipcMain.handle(IPC_CHANNELS.clearQueue, clearQueue);
   ipcMain.handle(IPC_CHANNELS.openSetup, () => shell.openExternal(SETUP_URL));
   ipcMain.handle(IPC_CHANNELS.minimize, (event) => {

@@ -508,6 +508,7 @@ try {
     "Timeline rows must not render separate disclosure buttons",
   );
   const menuRow = remainingRows.first();
+  const menuRowId = await menuRow.getAttribute("data-item-id");
   const menuRowBounds = await menuRow.boundingBox();
   const dragHandleBounds = await menuRow.locator(".queue-drag-handle").boundingBox();
   const actionAreaBounds = await menuRow.locator(".chunk-actions").boundingBox();
@@ -582,7 +583,7 @@ try {
   );
   assert.deepEqual(
     await visibleActions.locator(".queue-menu-action").allTextContents(),
-    ["Play", "Delete"],
+    ["Play", "Copy text", "Delete"],
   );
   assert.equal(
     await visibleActions.locator(".queue-menu-action").first().evaluate(
@@ -605,6 +606,18 @@ try {
       path: path.join(screenshot.dir, `${screenshot.name}-menu${screenshot.ext}`),
     });
   }
+  await electronApp.evaluate(({ clipboard }) => {
+    globalThis.__superSpeechSmokeClipboard = null;
+    clipboard.writeText = (text) => {
+      globalThis.__superSpeechSmokeClipboard = text;
+    };
+  });
+  await visibleActions.getByRole("menuitem", { name: "Copy text" }).click();
+  assert.equal(
+    await electronApp.evaluate(() => globalThis.__superSpeechSmokeClipboard),
+    status().queue.find((item) => item.id === menuRowId)?.text,
+    "Copy text must write the full waiting chunk",
+  );
   await page.locator("#speech-heading").click();
   assert.equal(await visibleActions.count(), 0, "Clicking outside did not close the action menu");
   if (process.env.SUPER_SPEECH_SCREENSHOT) {
