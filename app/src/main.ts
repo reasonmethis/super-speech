@@ -37,7 +37,7 @@ const demoStatus: RuntimeStatus = {
     {
       id: "015-bm_fable-say",
       filename: "015-bm_fable-say.txt",
-      text: "Click this speech item to play it now. Use its arrow to expand or collapse the complete text.",
+      text: "Click this speech item to expand it, or double-click to play it now.",
       voice: "bm_fable",
     },
     {
@@ -103,7 +103,7 @@ interface QueuePointerDrag {
   height: number;
 }
 
-interface PlayPointerGesture {
+interface ChunkPointerGesture {
   pointerId: number;
   button: HTMLButtonElement;
   startX: number;
@@ -125,11 +125,13 @@ let pendingQueueMutation: PendingQueueMutation | null = null;
 let failedQueueMutationId: string | null = null;
 let queueMutationGeneration = 0;
 let queuePointerDrag: QueuePointerDrag | null = null;
-let playPointerGesture: PlayPointerGesture | null = null;
-const suppressedPlayClicks = new WeakSet<HTMLButtonElement>();
+let chunkPointerGesture: ChunkPointerGesture | null = null;
+const suppressedChunkClicks = new WeakSet<HTMLButtonElement>();
+let openMenuItemId: string | null = null;
 
 const POINTER_GESTURE_THRESHOLD = 5;
 const QUEUE_REORDER_ANIMATION_MS = 140;
+const QUEUE_STATUS_CONFIRMATION_MS = 1_500;
 
 function requiredElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -162,10 +164,10 @@ function timelineAction(item: TimelineItem, pending: boolean, failed: boolean): 
     return "Could not start / Try again";
   }
   if (item.kind === "history") {
-    return "Replay";
+    return "Double-click to replay";
   }
   if (item.kind === "upcoming") {
-    return "Play now";
+    return "Double-click to play";
   }
   return currentStatus.state === "paused" ? "Paused" : "Speaking";
 }
@@ -241,12 +243,8 @@ function reconcileCommands(status: RuntimeStatus): void {
   }
 }
 
-function playActionLabel(item: TimelineItem): string {
-  if (item.kind === "current") {
-    return currentStatus.state === "paused" ? "Currently paused" : "Currently speaking";
-  }
-  const reference = itemReference(item);
-  return item.kind === "history" ? `Replay: ${reference}` : `Play now: ${reference}`;
+function chunkActionLabel(item: TimelineItem, expanded: boolean): string {
+  return `${expanded ? "Collapse" : "Expand"} full text for ${itemReference(item)}`;
 }
 
 function statusCopy(status: RuntimeStatus): {
@@ -276,7 +274,17 @@ function statusCopy(status: RuntimeStatus): {
     };
   }
   if (status.state === "paused") {
-    return { label: "Paused" };
+    return status.current
+      ? {
+          label: "Paused",
+          title: formatVoice(status.current.voice),
+          body: status.current.text,
+        }
+      : {
+          label: "Paused",
+          title: "Ready when you are",
+          body: "Your next voice reply will appear here as soon as it starts.",
+        };
   }
   if (status.state === "playing" && status.current) {
     return {
@@ -309,10 +317,10 @@ function playbackIconMarkup(status: RuntimeStatus): string {
     return '<svg viewBox="0 0 32 32"><path d="M16 7v14m-6-5 6 6 6-6M8 25h16"/></svg>';
   }
   if (status.state === "paused") {
-    return '<svg viewBox="0 0 32 32"><path class="solid" d="m11 8 13 8-13 8Z"/></svg>';
+    return '<svg viewBox="0 0 32 32"><path class="solid" d="m8 5 19 11L8 27Z"/></svg>';
   }
   if (status.state === "playing") {
-    return '<svg viewBox="0 0 32 32"><rect class="solid" x="9" y="8" width="5" height="16" rx="2"/><rect class="solid" x="18" y="8" width="5" height="16" rx="2"/></svg>';
+    return '<svg viewBox="0 0 32 32"><rect class="solid" x="7" y="5" width="7" height="22" rx="2.5"/><rect class="solid" x="18" y="5" width="7" height="22" rx="2.5"/></svg>';
   }
   if (status.state === "stopped") {
     return '<svg viewBox="0 0 32 32"><path d="M16 8v9m0 6v1"/></svg>';
@@ -323,7 +331,6 @@ function playbackIconMarkup(status: RuntimeStatus): string {
 function render(status: RuntimeStatus): void {
   reconcileCommands(status);
   currentStatus = status;
-  const paused = status.state === "paused";
   const copy = statusCopy(status);
   const action = playbackAction(status);
   const showPlaybackCopy = copy.title !== undefined;
@@ -347,7 +354,7 @@ function render(status: RuntimeStatus): void {
   playbackButton.setAttribute("aria-busy", String(commandPending || status.state === "loading"));
   playbackIcon.innerHTML = playbackIconMarkup(status);
 
-  const current = paused ? null : status.current;
+  const current = status.current;
   metadataRow.classList.toggle("is-hidden", !current);
   if (current) {
     voiceLabel.textContent = formatVoice(current.voice);
@@ -481,7 +488,7 @@ function releaseQueuePointer(pointerId: number): void {
   }
 }
 
-function beginPlayPointerGesture(
+function beginChunkPointerGesture(
   event: PointerEvent,
   button: HTMLButtonElement,
 ): void {
@@ -489,11 +496,11 @@ function beginPlayPointerGesture(
     event.button !== 0 ||
     !event.isPrimary ||
     button.disabled ||
-    playPointerGesture
+    chunkPointerGesture
   ) {
     return;
   }
-  playPointerGesture = {
+  chunkPointerGesture = {
     pointerId: event.pointerId,
     button,
     startX: event.clientX,
@@ -502,13 +509,13 @@ function beginPlayPointerGesture(
   };
 }
 
-function suppressNextPlayClick(button: HTMLButtonElement): void {
-  suppressedPlayClicks.add(button);
-  window.setTimeout(() => suppressedPlayClicks.delete(button), 0);
+function suppressNextChunkClick(button: HTMLButtonElement): void {
+  suppressedChunkClicks.add(button);
+  window.setTimeout(() => suppressedChunkClicks.delete(button), 0);
 }
 
-function recordPlayPointerMovement(
-  gesture: PlayPointerGesture,
+function recordChunkPointerMovement(
+  gesture: ChunkPointerGesture,
   event: PointerEvent,
 ): void {
   gesture.moved ||= pointerMovedBeyondThreshold(
@@ -520,37 +527,37 @@ function recordPlayPointerMovement(
   );
 }
 
-function updatePlayPointerGesture(event: PointerEvent): void {
-  const gesture = playPointerGesture;
+function updateChunkPointerGesture(event: PointerEvent): void {
+  const gesture = chunkPointerGesture;
   if (!gesture || event.pointerId !== gesture.pointerId) {
     return;
   }
-  recordPlayPointerMovement(gesture, event);
+  recordChunkPointerMovement(gesture, event);
   if ((event.buttons & 1) === 0) {
     if (gesture.moved) {
-      suppressNextPlayClick(gesture.button);
+      suppressNextChunkClick(gesture.button);
     }
-    playPointerGesture = null;
+    chunkPointerGesture = null;
   }
 }
 
-function finishPlayPointerGesture(event: PointerEvent): void {
-  const gesture = playPointerGesture;
+function finishChunkPointerGesture(event: PointerEvent): void {
+  const gesture = chunkPointerGesture;
   if (!gesture || event.pointerId !== gesture.pointerId) {
     return;
   }
-  recordPlayPointerMovement(gesture, event);
+  recordChunkPointerMovement(gesture, event);
   if (gesture.moved) {
-    suppressNextPlayClick(gesture.button);
+    suppressNextChunkClick(gesture.button);
   }
-  playPointerGesture = null;
+  chunkPointerGesture = null;
 }
 
-function cancelPlayPointerGesture(pointerId?: number): void {
-  if (pointerId !== undefined && playPointerGesture?.pointerId !== pointerId) {
+function cancelChunkPointerGesture(pointerId?: number): void {
+  if (pointerId !== undefined && chunkPointerGesture?.pointerId !== pointerId) {
     return;
   }
-  playPointerGesture = null;
+  chunkPointerGesture = null;
 }
 
 function applyQueueVisualOrder(visualOrder: readonly string[]): void {
@@ -796,6 +803,105 @@ function timelineRenderKey(items: TimelineItem[], historyTotal: number): string 
   ]);
 }
 
+function reconcileTimelineNodes(items: TimelineItem[]): boolean {
+  const rows = [...queueList.querySelectorAll<HTMLElement>(".queue-item")];
+  const rowsById = new Map(rows.map((row) => [row.dataset.itemId, row]));
+  const historyDivider = queueList.querySelector<HTMLElement>(
+    ".timeline-divider.history-drop-target",
+  );
+  const needsHistoryDivider = items.some(
+    (item) => item.kind === "upcoming" || item.kind === "history",
+  );
+  if (
+    rows.length !== items.length ||
+    rowsById.size !== rows.length ||
+    Boolean(historyDivider) !== needsHistoryDivider ||
+    items.some((item) => {
+      const row = rowsById.get(item.id);
+      return !row ||
+        !row.classList.contains(`is-${item.kind}`) ||
+        row.dataset.voice !== item.voice ||
+        row.querySelector(".queue-copy p")?.textContent !== item.text;
+    })
+  ) {
+    return false;
+  }
+
+  let insertedHistoryDivider = false;
+  for (const item of items) {
+    if (item.kind === "history" && !insertedHistoryDivider) {
+      queueList.append(historyDivider!);
+      insertedHistoryDivider = true;
+    }
+    queueList.append(rowsById.get(item.id)!);
+  }
+  if (historyDivider && !insertedHistoryDivider) {
+    queueList.append(historyDivider);
+  }
+  return true;
+}
+
+function setOpenActionMenu(itemId: string | null): void {
+  if (itemId) {
+    const target = queueList.querySelector<HTMLElement>(`[data-item-id="${itemId}"]`);
+    const listBounds = queueList.getBoundingClientRect();
+    const targetBounds = target?.getBoundingClientRect();
+    if (
+      !targetBounds ||
+      targetBounds.bottom <= listBounds.top ||
+      targetBounds.top >= listBounds.bottom
+    ) {
+      itemId = null;
+    }
+  }
+  openMenuItemId = itemId;
+  for (const row of queueList.querySelectorAll<HTMLElement>(".queue-item")) {
+    const open = row.dataset.itemId === itemId;
+    const button = row.querySelector<HTMLButtonElement>(".queue-menu-button");
+    const menu = row.querySelector<HTMLElement>(".queue-action-menu");
+    button?.setAttribute("aria-expanded", String(open));
+    if (!menu) {
+      continue;
+    }
+    menu.hidden = !open;
+    if (open) {
+      const buttonBounds = button?.getBoundingClientRect();
+      const menuBounds = menu.getBoundingClientRect();
+      if (!buttonBounds) {
+        continue;
+      }
+      const edgeGap = 8;
+      const left = Math.min(
+        Math.max(edgeGap, buttonBounds.right - menuBounds.width),
+        window.innerWidth - menuBounds.width - edgeGap,
+      );
+      const below = buttonBounds.bottom + 4;
+      const top = below + menuBounds.height <= window.innerHeight - edgeGap
+        ? below
+        : buttonBounds.top - menuBounds.height - 4;
+      menu.style.left = `${left}px`;
+      menu.style.top = `${Math.max(edgeGap, top)}px`;
+    }
+  }
+}
+
+function createMenuAction(
+  label: string,
+  action: () => void,
+  className = "",
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.className = `queue-menu-action ${className}`.trim();
+  button.type = "button";
+  button.role = "menuitem";
+  button.textContent = label;
+  button.addEventListener("click", () => {
+    setOpenActionMenu(null);
+    action();
+  });
+  return button;
+}
+
 function renderTimeline(items: TimelineItem[], historyTotal: number): void {
   if (!items.some((item) => item.id === expandedItemId)) {
     expandedItemId = null;
@@ -812,12 +918,20 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
   }
   // Preserve row nodes across polling so hover, focus, expansion, and in-progress clicks survive
   const timelineKey = timelineRenderKey(items, historyTotal);
-  if (timelineKey === renderedTimelineKey) {
+  if (timelineKey === renderedTimelineKey || reconcileTimelineNodes(items)) {
+    renderedTimelineKey = timelineKey;
+    const historyCount = queueList.querySelector<HTMLElement>(
+      ".timeline-divider.history-drop-target span:last-child",
+    );
+    if (historyCount) {
+      historyCount.textContent = `${historyTotal.toLocaleString()} total`;
+    }
     updateTimelineRows(items);
     updateTimelineFade();
     return;
   }
   cancelQueuePointerDrag();
+  setOpenActionMenu(null);
   renderedTimelineKey = timelineKey;
 
   const previousScrollTop = queueList.scrollTop;
@@ -827,9 +941,8 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
   const focusedItemId = focusedControl?.dataset.itemId;
   const focusedControlClass = [
     "queue-drag-handle",
-    "queue-play",
-    "queue-remove",
-    "queue-disclosure",
+    "queue-chunk",
+    "queue-menu-button",
   ].find((className) => document.activeElement?.classList.contains(className));
   queueList.replaceChildren();
   if (items.length === 0) {
@@ -858,9 +971,11 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     const row = document.createElement("div");
     row.className = "queue-item";
     row.dataset.itemId = item.id;
+    row.dataset.voice = item.voice;
     const isCurrent = item.kind === "current";
     const isUpcoming = item.kind === "upcoming";
     const isExpanded = item.id === expandedItemId;
+    const reference = itemReference(item);
     row.classList.add(`is-${item.kind}`);
     if (isCurrent) {
       row.setAttribute("aria-current", "true");
@@ -874,7 +989,7 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
       dragHandle.title = "Drag to reorder";
       dragHandle.setAttribute(
         "aria-label",
-        `Reorder ${itemReference(item)}. Drag, or use the arrow keys`,
+        `Reorder ${reference}. Drag, or use the arrow keys`,
       );
       dragHandle.innerHTML = '<span aria-hidden="true"></span>';
       dragHandle.addEventListener("keydown", (event) => {
@@ -883,9 +998,9 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
       rowControls.push(dragHandle);
     }
 
-    const play = document.createElement("button");
-    play.className = "queue-play";
-    play.type = "button";
+    const chunk = document.createElement("button");
+    chunk.className = "queue-chunk";
+    chunk.type = "button";
 
     const copy = document.createElement("div");
     copy.className = "queue-copy";
@@ -894,53 +1009,77 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     const meta = document.createElement("span");
     meta.className = "queue-meta";
     copy.append(text, meta);
-    play.append(copy);
+    chunk.append(copy);
 
-    const disclosure = document.createElement("button");
-    disclosure.className = "queue-disclosure";
-    disclosure.type = "button";
-    disclosure.setAttribute("aria-expanded", String(isExpanded));
     const accessibleText = document.createElement("div");
     accessibleText.id = `speech-full-${item.id}`;
     accessibleText.className = "sr-only queue-full-text";
     accessibleText.hidden = !isExpanded;
     accessibleText.setAttribute("role", "region");
-    accessibleText.setAttribute("aria-label", `Full text for ${itemReference(item)}`);
+    accessibleText.setAttribute("aria-label", `Full text for ${reference}`);
     accessibleText.textContent = item.text;
-    disclosure.setAttribute("aria-controls", accessibleText.id);
-    disclosure.dataset.itemReference = itemReference(item);
-    disclosure.setAttribute(
-      "aria-label",
-      `${isExpanded ? "Collapse" : "Expand"} full text for ${itemReference(item)}`,
-    );
-    disclosure.innerHTML = '<span aria-hidden="true"></span>';
-    disclosure.addEventListener("click", () => {
+    chunk.setAttribute("aria-controls", accessibleText.id);
+    chunk.setAttribute("aria-expanded", String(isExpanded));
+    chunk.setAttribute("aria-label", chunkActionLabel(item, isExpanded));
+    chunk.addEventListener("click", (event) => {
+      if (suppressedChunkClicks.delete(chunk)) {
+        event.preventDefault();
+        return;
+      }
+      if (event.detail > 1) {
+        return;
+      }
       const expanding = expandedItemId !== item.id;
       setExpandedItem(expanding ? item.id : null);
       if (expanding) {
         row.scrollIntoView({ block: "nearest" });
       }
     });
-
-    play.addEventListener("click", (event) => {
-      if (suppressedPlayClicks.delete(play)) {
-        event.preventDefault();
-        return;
-      }
+    chunk.addEventListener("dblclick", (event) => {
+      event.preventDefault();
+      setExpandedItem(item.id);
       void playTimelineItem(item);
     });
-    rowControls.push(play);
-    if (isUpcoming) {
-      const remove = document.createElement("button");
-      remove.className = "queue-remove";
-      remove.type = "button";
-      remove.title = "Move to History";
-      remove.setAttribute("aria-label", `Move ${itemReference(item)} to History`);
-      remove.innerHTML = '<span aria-hidden="true"></span>';
-      remove.addEventListener("click", () => void archiveWaitingItem(item.id));
-      rowControls.push(remove);
+
+    const actions = document.createElement("div");
+    actions.className = "chunk-actions";
+    const menuButton = document.createElement("button");
+    menuButton.className = "queue-menu-button";
+    menuButton.type = "button";
+    menuButton.setAttribute("aria-haspopup", "menu");
+    menuButton.setAttribute("aria-expanded", "false");
+    menuButton.setAttribute("aria-label", `Actions for ${reference}`);
+    menuButton.innerHTML = '<span aria-hidden="true"></span>';
+    const menu = document.createElement("div");
+    menu.className = "queue-action-menu";
+    menu.id = `speech-actions-${item.id}`;
+    menu.role = "menu";
+    menu.hidden = true;
+    menuButton.setAttribute("aria-controls", menu.id);
+    menuButton.addEventListener("click", () => {
+      setOpenActionMenu(openMenuItemId === item.id ? null : item.id);
+    });
+    if (isCurrent) {
+      menu.append(createMenuAction(
+        currentStatus.state === "paused" ? "Resume" : "Pause",
+        () => void runPlaybackAction(),
+        "is-playback",
+      ));
+    } else {
+      menu.append(createMenuAction(
+        item.kind === "history" ? "Replay" : "Play",
+        () => void playTimelineItem(item),
+      ));
+      if (isUpcoming) {
+        menu.append(createMenuAction(
+          "Delete",
+          () => void archiveWaitingItem(item.id),
+          "is-delete",
+        ));
+      }
     }
-    rowControls.push(disclosure, accessibleText);
+    actions.append(menuButton, menu);
+    rowControls.push(chunk, actions, accessibleText);
     row.classList.toggle("is-expanded", isExpanded);
     row.append(...rowControls);
     queueList.append(row);
@@ -955,8 +1094,8 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     const row = queueList.querySelector<HTMLElement>(`[data-item-id="${focusedItemId}"]`);
     const preferred = focusedControlClass
       ? row?.querySelector<HTMLButtonElement>(`.${focusedControlClass}`)
-      : row?.querySelector<HTMLButtonElement>(".queue-play");
-    const fallback = row?.querySelector<HTMLButtonElement>(".queue-disclosure");
+      : row?.querySelector<HTMLButtonElement>(".queue-chunk");
+    const fallback = row?.querySelector<HTMLButtonElement>(".queue-menu-button");
     (preferred?.disabled ? fallback : preferred)?.focus({ preventScroll: true });
   }
 }
@@ -980,17 +1119,14 @@ function updateTimelineRows(items: TimelineItem[]): void {
       "is-error",
       failed || failedQueueMutationId === item.id,
     );
-    const play = row.querySelector<HTMLButtonElement>(".queue-play");
-    if (play) {
-      play.disabled =
-        item.kind === "current" || commandInFlight || queueCommandInFlight;
-      play.setAttribute("aria-disabled", String(play.disabled));
-      play.setAttribute("aria-busy", String(pending && commandInFlight));
-      play.setAttribute(
+    const chunk = row.querySelector<HTMLButtonElement>(".queue-chunk");
+    if (chunk) {
+      chunk.setAttribute("aria-busy", String(pending && commandInFlight));
+      chunk.setAttribute(
         "aria-label",
         selected
-          ? `Selected and up next: ${reference}. Activate to select again`
-          : playActionLabel(item),
+          ? `Selected and up next: ${reference}. ${chunkActionLabel(item, row.classList.contains("is-expanded"))}`
+          : chunkActionLabel(item, row.classList.contains("is-expanded")),
       );
     }
     const dragHandle = row.querySelector<HTMLButtonElement>(".queue-drag-handle");
@@ -1001,11 +1137,11 @@ function updateTimelineRows(items: TimelineItem[]): void {
         `Reorder ${reference}. Drag, or use the arrow keys`,
       );
     }
-    const remove = row.querySelector<HTMLButtonElement>(".queue-remove");
-    if (remove) {
-      remove.disabled = queueCommandInFlight || clearPending;
-      remove.setAttribute("aria-label", `Move ${reference} to History`);
-      remove.setAttribute(
+    const menuButton = row.querySelector<HTMLButtonElement>(".queue-menu-button");
+    if (menuButton) {
+      menuButton.disabled = queueCommandInFlight || clearPending;
+      menuButton.setAttribute("aria-label", `Actions for ${reference}`);
+      menuButton.setAttribute(
         "aria-busy",
         String(
           pendingQueueMutation?.action === "archive" &&
@@ -1013,18 +1149,19 @@ function updateTimelineRows(items: TimelineItem[]): void {
         ),
       );
     }
-    const disclosure = row.querySelector<HTMLButtonElement>(".queue-disclosure");
-    if (disclosure) {
-      disclosure.dataset.itemReference = reference;
-      disclosure.setAttribute(
-        "aria-label",
-        `${row.classList.contains("is-expanded") ? "Collapse" : "Expand"} full text for ${reference}`,
-      );
-      row.querySelector<HTMLElement>(".queue-full-text")?.setAttribute(
-        "aria-label",
-        `Full text for ${reference}`,
-      );
+    const playbackMenuAction = row.querySelector<HTMLButtonElement>(
+      ".queue-menu-action.is-playback",
+    );
+    if (playbackMenuAction) {
+      playbackMenuAction.textContent = currentStatus.state === "paused" ? "Resume" : "Pause";
     }
+    for (const action of row.querySelectorAll<HTMLButtonElement>(".queue-menu-action")) {
+      action.disabled = queueCommandInFlight || clearPending;
+    }
+    row.querySelector<HTMLElement>(".queue-full-text")?.setAttribute(
+      "aria-label",
+      `Full text for ${reference}`,
+    );
     const meta = row.querySelector<HTMLElement>(".queue-meta");
     if (meta) {
       meta.textContent = `${formatVoice(item.voice)}  /  ${timelineAction(item, pending, failed)}`;
@@ -1039,15 +1176,16 @@ function updateTimelineFade(): void {
 
 function setExpandedItem(id: string | null): void {
   expandedItemId = id;
+  const itemById = new Map(timelineItems(currentStatus).map((item) => [item.id, item]));
   for (const row of queueList.querySelectorAll<HTMLElement>(".queue-item")) {
     const expanded = row.dataset.itemId === id;
     row.classList.toggle("is-expanded", expanded);
-    const disclosure = row.querySelector<HTMLButtonElement>(".queue-disclosure");
-    disclosure?.setAttribute("aria-expanded", String(expanded));
-    disclosure?.setAttribute(
-      "aria-label",
-      `${expanded ? "Collapse" : "Expand"} full text for ${disclosure.dataset.itemReference}`,
-    );
+    const chunk = row.querySelector<HTMLButtonElement>(".queue-chunk");
+    const item = itemById.get(row.dataset.itemId ?? "");
+    chunk?.setAttribute("aria-expanded", String(expanded));
+    if (chunk && item) {
+      chunk.setAttribute("aria-label", chunkActionLabel(item, expanded));
+    }
     const accessibleText = row.querySelector<HTMLElement>(".queue-full-text");
     if (accessibleText) {
       accessibleText.hidden = !expanded;
@@ -1059,6 +1197,8 @@ function setExpandedItem(id: string | null): void {
 async function playTimelineItem(item: TimelineItem): Promise<void> {
   if (
     item.kind === "current" ||
+    commandPending ||
+    clearPending ||
     pendingQueueMutation !== null ||
     (pendingSelection !== null && pendingSelection.acceptedAt === null)
   ) {
@@ -1114,6 +1254,27 @@ async function playTimelineItem(item: TimelineItem): Promise<void> {
   }
 }
 
+async function waitForQueueStatus(
+  matches: (status: RuntimeStatus) => boolean,
+): Promise<RuntimeStatus | null> {
+  if (!desktopApi) {
+    return null;
+  }
+  const deadline = performance.now() + QUEUE_STATUS_CONFIRMATION_MS;
+  while (performance.now() < deadline) {
+    try {
+      const status = await desktopApi.getStatus();
+      if (matches(status)) {
+        return status;
+      }
+    } catch {
+      // The regular status poll reports persistent read failures
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 25));
+  }
+  return null;
+}
+
 async function moveWaitingItem(id: string, beforeId: string | null): Promise<void> {
   if (commandPending || pendingQueueMutation || clearPending) {
     return;
@@ -1129,23 +1290,19 @@ async function moveWaitingItem(id: string, beforeId: string | null): Promise<voi
   failedQueueMutationId = null;
   commandStatus.textContent = "";
   currentStatus = { ...currentStatus, queue: reordered };
-  const expectedVisualOrder = [...reordered].reverse().map((item) => item.id);
-  const projectedVisualOrder = [
-    ...queueList.querySelectorAll<HTMLElement>(".queue-item.is-upcoming"),
-  ].map((row) => row.dataset.itemId ?? "");
-  if (
-    expectedVisualOrder.length === projectedVisualOrder.length &&
-    expectedVisualOrder.every((itemId, index) => itemId === projectedVisualOrder[index])
-  ) {
-    renderedTimelineKey = timelineRenderKey(
-      timelineItems(currentStatus),
-      currentStatus.history_count,
-    );
-  }
   render(currentStatus);
   try {
     if (desktopApi) {
       await desktopApi.moveQueueItem(id, beforeId);
+      const expectedIds = reordered.map((item) => item.id);
+      const confirmed = await waitForQueueStatus((status) =>
+        status.queue.map((item) => item.id).every(
+          (itemId, index) => itemId === expectedIds[index],
+        ) && status.queue.length === expectedIds.length
+      );
+      if (confirmed) {
+        currentStatus = confirmed;
+      }
     } else {
       await new Promise((resolve) => window.setTimeout(resolve, 250));
     }
@@ -1189,6 +1346,13 @@ async function archiveWaitingItem(id: string): Promise<void> {
   try {
     if (desktopApi) {
       await desktopApi.archiveQueueItem(id);
+      const confirmed = await waitForQueueStatus((status) =>
+        !status.queue.some((item) => item.id === id) &&
+        status.history.some((item) => item.id === id)
+      );
+      if (confirmed) {
+        currentStatus = confirmed;
+      }
     } else {
       await new Promise((resolve) => window.setTimeout(resolve, 250));
     }
@@ -1228,7 +1392,7 @@ async function refreshStatus(): Promise<void> {
   }
 }
 
-playbackButton.addEventListener("click", async () => {
+async function runPlaybackAction(): Promise<void> {
   const action = playbackAction(currentStatus);
   if (commandPending || pendingQueueMutation || queuePointerDrag || action === "ready") {
     return;
@@ -1259,7 +1423,9 @@ playbackButton.addEventListener("click", async () => {
     commandPending = false;
     render(currentStatus);
   }
-});
+}
+
+playbackButton.addEventListener("click", () => void runPlaybackAction());
 
 clearQueueButton.addEventListener("click", async () => {
   if (
@@ -1318,7 +1484,8 @@ requiredElement<HTMLButtonElement>("hide-button").addEventListener("click", () =
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     cancelQueuePointerDrag();
-    cancelPlayPointerGesture();
+    cancelChunkPointerGesture();
+    setOpenActionMenu(null);
   } else {
     void refreshStatus();
   }
@@ -1336,21 +1503,26 @@ queueList.addEventListener("pointerdown", (event) => {
     beginQueuePointerDrag(event, id, row, handle);
     return;
   }
-  const play = target.closest<HTMLButtonElement>(".queue-play");
-  if (play && queueList.contains(play)) {
-    beginPlayPointerGesture(event, play);
+  const chunk = target.closest<HTMLButtonElement>(".queue-chunk");
+  if (chunk && queueList.contains(chunk)) {
+    beginChunkPointerGesture(event, chunk);
   }
 });
-queueList.addEventListener("scroll", updateTimelineFade, { passive: true });
+queueList.addEventListener("scroll", () => {
+  if (openMenuItemId) {
+    setOpenActionMenu(openMenuItemId);
+  }
+  updateTimelineFade();
+}, { passive: true });
 window.addEventListener("pointermove", updateQueuePointerDrag, true);
-window.addEventListener("pointermove", updatePlayPointerGesture, true);
+window.addEventListener("pointermove", updateChunkPointerGesture, true);
 window.addEventListener("pointerup", (event) => {
   finishQueuePointerDrag(event, true);
-  finishPlayPointerGesture(event);
+  finishChunkPointerGesture(event);
 }, true);
 window.addEventListener("pointercancel", (event) => {
   finishQueuePointerDrag(event, false);
-  cancelPlayPointerGesture(event.pointerId);
+  cancelChunkPointerGesture(event.pointerId);
 }, true);
 queueList.addEventListener("lostpointercapture", (event) => {
   if (queuePointerDrag?.state.pointerId === event.pointerId) {
@@ -1360,11 +1532,28 @@ queueList.addEventListener("lostpointercapture", (event) => {
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     cancelQueuePointerDrag();
+    const menuButton = openMenuItemId
+      ? queueList.querySelector<HTMLButtonElement>(
+          `[data-item-id="${openMenuItemId}"] .queue-menu-button`,
+        )
+      : null;
+    setOpenActionMenu(null);
+    menuButton?.focus({ preventScroll: true });
   }
 });
+document.addEventListener("pointerdown", (event) => {
+  if (
+    openMenuItemId &&
+    event.target instanceof Element &&
+    !event.target.closest(".chunk-actions")
+  ) {
+    setOpenActionMenu(null);
+  }
+}, true);
 window.addEventListener("blur", () => {
   cancelQueuePointerDrag();
-  cancelPlayPointerGesture();
+  cancelChunkPointerGesture();
+  setOpenActionMenu(null);
 });
 
 render(currentStatus);

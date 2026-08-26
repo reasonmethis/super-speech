@@ -52,10 +52,12 @@ Run the Electron mouse test after changing queue interactions:
 npm run test:drag
 ```
 
-It uses real pointer input to reorder and archive cards, then checks cancellation
-when the pointer loses its primary button, the window loses focus, or polling
-replaces the timeline. The test runs against a temporary runtime with silent
-audio and verifies the result in both the renderer and the engine queue.
+It uses real pointer input to reorder and archive cards, verifies single-click
+expansion, double-click playback, row action menus, and stable playback-control
+geometry, then checks cancellation when the pointer loses its primary button,
+the window loses focus, or polling replaces the timeline. The test runs against
+a temporary runtime with silent audio and verifies the result in both the
+renderer and the engine queue.
 
 ## Engine verification
 

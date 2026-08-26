@@ -74,6 +74,7 @@ async function beginDrag(page, handle, deltaY = -65) {
     () => handle.isEnabled(),
     "Drag handle did not become enabled",
   );
+  await handle.scrollIntoViewIfNeeded();
   const bounds = await handle.boundingBox();
   assert(bounds, "Drag handle must be visible");
   const from = {
@@ -132,10 +133,32 @@ async function layoutBounds(locator) {
   });
 }
 
+async function playbackSnapshot(page) {
+  return page.evaluate(() => {
+    const bounds = (selector) => {
+      const rect = document.querySelector(selector)?.getBoundingClientRect();
+      if (!rect) {
+        throw new Error(`Missing ${selector}`);
+      }
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    };
+    return {
+      state: document.body.dataset.state,
+      accent: getComputedStyle(document.body).getPropertyValue("--accent").trim(),
+      button: bounds("#playback-button"),
+      ring: bounds(".ambient-ring"),
+      icon: bounds("#playback-icon svg"),
+      title: document.querySelector("#playback-title")?.textContent,
+      text: document.querySelector("#current-text")?.textContent,
+      voice: document.querySelector("#voice-label")?.textContent,
+    };
+  });
+}
+
 try {
   runEngine("pause");
-  runEngine("speak", "Drag test one");
-  runEngine("speak", "Drag test two");
+  runEngine("speak", "Drag test one has enough words to keep silent playback active while the interface checks that playing and paused layouts stay perfectly aligned.");
+  runEngine("speak", "Drag test two also has enough words to keep the silent replay observable during the double click interaction test.");
   runEngine("speak", "Drag test three");
   await waitFor(
     () => status().current && status().queue_count === 2,
@@ -155,6 +178,50 @@ try {
   await waitFor(
     async () => await page.locator(".queue-item.is-upcoming").count() === 2,
     "The Electron window did not render two waiting items",
+  );
+  await waitFor(
+    async () => await page.locator("body").getAttribute("data-state") === "paused",
+    "The Electron window did not render the paused fixture",
+  );
+  const pausedPlayback = await playbackSnapshot(page);
+  assert(pausedPlayback.title && pausedPlayback.text && pausedPlayback.voice);
+  assert.equal(pausedPlayback.accent, "#4153be");
+  assert(pausedPlayback.icon.width >= 47, "The paused symbol must fill more of the main button");
+  await page.evaluate(() => window.superSpeech.setPaused(false));
+  await waitFor(
+    () => status().state === "playing",
+    "The silent fixture did not resume",
+  );
+  await waitFor(
+    async () => await page.locator("body").getAttribute("data-state") === "playing",
+    "The Electron window did not render resumed playback",
+  );
+  const playingPlayback = await playbackSnapshot(page);
+  assert.equal(playingPlayback.accent, "#009a91");
+  assert(playingPlayback.icon.width >= 47, "The playing symbol must fill more of the main button");
+  assert.equal(playingPlayback.title, pausedPlayback.title);
+  assert.equal(playingPlayback.text, pausedPlayback.text);
+  assert.equal(playingPlayback.voice, pausedPlayback.voice);
+  for (const key of ["x", "y", "width", "height"]) {
+    assert(
+      Math.abs(playingPlayback.button[key] - pausedPlayback.button[key]) < 0.5,
+      `The main button changed ${key} between playing and paused`,
+    );
+  }
+  const center = (bounds) => ({
+    x: bounds.x + bounds.width / 2,
+    y: bounds.y + bounds.height / 2,
+  });
+  assert.deepEqual(center(playingPlayback.button), center(playingPlayback.ring));
+  assert.deepEqual(center(pausedPlayback.button), center(pausedPlayback.ring));
+  await page.evaluate(() => window.superSpeech.setPaused(true));
+  await waitFor(
+    () => status().state === "paused",
+    "The silent fixture did not pause again",
+  );
+  await waitFor(
+    async () => await page.locator("body").getAttribute("data-state") === "paused",
+    "The Electron window did not return to the paused layout",
   );
   await page.evaluate(() => {
     const animate = Element.prototype.animate;
@@ -223,8 +290,8 @@ try {
   const reorderedReferences = await page.locator(`[data-item-id="${secondId}"]`).evaluate(
     (row) => [
       row.querySelector(".queue-drag-handle")?.getAttribute("aria-label"),
-      row.querySelector(".queue-remove")?.getAttribute("aria-label"),
-      row.querySelector(".queue-disclosure")?.getAttribute("aria-label"),
+      row.querySelector(".queue-chunk")?.getAttribute("aria-label"),
+      row.querySelector(".queue-menu-button")?.getAttribute("aria-label"),
       row.querySelector(".queue-full-text")?.getAttribute("aria-label"),
     ],
   );
@@ -435,16 +502,77 @@ try {
     ),
     "The footer did not show app and engine versions",
   );
+  assert.equal(
+    await page.locator(".queue-disclosure").count(),
+    0,
+    "Timeline rows must not render separate disclosure buttons",
+  );
+  const menuRow = remainingRows.first();
+  const menuRowBounds = await menuRow.boundingBox();
+  const menuButton = menuRow.locator(".queue-menu-button");
+  const menuButtonBounds = await menuButton.boundingBox();
+  assert(menuRowBounds && menuButtonBounds, "The row action button must be visible");
+  assert(
+    Math.abs(
+      menuRowBounds.y + menuRowBounds.height / 2 -
+      (menuButtonBounds.y + menuButtonBounds.height / 2)
+    ) < 0.5,
+    "The row action button must be vertically centered",
+  );
+  await menuButton.click();
+  const visibleActions = menuRow.locator(".queue-action-menu:not([hidden])");
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  assert.equal(await visibleActions.count(), 1, "The row action menu did not open");
+  assert(
+    await visibleActions.evaluate((menu) => {
+      const bounds = menu.getBoundingClientRect();
+      const center = document.elementFromPoint(
+        bounds.left + bounds.width / 2,
+        bounds.top + bounds.height / 2,
+      );
+      return bounds.left >= 0 &&
+        bounds.top >= 0 &&
+        bounds.right <= window.innerWidth &&
+        bounds.bottom <= window.innerHeight &&
+        center !== null &&
+        menu.contains(center);
+    }),
+    "The row action menu was clipped or covered",
+  );
+  assert.deepEqual(
+    await visibleActions.locator(".queue-menu-action").allTextContents(),
+    ["Play", "Delete"],
+  );
+  if (process.env.SUPER_SPEECH_SCREENSHOT) {
+    const screenshot = path.parse(process.env.SUPER_SPEECH_SCREENSHOT);
+    await page.screenshot({
+      path: path.join(screenshot.dir, `${screenshot.name}-menu${screenshot.ext}`),
+    });
+  }
+  await page.locator("#speech-heading").click();
+  assert.equal(await visibleActions.count(), 0, "Clicking outside did not close the action menu");
   if (process.env.SUPER_SPEECH_SCREENSHOT) {
     await page.screenshot({ path: process.env.SUPER_SPEECH_SCREENSHOT });
   }
 
   const playbackBeforeHistoryGesture = status();
   const historyPlay = page.locator(
-    `[data-item-id="${secondId}"].is-history .queue-play`,
+    `[data-item-id="${secondId}"].is-history .queue-chunk`,
   );
   const historyBounds = await historyPlay.boundingBox();
   assert(historyBounds, "Archived card must be visible for the gesture test");
+  await historyPlay.click();
+  assert.equal(
+    await page.locator(`[data-item-id="${secondId}"].is-expanded`).count(),
+    1,
+    "A single chunk click did not expand its text",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  assert.equal(
+    status().current?.id,
+    playbackBeforeHistoryGesture.current?.id,
+    "A single chunk click started playback",
+  );
   const historyPoint = {
     x: historyBounds.x + historyBounds.width / 2,
     y: historyBounds.y + historyBounds.height / 2,
@@ -512,6 +640,39 @@ try {
     orderBeforeBlur,
     "Window blur changed the queue order",
   );
+
+  const deleteRow = remainingRows.first();
+  const deletedId = await deleteRow.getAttribute("data-item-id");
+  assert(deletedId, "A waiting item must be available for the Delete action");
+  await deleteRow.locator(".queue-menu-button").click();
+  await deleteRow.getByRole("menuitem", { name: "Delete" }).click();
+  await waitFor(
+    async () => await page.locator(`[data-item-id="${deletedId}"].is-history`).count() === 1,
+    "The Delete menu action did not remove the item from the waiting queue",
+  );
+  await waitFor(
+    () => !status().queue.some(({ id }) => id === deletedId),
+    "The engine did not persist the Delete menu action",
+  );
+
+  const historyCountBeforeReplay = status().history_count;
+  await historyPlay.dblclick();
+  await waitFor(
+    () => status().current?.id === secondId,
+    "Double-clicking a History chunk did not start it",
+    30_000,
+  );
+  assert.equal(
+    await page.locator(`[data-item-id="${secondId}"].is-expanded`).count(),
+    1,
+    "Double-clicking a chunk did not leave its full text expanded",
+  );
+  assert.equal(
+    status().history_count,
+    historyCountBeforeReplay,
+    "Replaying a History chunk added a duplicate archive row",
+  );
+  runEngine("pause");
 
   console.log("Super Speech pointer drag and cancellation smoke test passed");
 } finally {

@@ -28,19 +28,20 @@
       </header>
 
       <section class="playback-card">
-        <div class="ambient-ring" aria-hidden="true">
-          <div class="ring ring-one"></div>
-          <div class="ring ring-two"></div>
-        </div>
-
         <div class="status-line" role="status" aria-live="polite">
           <span id="status-dot" class="status-dot"></span>
           <span id="status-label">Connecting</span>
         </div>
 
-        <button id="playback-button" class="playback-button" aria-label="Preparing speech" disabled>
-          <span id="playback-icon" class="playback-icon" aria-hidden="true"></span>
-        </button>
+        <div class="playback-control">
+          <div class="ambient-ring" aria-hidden="true">
+            <div class="ring ring-one"></div>
+            <div class="ring ring-two"></div>
+          </div>
+          <button id="playback-button" class="playback-button" aria-label="Preparing speech" disabled>
+            <span id="playback-icon" class="playback-icon" aria-hidden="true"></span>
+          </button>
+        </div>
 
         <div id="playback-copy" class="playback-copy">
           <h2 id="playback-title">Getting ready</h2>

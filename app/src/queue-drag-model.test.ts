@@ -35,6 +35,8 @@ test("maps dragged-card centers to the first, middle, and last visual slots", ()
   ];
 
   assert.equal(queueDropBeforeId("middle", rows, -10), "newest");
+  assert.equal(queueDropBeforeId("middle", rows, 20.4), "newest");
+  assert.equal(queueDropBeforeId("middle", rows, 20.6), "oldest");
   assert.equal(queueDropBeforeId("middle", rows, 70), "oldest");
   assert.equal(queueDropBeforeId("middle", rows, 114), "oldest");
   assert.equal(queueDropBeforeId("middle", rows, 200), null);

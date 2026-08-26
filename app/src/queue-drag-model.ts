@@ -160,7 +160,7 @@ export function queueDropBeforeId(
   draggedCenterY: number,
 ): string | null {
   return rows.find(
-    (row) => row.id !== sourceId && draggedCenterY <= row.top + row.height / 2,
+    (row) => row.id !== sourceId && draggedCenterY <= row.top + row.height / 2 + 0.5,
   )?.id ?? null;
 }
 
