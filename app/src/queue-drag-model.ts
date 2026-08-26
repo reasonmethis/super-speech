@@ -12,7 +12,10 @@ export type QueueDragState =
       phase: "queue";
       previewVisualOrder: readonly string[];
     })
-  | (QueueDragBase & { phase: "history" });
+  | (QueueDragBase & {
+      phase: "history";
+      previewVisualOrder: readonly string[];
+    });
 
 export type QueueDragCommand =
   | { type: "move"; id: string; beforeId: string | null }
@@ -74,7 +77,7 @@ function settleDrag(state: QueueDragState, commit: boolean): QueueDragTransition
   if (state.phase === "history") {
     return {
       state: null,
-      visualOrder: state.initialVisualOrder,
+      visualOrder: state.previewVisualOrder,
       command: { type: "archive", id: state.sourceId },
     };
   }
@@ -116,14 +119,18 @@ export function transitionQueueDrag(
     return settleDrag(state, event.commit);
   }
   if (event.type === "preview-history") {
+    const previewVisualOrder = state.phase === "queue"
+      ? state.previewVisualOrder
+      : state.initialVisualOrder;
     return {
       state: {
         phase: "history",
         pointerId: state.pointerId,
         sourceId: state.sourceId,
         initialVisualOrder: state.initialVisualOrder,
+        previewVisualOrder,
       },
-      visualOrder: state.initialVisualOrder,
+      visualOrder: previewVisualOrder,
       command: null,
     };
   }
@@ -150,10 +157,10 @@ export function transitionQueueDrag(
 export function queueDropBeforeId(
   sourceId: string,
   rows: readonly QueueRowBounds[],
-  pointerY: number,
+  draggedCenterY: number,
 ): string | null {
   return rows.find(
-    (row) => row.id !== sourceId && pointerY <= row.top + row.height / 2,
+    (row) => row.id !== sourceId && draggedCenterY <= row.top + row.height / 2,
   )?.id ?? null;
 }
 

@@ -34,6 +34,7 @@ import {
   type PlayAcceptance,
   type RuntimeState,
   type RuntimeStatus,
+  type VersionInfo,
 } from "../src/runtime";
 
 const HEARTBEAT_FRESHNESS_MS = 15_000;
@@ -272,6 +273,11 @@ async function archiveQueueItem(id: string): Promise<void> {
 
 async function clearQueue(): Promise<void> {
   await runEngineCommand("clear");
+}
+
+async function getVersions(): Promise<VersionInfo> {
+  const engine = await runEngineCommand("--version").catch(() => "unavailable");
+  return { app: app.getVersion(), engine };
 }
 
 function packagedSkillDirectory(): string {
@@ -577,6 +583,7 @@ function createTray(): void {
 
 function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.getStatus, getStatus);
+  ipcMain.handle(IPC_CHANNELS.getVersions, getVersions);
   ipcMain.handle(IPC_CHANNELS.setPaused, (_event, paused: boolean) => setPaused(paused));
   ipcMain.handle(IPC_CHANNELS.playChunk, (_event, id: string) => playChunk(id));
   ipcMain.handle(

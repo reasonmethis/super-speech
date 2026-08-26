@@ -154,33 +154,43 @@ try {
   const firstStart = await rows.nth(0).boundingBox();
   const secondStart = await rows.nth(1).boundingBox();
   assert(firstStart && secondStart, "Waiting items must be visible before dragging");
-
-  await drag(
-    page,
-    rows.nth(1).locator(".queue-drag-handle"),
-    rows.nth(0),
-    async ({ to }) => {
-      const dragged = await page.locator(".queue-drag-ghost").boundingBox();
-      const shifted = await page.locator(`[data-item-id="${firstId}"]`).boundingBox();
-      assert(dragged && shifted, "Rows must stay visible while dragging");
-      assert.equal(await page.locator(".is-drag-source").count(), 1);
-      assert.equal(await page.locator(".queue-drag-placeholder").count(), 0);
-      assert(
-        Math.abs(dragged.y + dragged.height / 2 - to.y) < dragged.height / 2,
-        "The floating drag preview did not follow the pointer",
-      );
-      assert(
-        shifted.y > firstStart.y + 20,
-        "The neighboring row did not move out of the first position",
-      );
-      const transformAnimations = await rows.evaluateAll((items) =>
-        items.flatMap((item) => item.getAnimations()).filter((animation) =>
-          animation.effect?.getKeyframes().some((frame) => frame.transform)
-        ).length
-      );
-      assert.equal(transformAnimations, 0, "Queue rows must move without position animation");
-    },
+  const sourceHandle = rows.nth(1).locator(".queue-drag-handle");
+  const sourceHandleBounds = await sourceHandle.boundingBox();
+  assert(sourceHandleBounds, "Drag handle must be visible");
+  const grabPoint = {
+    x: sourceHandleBounds.x + sourceHandleBounds.width / 2,
+    y: sourceHandleBounds.y + 5,
+  };
+  const grabOffsetY = grabPoint.y - secondStart.y;
+  const midpointPointerY = firstStart.y + firstStart.height / 2 +
+    grabOffsetY - secondStart.height / 2;
+  await page.mouse.move(grabPoint.x, grabPoint.y);
+  await page.mouse.down();
+  await page.mouse.move(grabPoint.x, midpointPointerY + 2);
+  assert.equal(
+    await rows.nth(0).getAttribute("data-item-id"),
+    firstId,
+    "The row switched before its center reached the destination midpoint",
   );
+  await page.mouse.move(grabPoint.x, midpointPointerY);
+  assert.equal(
+    await rows.nth(0).getAttribute("data-item-id"),
+    secondId,
+    "The row did not switch when its center reached the destination midpoint",
+  );
+  const dragged = await page.locator(".queue-drag-ghost").boundingBox();
+  assert(dragged, "The floating drag preview must stay visible");
+  assert(
+    Math.abs(dragged.y + dragged.height / 2 - (firstStart.y + firstStart.height / 2)) < 1,
+  );
+  const transformAnimations = await rows.evaluateAll((items) =>
+    items.flatMap((item) => item.getAnimations()).filter((animation) =>
+      animation.effect?.getKeyframes().some((frame) => frame.transform)
+    ).length
+  );
+  assert(transformAnimations > 0, "Queue neighbors must animate into their preview positions");
+  await page.mouse.up();
+  await assertDragClean(page);
   await waitFor(
     async () => await rows.nth(0).getAttribute("data-item-id") === secondId,
     "A real mouse drag did not move the item into the first visual position",
@@ -243,6 +253,34 @@ try {
     },
     "The renderer did not reconcile to the persisted archive",
   );
+
+  const copyLefts = await page.locator(
+    ".queue-item.is-current .queue-copy, .queue-item.is-upcoming .queue-copy, .queue-item.is-history .queue-copy",
+  ).evaluateAll((copies) => copies.map((copy) => copy.getBoundingClientRect().left));
+  assert(copyLefts.length >= 3, "Current, waiting, and History rows must all be visible");
+  assert(
+    Math.max(...copyLefts) - Math.min(...copyLefts) < 1,
+    "Timeline copy must share one left edge across every row type",
+  );
+  assert.equal(
+    await page.locator(".queue-order").count(),
+    0,
+    "Timeline labels must not shift row copy",
+  );
+  assert.equal(
+    await page.locator(".timeline-divider.history-drop-target span").nth(1).textContent(),
+    `${status().history_count.toLocaleString()} total`,
+    "History must show its total count without implying every archived item is rendered",
+  );
+  await waitFor(
+    async () => /App \d+\.\d+\.\d+ \| Engine \d+\.\d+\.\d+/.test(
+      await page.locator("#version-label").textContent() ?? ""
+    ),
+    "The footer did not show app and engine versions",
+  );
+  if (process.env.SUPER_SPEECH_SCREENSHOT) {
+    await page.screenshot({ path: process.env.SUPER_SPEECH_SCREENSHOT });
+  }
 
   const playbackBeforeHistoryGesture = status();
   const historyPlay = page.locator(

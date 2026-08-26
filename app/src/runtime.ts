@@ -207,8 +207,14 @@ export function moveQueueItemBefore<T extends { id: string }>(
   return reordered;
 }
 
+export interface VersionInfo {
+  app: string;
+  engine: string;
+}
+
 export interface DesktopApi {
   getStatus(): Promise<RuntimeStatus>;
+  getVersions(): Promise<VersionInfo>;
   setPaused(paused: boolean): Promise<RuntimeStatus>;
   playChunk(id: string): Promise<PlayAcceptance>;
   moveQueueItem(id: string, beforeId: string | null): Promise<void>;
@@ -228,6 +234,7 @@ export function statusForEngineProcess(
 
 export const IPC_CHANNELS = {
   getStatus: "runtime:get-status",
+  getVersions: "runtime:get-versions",
   setPaused: "runtime:set-paused",
   playChunk: "runtime:play-chunk",
   moveQueueItem: "runtime:move-queue-item",

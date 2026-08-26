@@ -27,7 +27,7 @@ test("rejects a missing source and duplicate IDs", () => {
   );
 });
 
-test("maps pointer positions to the first, middle, and last visual slots", () => {
+test("maps dragged-card centers to the first, middle, and last visual slots", () => {
   const rows = [
     { id: "newest", top: 0, height: 40 },
     { id: "middle", top: 47, height: 40 },
@@ -157,6 +157,37 @@ test("a no-op move emits no command and History emits archive", () => {
   );
 });
 
+test("moving over History preserves the current queue preview until settlement", () => {
+  const queuePreview = transitionQueueDrag(begin(), {
+    type: "preview-queue",
+    pointerId: 1,
+    beforeId: "newest",
+  });
+  const historyPreview = transitionQueueDrag(queuePreview.state, {
+    type: "preview-history",
+    pointerId: 1,
+  });
+
+  assert.deepEqual(historyPreview.visualOrder, ["middle", "newest", "oldest"]);
+  assert.deepEqual(
+    transitionQueueDrag(historyPreview.state, {
+      type: "finish",
+      pointerId: 1,
+      commit: true,
+    }),
+    {
+      state: null,
+      visualOrder: ["middle", "newest", "oldest"],
+      command: { type: "archive", id: "middle" },
+    },
+  );
+  assert.deepEqual(transitionQueueDrag(historyPreview.state, { type: "cancel" }), {
+    state: null,
+    visualOrder: initialOrder,
+    command: null,
+  });
+});
+
 test("every source and destination round-trips through engine playback order", () => {
   for (let size = 1; size <= 5; size += 1) {
     const visualOrder = Array.from({ length: size }, (_, index) => `item-${index}`);
@@ -217,9 +248,9 @@ test("long retargeting sequences preserve one copy of every queue item", () => {
     const transition = transitionQueueDrag(state, previews[iteration % previews.length]);
     state = transition.state;
     assert(state);
-    const order = state.phase === "queue"
-      ? state.previewVisualOrder
-      : state.initialVisualOrder;
+    const order = state.phase === "armed"
+      ? state.initialVisualOrder
+      : state.previewVisualOrder;
     assert.deepEqual([...order].sort(), [...initialOrder].sort());
     assert.equal(new Set(order).size, initialOrder.length);
   }

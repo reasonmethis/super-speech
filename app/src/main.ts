@@ -78,6 +78,7 @@ const queueCount = requiredElement<HTMLSpanElement>("queue-count");
 const clearQueueButton = requiredElement<HTMLButtonElement>("clear-queue-button");
 const queueList = requiredElement<HTMLDivElement>("queue-list");
 const commandStatus = requiredElement<HTMLDivElement>("command-status");
+const versionLabel = requiredElement<HTMLSpanElement>("version-label");
 const desktopApi = window.superSpeech;
 
 interface PendingSelection {
@@ -99,6 +100,7 @@ interface QueuePointerDrag {
   pointerOffsetX: number;
   pointerOffsetY: number;
   width: number;
+  height: number;
 }
 
 interface PlayPointerGesture {
@@ -127,6 +129,7 @@ let playPointerGesture: PlayPointerGesture | null = null;
 const suppressedPlayClicks = new WeakSet<HTMLButtonElement>();
 
 const POINTER_GESTURE_THRESHOLD = 5;
+const QUEUE_REORDER_ANIMATION_MS = 140;
 
 function requiredElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -413,6 +416,7 @@ function beginQueuePointerDrag(
     pointerOffsetX: event.clientX - bounds.left,
     pointerOffsetY: event.clientY - bounds.top,
     width: bounds.width,
+    height: bounds.height,
   };
 }
 
@@ -552,8 +556,19 @@ function cancelPlayPointerGesture(pointerId?: number): void {
 function applyQueueVisualOrder(visualOrder: readonly string[]): void {
   const rows = [...queueList.querySelectorAll<HTMLElement>(".queue-item.is-upcoming")];
   const currentOrder = rows.map((row) => row.dataset.itemId ?? "");
-  if (visualOrder.every((id, index) => id === currentOrder[index])) {
+  if (
+    visualOrder.length === currentOrder.length &&
+    visualOrder.every((id, index) => id === currentOrder[index])
+  ) {
     return;
+  }
+  const visualTops = new Map(rows.map((row) => [row, row.getBoundingClientRect().top]));
+  for (const row of rows) {
+    for (const animation of row.getAnimations()) {
+      if (animation.id === "queue-reorder") {
+        animation.cancel();
+      }
+    }
   }
   const rowsById = new Map(rows.map((row) => [row.dataset.itemId ?? "", row]));
   const anchor = queueList.querySelector<HTMLElement>(
@@ -564,6 +579,27 @@ function applyQueueVisualOrder(visualOrder: readonly string[]): void {
     if (row) {
       queueList.insertBefore(row, anchor);
     }
+  }
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    return;
+  }
+  for (const row of rows) {
+    const previousTop = visualTops.get(row);
+    if (previousTop === undefined) {
+      continue;
+    }
+    const distance = previousTop - row.getBoundingClientRect().top;
+    if (Math.abs(distance) < 0.5) {
+      continue;
+    }
+    const animation = row.animate(
+      [
+        { transform: `translateY(${distance}px)` },
+        { transform: "translateY(0)" },
+      ],
+      { duration: QUEUE_REORDER_ANIMATION_MS, easing: "ease-out" },
+    );
+    animation.id = "queue-reorder";
   }
 }
 
@@ -603,8 +639,9 @@ function updateQueuePointerDrag(event: PointerEvent): void {
     cancelQueuePointerDrag();
     return;
   }
+  const ghostTop = event.clientY - drag.pointerOffsetY;
   ghost.style.left = `${left}px`;
-  ghost.style.top = `${event.clientY - drag.pointerOffsetY}px`;
+  ghost.style.top = `${ghostTop}px`;
 
   clearHistoryDropIndicator();
   const pointed = document.elementFromPoint(event.clientX, event.clientY);
@@ -650,7 +687,7 @@ function updateQueuePointerDrag(event: PointerEvent): void {
         height: bounds.height,
       };
     }),
-    event.clientY,
+    ghostTop + drag.height / 2,
   );
   const transition = transitionQueueDrag(drag.state, {
     type: "preview-queue",
@@ -796,17 +833,13 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     return;
   }
 
-  const visibleHistory = items.filter(({ kind }) => kind === "history").length;
   const hasUpcoming = items.some(({ kind }) => kind === "upcoming");
   let historyDividerAdded = false;
   const appendHistoryDivider = (): void => {
     historyDividerAdded = true;
     const divider = document.createElement("div");
     divider.className = "timeline-divider history-drop-target";
-    const historyCount = visibleHistory < historyTotal
-      ? `${visibleHistory} of ${historyTotal}`
-      : String(historyTotal);
-    divider.innerHTML = `<span>History</span><span>${historyCount}</span>`;
+    divider.innerHTML = `<span>History</span><span>${historyTotal.toLocaleString()} total</span>`;
     queueList.append(divider);
   };
   for (const item of items) {
@@ -840,19 +873,15 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
         handleQueueReorderKey(event, item.id);
       });
       rowControls.push(dragHandle);
+    } else {
+      const leading = document.createElement("span");
+      leading.setAttribute("aria-hidden", "true");
+      rowControls.push(leading);
     }
 
     const play = document.createElement("button");
     play.className = "queue-play";
     play.type = "button";
-
-    const order = document.createElement("span");
-    order.className = "queue-order";
-    order.textContent = isCurrent
-      ? "NOW"
-      : item.kind === "history"
-        ? "HIST"
-        : String(item.position).padStart(2, "0");
 
     const copy = document.createElement("div");
     copy.className = "queue-copy";
@@ -861,7 +890,7 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     const meta = document.createElement("span");
     meta.className = "queue-meta";
     copy.append(text, meta);
-    play.append(order, copy);
+    play.append(copy);
 
     const disclosure = document.createElement("button");
     disclosure.className = "queue-disclosure";
@@ -1304,5 +1333,14 @@ window.addEventListener("blur", () => {
 });
 
 render(currentStatus);
+if (desktopApi) {
+  void desktopApi.getVersions().then(({ app, engine }) => {
+    versionLabel.textContent = `App ${app} | Engine ${engine}`;
+  }).catch(() => {
+    versionLabel.textContent = "App unavailable | Engine unavailable";
+  });
+} else {
+  versionLabel.textContent = "App demo | Engine demo";
+}
 void refreshStatus();
 window.setInterval(() => void refreshStatus(), 700);
