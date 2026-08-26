@@ -69,29 +69,6 @@ async function waitFor(predicate, message, timeout = 15_000) {
   throw new Error(message);
 }
 
-async function drag(page, source, destination, inspect) {
-  const sourceBounds = await source.boundingBox();
-  const destinationBounds = await destination.boundingBox();
-  assert(sourceBounds, "Drag source must be visible");
-  assert(destinationBounds, "Drop target must be visible");
-  const from = {
-    x: sourceBounds.x + sourceBounds.width / 2,
-    y: sourceBounds.y + sourceBounds.height / 2,
-  };
-  const to = {
-    x: destinationBounds.x + destinationBounds.width / 2,
-    y: destinationBounds.y + 2,
-  };
-  await page.mouse.move(from.x, from.y);
-  await page.mouse.down();
-  await page.mouse.move(to.x, to.y, { steps: 12 });
-  await inspect?.({ from, to });
-  await page.mouse.up();
-  assert.equal(await page.locator(".queue-drag-ghost").count(), 0);
-  assert.equal(await page.locator(".is-drag-source").count(), 0);
-  assert.equal(await page.locator(".queue-drag-placeholder").count(), 0);
-}
-
 async function beginDrag(page, handle, deltaY = -65) {
   await waitFor(
     () => handle.isEnabled(),
@@ -122,6 +99,39 @@ async function assertDragClean(page) {
   assert.equal(new Set(ids).size, ids.length, "Waiting cards must have unique IDs");
 }
 
+async function visibleHistoryDropPoint(page) {
+  await page.locator("#queue-list").evaluate((list) => {
+    list.scrollTop = list.scrollHeight;
+  });
+  const dividerBounds = await page.locator(
+    ".timeline-divider.history-drop-target",
+  ).boundingBox();
+  const listBounds = await page.locator("#queue-list").boundingBox();
+  assert(dividerBounds && listBounds, "History must be visible during a drag");
+  const point = {
+    x: dividerBounds.x + dividerBounds.width / 2,
+    y: dividerBounds.y + dividerBounds.height / 2,
+  };
+  assert(point.y >= listBounds.y && point.y <= listBounds.y + listBounds.height);
+  return point;
+}
+
+async function layoutBounds(locator) {
+  return locator.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    const transform = getComputedStyle(element).transform;
+    const animatedOffsetY = transform === "none"
+      ? 0
+      : new DOMMatrixReadOnly(transform).m42;
+    return {
+      x: bounds.x,
+      y: bounds.y - animatedOffsetY,
+      width: bounds.width,
+      height: bounds.height,
+    };
+  });
+}
+
 try {
   runEngine("pause");
   runEngine("speak", "Drag test one");
@@ -146,6 +156,20 @@ try {
     async () => await page.locator(".queue-item.is-upcoming").count() === 2,
     "The Electron window did not render two waiting items",
   );
+  await page.evaluate(() => {
+    const animate = Element.prototype.animate;
+    globalThis.__queueReorderAnimationRequests = 0;
+    Element.prototype.animate = function (keyframes, options) {
+      if (
+        this instanceof HTMLElement &&
+        this.classList.contains("queue-item") &&
+        JSON.stringify(keyframes).includes("translateY")
+      ) {
+        globalThis.__queueReorderAnimationRequests += 1;
+      }
+      return animate.call(this, keyframes, options);
+    };
+  });
 
   const rows = page.locator(".queue-item.is-upcoming");
   const firstId = await rows.nth(0).getAttribute("data-item-id");
@@ -154,6 +178,9 @@ try {
   const firstStart = await rows.nth(0).boundingBox();
   const secondStart = await rows.nth(1).boundingBox();
   assert(firstStart && secondStart, "Waiting items must be visible before dragging");
+  await rows.nth(1).evaluate((row) => {
+    row.dataset.smokeNode = "midpoint-source";
+  });
   const sourceHandle = rows.nth(1).locator(".queue-drag-handle");
   const sourceHandleBounds = await sourceHandle.boundingBox();
   assert(sourceHandleBounds, "Drag handle must be visible");
@@ -183,13 +210,28 @@ try {
   assert(
     Math.abs(dragged.y + dragged.height / 2 - (firstStart.y + firstStart.height / 2)) < 1,
   );
-  const transformAnimations = await rows.evaluateAll((items) =>
-    items.flatMap((item) => item.getAnimations()).filter((animation) =>
-      animation.effect?.getKeyframes().some((frame) => frame.transform)
-    ).length
+  assert(
+    await page.evaluate(() => globalThis.__queueReorderAnimationRequests) > 0,
+    "Queue neighbors must animate into their preview positions",
   );
-  assert(transformAnimations > 0, "Queue neighbors must animate into their preview positions");
   await page.mouse.up();
+  assert.equal(
+    await page.locator(`[data-item-id="${secondId}"]`).getAttribute("data-smoke-node"),
+    "midpoint-source",
+    "Releasing a reorder must preserve the animating row nodes",
+  );
+  const reorderedReferences = await page.locator(`[data-item-id="${secondId}"]`).evaluate(
+    (row) => [
+      row.querySelector(".queue-drag-handle")?.getAttribute("aria-label"),
+      row.querySelector(".queue-remove")?.getAttribute("aria-label"),
+      row.querySelector(".queue-disclosure")?.getAttribute("aria-label"),
+      row.querySelector(".queue-full-text")?.getAttribute("aria-label"),
+    ],
+  );
+  assert(
+    reorderedReferences.every((label) => label?.includes("waiting speech 2")),
+    "Preserved row nodes must refresh their order-dependent accessible names",
+  );
   await assertDragClean(page);
   await waitFor(
     async () => await rows.nth(0).getAttribute("data-item-id") === secondId,
@@ -207,6 +249,11 @@ try {
       return visualOrder.join(",") === status().queue.map(({ id }) => id).reverse().join(",");
     },
     "The renderer did not reconcile to the persisted queue order",
+  );
+  assert.equal(
+    await page.locator(`[data-item-id="${secondId}"]`).getAttribute("data-smoke-node"),
+    "midpoint-source",
+    "Engine reconciliation must preserve the settled row nodes",
   );
 
   await beginDrag(
@@ -229,11 +276,121 @@ try {
     "A queue refresh lost the dragged card",
   );
 
-  await drag(
-    page,
-    page.locator(`[data-item-id="${secondId}"] .queue-drag-handle`),
-    page.locator(".timeline-divider.history-drop-target"),
+  const archivedRow = page.locator(`[data-item-id="${secondId}"].is-upcoming`);
+  const archivedBounds = await archivedRow.boundingBox();
+  const archivedHandleBounds = await archivedRow.locator(".queue-drag-handle").boundingBox();
+  const waitingCards = page.locator(".queue-item.is-upcoming:not(.queue-drag-ghost)");
+  const lastWaitingBounds = await waitingCards.last().boundingBox();
+  assert(
+    archivedBounds && archivedHandleBounds && lastWaitingBounds,
+    "Archive drag source and destinations must be visible",
   );
+  const archiveGrab = {
+    x: archivedHandleBounds.x + archivedHandleBounds.width / 2,
+    y: archivedHandleBounds.y + archivedHandleBounds.height / 2,
+  };
+  const archiveOffsetY = archiveGrab.y - archivedBounds.y;
+  const pointerYForDraggedCenter = (targetBounds, offset = 0) =>
+    targetBounds.y + targetBounds.height / 2 + offset + archiveOffsetY -
+    archivedBounds.height / 2;
+  await page.mouse.move(archiveGrab.x, archiveGrab.y);
+  await page.mouse.down();
+  await page.mouse.move(archiveGrab.x, pointerYForDraggedCenter(lastWaitingBounds, 2));
+  assert.equal(
+    await waitingCards.last().getAttribute("data-item-id"),
+    secondId,
+    "The archive gesture must first preview a move to the last position",
+  );
+  const firstOtherBounds = await layoutBounds(page.locator(
+    `.queue-item.is-upcoming:not(.queue-drag-ghost):not([data-item-id="${secondId}"])`,
+  ).first());
+  assert(firstOtherBounds, "The first neighboring card must be visible");
+  await page.mouse.move(archiveGrab.x, pointerYForDraggedCenter(firstOtherBounds));
+  assert.equal(
+    await waitingCards.first().getAttribute("data-item-id"),
+    secondId,
+    "Crossing the same cards upward must retarget the preview",
+  );
+  const lastOtherBounds = await layoutBounds(page.locator(
+    `.queue-item.is-upcoming:not(.queue-drag-ghost):not([data-item-id="${secondId}"])`,
+  ).last());
+  assert(lastOtherBounds, "The last neighboring card must be visible");
+  await page.mouse.move(archiveGrab.x, pointerYForDraggedCenter(lastOtherBounds, 2));
+  const previewOrder = await waitingCards.evaluateAll((items) =>
+    items.map((item) => item.getAttribute("data-item-id"))
+  );
+  assert.equal(
+    previewOrder.at(-1),
+    secondId,
+    "Crossing the same cards downward must retarget the preview again",
+  );
+  const animationCountBeforeHistory = await page.evaluate(
+    () => globalThis.__queueReorderAnimationRequests,
+  );
+  const historyDropPoint = await visibleHistoryDropPoint(page);
+  await page.mouse.move(historyDropPoint.x, historyDropPoint.y);
+  assert.equal(
+    await page.locator(".is-history-drop").count(),
+    1,
+    "The visible History target must acknowledge the drag",
+  );
+  assert.deepEqual(
+    await waitingCards.evaluateAll((items) =>
+      items.map((item) => item.getAttribute("data-item-id"))
+    ),
+    previewOrder,
+    "Entering History must preserve the current queue preview",
+  );
+  assert.equal(
+    await page.evaluate(() => globalThis.__queueReorderAnimationRequests),
+    animationCountBeforeHistory,
+    "Entering History must not start a backtracking queue animation",
+  );
+  await page.locator("#queue-list").evaluate((list) => {
+    list.scrollTop = 0;
+  });
+  const exitTargetBounds = await layoutBounds(page.locator(
+    `.queue-item.is-upcoming:not(.queue-drag-ghost):not([data-item-id="${secondId}"])`,
+  ).first());
+  assert(exitTargetBounds, "A queue target must remain visible after entering History");
+  await page.mouse.move(archiveGrab.x, pointerYForDraggedCenter(exitTargetBounds));
+  assert.equal(
+    await page.locator(".is-history-drop").count(),
+    0,
+    "Leaving History must clear its drop highlight",
+  );
+  assert.equal(
+    await waitingCards.first().getAttribute("data-item-id"),
+    secondId,
+    "Leaving History must resume queue previewing",
+  );
+  const exitPreviewOrder = await waitingCards.evaluateAll((items) =>
+    items.map((item) => item.getAttribute("data-item-id"))
+  );
+  const animationCountBeforeFinalHistory = await page.evaluate(
+    () => globalThis.__queueReorderAnimationRequests,
+  );
+  const finalHistoryPoint = await visibleHistoryDropPoint(page);
+  await page.mouse.move(finalHistoryPoint.x, finalHistoryPoint.y);
+  assert.equal(
+    await page.locator(".is-history-drop").count(),
+    1,
+    "History must acknowledge a re-entered drag",
+  );
+  assert.deepEqual(
+    await waitingCards.evaluateAll((items) =>
+      items.map((item) => item.getAttribute("data-item-id"))
+    ),
+    exitPreviewOrder,
+    "Re-entering History must preserve the latest queue preview",
+  );
+  assert.equal(
+    await page.evaluate(() => globalThis.__queueReorderAnimationRequests),
+    animationCountBeforeFinalHistory,
+    "Re-entering History must not start a backtracking queue animation",
+  );
+  await page.mouse.up();
+  await assertDragClean(page);
   await waitFor(
     async () => await page.locator(`[data-item-id="${secondId}"].is-history`).count() === 1,
     "A real mouse drag to History did not archive the waiting item",

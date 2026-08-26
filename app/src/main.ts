@@ -681,9 +681,13 @@ function updateQueuePointerDrag(event: PointerEvent): void {
     drag.state.sourceId,
     rows.map((row) => {
       const bounds = row.getBoundingClientRect();
+      const transform = window.getComputedStyle(row).transform;
+      const animatedOffsetY = transform === "none"
+        ? 0
+        : new DOMMatrixReadOnly(transform).m42;
       return {
         id: row.dataset.itemId ?? "",
-        top: bounds.top,
+        top: bounds.top - animatedOffsetY,
         height: bounds.height,
       };
     }),
@@ -785,6 +789,13 @@ function handleQueueReorderKey(event: KeyboardEvent, id: string): void {
   }
 }
 
+function timelineRenderKey(items: TimelineItem[], historyTotal: number): string {
+  return JSON.stringify([
+    historyTotal,
+    items.map(({ id, text, voice, kind, position }) => [id, text, voice, kind, position]),
+  ]);
+}
+
 function renderTimeline(items: TimelineItem[], historyTotal: number): void {
   if (!items.some((item) => item.id === expandedItemId)) {
     expandedItemId = null;
@@ -800,10 +811,7 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     failedQueueMutationId = null;
   }
   // Preserve row nodes across polling so hover, focus, expansion, and in-progress clicks survive
-  const timelineKey = JSON.stringify([
-    historyTotal,
-    items.map(({ id, text, voice, kind, position }) => [id, text, voice, kind, position]),
-  ]);
+  const timelineKey = timelineRenderKey(items, historyTotal);
   if (timelineKey === renderedTimelineKey) {
     updateTimelineRows(items);
     updateTimelineFade();
@@ -873,10 +881,6 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
         handleQueueReorderKey(event, item.id);
       });
       rowControls.push(dragHandle);
-    } else {
-      const leading = document.createElement("span");
-      leading.setAttribute("aria-hidden", "true");
-      rowControls.push(leading);
     }
 
     const play = document.createElement("button");
@@ -967,6 +971,7 @@ function updateTimelineRows(items: TimelineItem[]): void {
     if (!item) {
       continue;
     }
+    const reference = itemReference(item);
     const pending = item.id === pendingId;
     const selected = pending && !commandInFlight;
     const failed = item.id === failedChunkId;
@@ -984,23 +989,40 @@ function updateTimelineRows(items: TimelineItem[]): void {
       play.setAttribute(
         "aria-label",
         selected
-          ? `Selected and up next: ${itemReference(item)}. Activate to select again`
+          ? `Selected and up next: ${reference}. Activate to select again`
           : playActionLabel(item),
       );
     }
     const dragHandle = row.querySelector<HTMLButtonElement>(".queue-drag-handle");
     if (dragHandle) {
       dragHandle.disabled = queueCommandInFlight || clearPending;
+      dragHandle.setAttribute(
+        "aria-label",
+        `Reorder ${reference}. Drag, or use the arrow keys`,
+      );
     }
     const remove = row.querySelector<HTMLButtonElement>(".queue-remove");
     if (remove) {
       remove.disabled = queueCommandInFlight || clearPending;
+      remove.setAttribute("aria-label", `Move ${reference} to History`);
       remove.setAttribute(
         "aria-busy",
         String(
           pendingQueueMutation?.action === "archive" &&
             pendingQueueMutation.id === item.id,
         ),
+      );
+    }
+    const disclosure = row.querySelector<HTMLButtonElement>(".queue-disclosure");
+    if (disclosure) {
+      disclosure.dataset.itemReference = reference;
+      disclosure.setAttribute(
+        "aria-label",
+        `${row.classList.contains("is-expanded") ? "Collapse" : "Expand"} full text for ${reference}`,
+      );
+      row.querySelector<HTMLElement>(".queue-full-text")?.setAttribute(
+        "aria-label",
+        `Full text for ${reference}`,
       );
     }
     const meta = row.querySelector<HTMLElement>(".queue-meta");
@@ -1107,6 +1129,19 @@ async function moveWaitingItem(id: string, beforeId: string | null): Promise<voi
   failedQueueMutationId = null;
   commandStatus.textContent = "";
   currentStatus = { ...currentStatus, queue: reordered };
+  const expectedVisualOrder = [...reordered].reverse().map((item) => item.id);
+  const projectedVisualOrder = [
+    ...queueList.querySelectorAll<HTMLElement>(".queue-item.is-upcoming"),
+  ].map((row) => row.dataset.itemId ?? "");
+  if (
+    expectedVisualOrder.length === projectedVisualOrder.length &&
+    expectedVisualOrder.every((itemId, index) => itemId === projectedVisualOrder[index])
+  ) {
+    renderedTimelineKey = timelineRenderKey(
+      timelineItems(currentStatus),
+      currentStatus.history_count,
+    );
+  }
   render(currentStatus);
   try {
     if (desktopApi) {

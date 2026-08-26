@@ -560,6 +560,14 @@ body[data-state="loading"] .playback-copy {
   grid-template-columns: 26px minmax(0, 1fr) 32px 38px;
 }
 
+.queue-item:not(.is-upcoming) .queue-play {
+  grid-column: 2;
+}
+
+.queue-item:not(.is-upcoming) .queue-disclosure {
+  grid-column: 3;
+}
+
 .queue-item.is-current {
   border-color: color-mix(in srgb, var(--accent) 28%, transparent);
   background: color-mix(in srgb, var(--accent) 8%, rgba(255, 255, 255, 0.025));
