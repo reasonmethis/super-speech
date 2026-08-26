@@ -528,6 +528,38 @@ try {
     ) < 0.5,
     "The row action button must be vertically centered",
   );
+  await menuRow.locator(".queue-chunk").click();
+  await waitFor(
+    async () => await menuRow.evaluate((row) => row.classList.contains("is-expanded")),
+    "The row did not expand for its alignment check",
+  );
+  const expandedRowBounds = await menuRow.boundingBox();
+  const expandedDragBounds = await menuRow.locator(".queue-drag-handle").boundingBox();
+  const expandedMenuBounds = await menuButton.boundingBox();
+  assert(
+    expandedRowBounds && expandedDragBounds && expandedMenuBounds,
+    "The expanded row controls must be visible",
+  );
+  const expandedRowCenter = expandedRowBounds.y + expandedRowBounds.height / 2;
+  assert(
+    Math.abs(expandedRowCenter - (expandedDragBounds.y + expandedDragBounds.height / 2)) < 0.5,
+    "The expanded row drag handle must be vertically centered",
+  );
+  assert(
+    Math.abs(expandedRowCenter - (expandedMenuBounds.y + expandedMenuBounds.height / 2)) < 0.5,
+    "The expanded row action button must be vertically centered",
+  );
+  if (process.env.SUPER_SPEECH_SCREENSHOT) {
+    const screenshot = path.parse(process.env.SUPER_SPEECH_SCREENSHOT);
+    await page.screenshot({
+      path: path.join(screenshot.dir, `${screenshot.name}-expanded${screenshot.ext}`),
+    });
+  }
+  await menuRow.locator(".queue-chunk").click();
+  await waitFor(
+    async () => await menuRow.evaluate((row) => !row.classList.contains("is-expanded")),
+    "The row did not collapse after its alignment check",
+  );
   await menuButton.click();
   const visibleActions = menuRow.locator(".queue-action-menu:not([hidden])");
   await new Promise((resolve) => setTimeout(resolve, 800));
@@ -560,7 +592,7 @@ try {
   );
   assert.equal(
     await menuButton.locator("span").evaluate((dot) => getComputedStyle(dot).width),
-    "2px",
+    "2.5px",
   );
   assert.equal(
     await menuRow.locator(".queue-meta").textContent(),
