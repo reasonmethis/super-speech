@@ -292,6 +292,22 @@ def test_archiving_one_waiting_chunk_preserves_current_and_remaining_queue(
     assert state.claimed == {current.name}
 
 
+def test_deleting_one_history_chunk_preserves_waiting_queue(tmp_path: Path) -> None:
+    engine = load_engine("super_speech_engine_history_delete")
+    configure_runtime(engine, tmp_path)
+    waiting = engine.QUEUE / "002-af_heart-say.txt"
+    history = engine.SPOKEN / "001-bm_fable-say.txt"
+    waiting.write_text("Waiting", encoding="utf-8")
+    history.write_text("History", encoding="utf-8")
+    assert engine.history_snapshot()[0] == 1
+
+    engine.apply_queue_command(queue.Queue(), engine.State(), "delete", history.stem, None)
+
+    assert waiting.read_text(encoding="utf-8") == "Waiting"
+    assert not history.exists()
+    assert engine.history_snapshot() == (0, [])
+
+
 def test_archive_still_succeeds_when_the_order_sidecar_cannot_update(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -328,6 +344,22 @@ def test_queue_request_is_applied_and_acknowledged(
         second.stem,
         first.stem,
     ]
+
+
+def test_history_delete_request_is_applied_and_acknowledged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_history_delete_request")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    history = engine.SPOKEN / "001-af_heart-say.txt"
+    history.write_text("History", encoding="utf-8")
+
+    request_id = engine.request_queue_command("delete", history.stem)
+    assert engine.process_queue_requests(queue.Queue(), engine.State())
+    engine.wait_for_queue_ack(request_id, timeout=0.1)
+
+    assert not history.exists()
 
 
 def test_queue_ack_retries_a_transient_windows_read_error(

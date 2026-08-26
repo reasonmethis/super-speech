@@ -93,7 +93,7 @@ interface PendingSelection {
 }
 
 interface PendingQueueMutation {
-  action: "move" | "archive";
+  action: "move" | "archive" | "delete";
   id: string;
 }
 
@@ -949,7 +949,7 @@ function setOpenActionMenu(itemId: string | null): void {
     ));
   } else {
     actions.push(createMenuAction(
-      item.kind === "history" ? "Replay" : "Play",
+      "Play",
       () => void playTimelineItem(item),
     ));
   }
@@ -961,6 +961,12 @@ function setOpenActionMenu(itemId: string | null): void {
     actions.push(createMenuAction(
       "Delete",
       () => void archiveWaitingItem(item.id),
+      "is-delete",
+    ));
+  } else if (item.kind === "history") {
+    actions.push(createMenuAction(
+      "Delete",
+      () => void deleteHistoryItem(item.id),
       "is-delete",
     ));
   }
@@ -1068,9 +1074,7 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     failedChunkId = null;
   }
   if (
-    !items.some(
-      (item) => item.kind === "upcoming" && item.id === failedQueueMutationId,
-    )
+    !items.some((item) => item.id === failedQueueMutationId)
   ) {
     failedQueueMutationId = null;
   }
@@ -1269,10 +1273,7 @@ function updateTimelineRows(items: TimelineItem[]): void {
       menuButton.setAttribute("aria-label", `Actions for ${reference}`);
       menuButton.setAttribute(
         "aria-busy",
-        String(
-          pendingQueueMutation?.action === "archive" &&
-            pendingQueueMutation.id === item.id,
-        ),
+        String(pendingQueueMutation?.id === item.id),
       );
     }
     row.querySelector<HTMLElement>(".queue-full-text")?.setAttribute(
@@ -1510,6 +1511,50 @@ async function archiveWaitingItem(id: string): Promise<void> {
     currentStatus = previousStatus;
     failedQueueMutationId = id;
     commandStatus.textContent = "Could not move waiting speech to History. Try again.";
+    render(currentStatus);
+  }
+}
+
+async function deleteHistoryItem(id: string): Promise<void> {
+  if (commandPending || pendingQueueMutation || clearPending) {
+    return;
+  }
+  if (!currentStatus.history.some((item) => item.id === id)) {
+    return;
+  }
+  const previousStatus = currentStatus;
+  queueMutationGeneration += 1;
+  pendingQueueMutation = { action: "delete", id };
+  failedQueueMutationId = null;
+  commandStatus.textContent = "";
+  currentStatus = {
+    ...currentStatus,
+    history_count: Math.max(0, currentStatus.history_count - 1),
+    history: currentStatus.history.filter((item) => item.id !== id),
+  };
+  render(currentStatus);
+  try {
+    if (desktopApi) {
+      await desktopApi.deleteHistoryItem(id);
+      const confirmed = await waitForQueueStatus((status) =>
+        !status.history.some((item) => item.id === id) &&
+        status.history_count < previousStatus.history_count
+      );
+      if (confirmed) {
+        currentStatus = confirmed;
+      }
+    } else {
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+    }
+    pendingQueueMutation = null;
+    render(currentStatus);
+    void refreshStatus();
+  } catch (error) {
+    console.error("Could not delete speech from History", error);
+    pendingQueueMutation = null;
+    currentStatus = previousStatus;
+    failedQueueMutationId = id;
+    commandStatus.textContent = "Could not delete speech from History. Try again.";
     render(currentStatus);
   }
 }

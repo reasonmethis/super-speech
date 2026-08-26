@@ -46,6 +46,7 @@ work session without having to reconstruct the product decisions.
 - Add previous and next controls using the identifier-based selection command
 - [x] Add replay through the same identifier-based selection command
 - [x] Add per-item move-to-History controls
+- [x] Add permanent deletion for individual History items
 - [x] Add clear controls to the desktop UI
 - [x] Add mouse and keyboard queue reordering
 - Show when each chunk was queued, when it started, and when it finished

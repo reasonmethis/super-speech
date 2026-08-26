@@ -663,6 +663,11 @@ try {
     await actionMenuIsFullyVisible(page),
     "A History menu near the viewport edge was clipped or covered",
   );
+  assert.deepEqual(
+    await visibleActions.locator(".queue-menu-action").allTextContents(),
+    ["Play", "Copy text", "Delete"],
+    "History must use the same Play label and expose Delete",
+  );
   await page.locator("#speech-heading").click();
   if (process.env.SUPER_SPEECH_SCREENSHOT) {
     await page.screenshot({ path: process.env.SUPER_SPEECH_SCREENSHOT });
@@ -770,6 +775,18 @@ try {
   await waitFor(
     () => !status().queue.some(({ id }) => id === deletedId),
     "The engine did not persist the Delete menu action",
+  );
+  const historyCountBeforeDelete = status().history_count;
+  const historyDeleteRow = page.locator(`[data-item-id="${deletedId}"].is-history`);
+  await historyDeleteRow.locator(".queue-menu-button").click();
+  await page.locator("#queue-action-menu").getByRole("menuitem", { name: "Delete" }).click();
+  await waitFor(
+    async () => await historyDeleteRow.count() === 0,
+    "Delete did not remove the History row",
+  );
+  await waitFor(
+    () => status().history_count === historyCountBeforeDelete - 1,
+    "The engine did not delete the History item",
   );
 
   const historyCountBeforeReplay = status().history_count;

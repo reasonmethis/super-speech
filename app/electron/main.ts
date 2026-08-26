@@ -272,6 +272,10 @@ async function archiveQueueItem(id: string): Promise<void> {
   await runEngineCommand("archive", id);
 }
 
+async function deleteHistoryItem(id: string): Promise<void> {
+  await runEngineCommand("delete", id);
+}
+
 async function clearQueue(): Promise<void> {
   await runEngineCommand("clear");
 }
@@ -593,6 +597,9 @@ function registerIpc(): void {
   );
   ipcMain.handle(IPC_CHANNELS.archiveQueueItem, (_event, id: string) =>
     archiveQueueItem(id)
+  );
+  ipcMain.handle(IPC_CHANNELS.deleteHistoryItem, (_event, id: string) =>
+    deleteHistoryItem(id)
   );
   ipcMain.handle(IPC_CHANNELS.copyText, (_event, text: string) => clipboard.writeText(text));
   ipcMain.handle(IPC_CHANNELS.clearQueue, clearQueue);

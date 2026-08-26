@@ -7,7 +7,7 @@ export type RuntimeState =
   | "setup_required"
   | "stopped";
 
-export const ENGINE_STATUS_VERSION = 6 as const;
+export const ENGINE_STATUS_VERSION = 7 as const;
 
 export interface QueueItem {
   id: string;
@@ -255,6 +255,7 @@ export interface DesktopApi {
   playChunk(id: string): Promise<PlayAcceptance>;
   moveQueueItem(id: string, beforeId: string | null): Promise<void>;
   archiveQueueItem(id: string): Promise<void>;
+  deleteHistoryItem(id: string): Promise<void>;
   copyText(text: string): Promise<void>;
   clearQueue(): Promise<void>;
   openSetup(): Promise<void>;
@@ -276,6 +277,7 @@ export const IPC_CHANNELS = {
   playChunk: "runtime:play-chunk",
   moveQueueItem: "runtime:move-queue-item",
   archiveQueueItem: "runtime:archive-queue-item",
+  deleteHistoryItem: "runtime:delete-history-item",
   copyText: "runtime:copy-text",
   clearQueue: "runtime:clear-queue",
   openSetup: "app:open-setup",

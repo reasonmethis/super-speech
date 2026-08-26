@@ -60,7 +60,8 @@ It uses real pointer input to reorder and archive cards, verifies single-click
 expansion, double-click-only playback, row action menus, and stable
 playback-control geometry. It also verifies that Current is initially visible,
 the three timeline sections remain explicit, and menus stay inside the visible
-speech viewport. It then checks cancellation when the pointer loses its
+speech viewport. Waiting and History menus both use `Play`; History also supports
+permanent deletion. The test then checks cancellation when the pointer loses its
 primary button, the window loses focus, or polling replaces the timeline. The
 test runs against a temporary runtime with silent audio and verifies the result
 in both the renderer and the engine queue.

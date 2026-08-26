@@ -113,8 +113,10 @@ Use exact `queue` IDs to reorder or archive waiting items:
 & $engine move '016-af_bella-say' '015-bm_fable-say'
 & $engine move '015-bm_fable-say'
 & $engine archive '016-af_bella-say'
+& $engine delete '014-af_heart-say'
 ```
 
 The first command inserts one item before another. Omitting the second ID moves
 the item to the end. `archive` moves only that waiting item into History. These
-commands never rename IDs or change current playback.
+commands never rename IDs or change current playback. `delete` permanently
+removes one exact History ID without changing the waiting queue.

@@ -103,9 +103,10 @@ Queue order is stored separately from the opaque chunk filenames. The engine
 filters that saved order against live queue files and appends new arrivals, so
 dragging never renames an ID and concurrent `speak` calls remain safe.
 `move <id> [before-id]` changes that order, while `archive <id>` moves one
-waiting item into History. Both use unique request files and exact
-acknowledgements. The engine invalidates buffered waiting audio after either
-mutation while preserving every rendered piece of the current item.
+waiting item into History and `delete <id>` permanently removes one History
+item. All three use unique request files and exact acknowledgements. The engine
+invalidates buffered waiting audio after queue-order mutations while preserving
+every rendered piece of the current item.
 
 The engine status keeps waiting items in playback order, oldest first. The
 desktop timeline displays that list in reverse so new arrivals enter at the top,

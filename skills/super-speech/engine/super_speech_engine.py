@@ -26,9 +26,9 @@ behavior. Signal files in BASE are the engine's private process protocol:
                continue with next
   CLEAR      - drop the buffer and every non-playing queued chunk (-> spoken/);
                never truncates the currently playing chunk
-  PLAY.*.json - select a queued or recent chunk by ID; selecting another chunk
-                preempts the current one without marking it spoken
-  QUEUE_COMMAND.*.json - reorder or archive a waiting chunk by stable ID
+  PLAY.*.json - select a queued or recent chunk by ID; selecting waiting speech
+                archives the current item and older waiting items first
+  QUEUE_COMMAND.*.json - reorder/archive waiting speech or delete History by ID
   WARMUP     - synthesize a throwaway phrase to pay the first-inference cost
 
 Env:
@@ -115,8 +115,9 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
-ENGINE_VERSION = "0.4.6"
-STATUS_VERSION = 6
+ENGINE_VERSION = "0.4.7"
+STATUS_VERSION = 7
+QUEUE_ACTIONS = frozenset({"move", "archive", "delete"})
 
 
 class EngineInstanceLock:
@@ -698,14 +699,14 @@ def queue_ack_path(request_id: str) -> Path:
 def request_queue_command(
     action: str, chunk_id: str, before_id: str | None = None
 ) -> str:
-    """Publish one reorder/archive request for exact engine acknowledgement."""
-    if action not in {"move", "archive"}:
+    """Publish one queue or History mutation for exact engine acknowledgement."""
+    if action not in QUEUE_ACTIONS:
         raise ValueError("invalid queue action")
     for value in (chunk_id, before_id):
         if value is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", value):
             raise ValueError("chunk ID contains invalid characters")
-    if action == "archive" and before_id is not None:
-        raise ValueError("archive does not accept a destination")
+    if action != "move" and before_id is not None:
+        raise ValueError(f"{action} does not accept a destination")
     if not engine_is_running():
         raise RuntimeError("engine is not running")
 
@@ -757,7 +758,7 @@ def read_queue_claim(claimed: Path) -> tuple[str, str, str | None, str] | None:
         chunk_id = payload.get("id")
         before_id = payload.get("before_id")
         request_id = payload.get("request_id")
-        if action not in {"move", "archive"}:
+        if action not in QUEUE_ACTIONS:
             raise ValueError("invalid queue action")
         for value in (chunk_id, before_id):
             if value is not None and not (
@@ -766,8 +767,8 @@ def read_queue_claim(claimed: Path) -> tuple[str, str, str | None, str] | None:
                 raise ValueError("invalid chunk ID")
         if not isinstance(chunk_id, str):
             raise ValueError("invalid chunk ID")
-        if action == "archive" and before_id is not None:
-            raise ValueError("archive does not accept a destination")
+        if action != "move" and before_id is not None:
+            raise ValueError(f"{action} does not accept a destination")
         if not isinstance(request_id, str):
             raise ValueError("invalid queue request ID")
         queue_ack_path(request_id)
@@ -1197,7 +1198,19 @@ def apply_queue_command(
     chunk_id: str,
     before_id: str | None,
 ) -> None:
-    """Apply one waiting-queue mutation without changing current playback."""
+    """Apply one queue or History mutation without changing current playback."""
+    if action == "delete":
+        history_item = _find_chunk(SPOKEN, chunk_id)
+        if history_item is None:
+            raise ValueError(f"history chunk not found: {chunk_id}")
+        try:
+            history_item.unlink()
+        except OSError as error:
+            raise RuntimeError(f"could not delete history chunk: {chunk_id}") from error
+        invalidate_history()
+        log(f"QUEUE delete {history_item.name}")
+        return
+
     ordered = queue_files_in_order()
     source = next((path for path in ordered if path.stem == chunk_id), None)
     with st.lock:
@@ -1761,6 +1774,10 @@ def cli(argv: list[str] | None = None) -> int:
         "archive", help="move one waiting chunk to History"
     )
     archive_command.add_argument("chunk_id", help="waiting chunk ID from status output")
+    delete_command = commands.add_parser(
+        "delete", help="permanently delete one History chunk"
+    )
+    delete_command.add_argument("chunk_id", help="History chunk ID from status output")
     commands.add_parser("skip", help="skip the current chunk")
     commands.add_parser("clear", help="clear queued chunks after the current chunk")
     commands.add_parser("stop", help="finish the current chunk and stop")
@@ -1786,7 +1803,7 @@ def cli(argv: list[str] | None = None) -> int:
             start_engine()
             request_id = request_play(args.chunk_id)
             print(json.dumps(wait_for_play_ack(request_id)))
-        elif args.command in {"move", "archive"}:
+        elif args.command in {"move", "archive", "delete"}:
             start_engine()
             request_id = request_queue_command(
                 args.command,

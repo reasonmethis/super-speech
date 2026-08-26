@@ -57,8 +57,9 @@ archive entries appear under History and can be replayed without
 changing the remaining queue or adding duplicate History rows. History includes
 completed, skipped, and cleared items. `Clear all` archives every waiting item
 without changing the current item or playback state. A row's three-dot menu
-exposes playback actions; `Delete` removes a waiting item from the active queue
-and keeps it in History. Drag a waiting row's grip to move the card directly,
+uses `Play` for waiting and History rows. `Delete` removes a waiting item from
+the active queue and keeps it in History; deleting it again from History removes
+it permanently. Drag a waiting row's grip to move the card directly,
 or drop it on History to archive it; the grip also supports the arrow, Home,
 and End keys.
 
