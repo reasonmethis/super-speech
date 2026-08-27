@@ -53,7 +53,7 @@ import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, NamedTuple, assert_never
+from typing import BinaryIO, Literal, NamedTuple, assert_never
 
 from mutation_protocol import (
     ArchiveMutation,
@@ -1111,6 +1111,172 @@ def prune_mutation_results(max_age: float = 300.0) -> None:
             log(f"could not prune mutation result {result.name}: {error}")
 
 
+@dataclass(frozen=True)
+class TimelineMove:
+    """Move one timeline file, optionally preserving a duplicate copy."""
+
+    source: Path
+    target: Path
+    backup: Path | None = None
+    # Keep a legacy Queue copy and move the History duplicate into backup instead
+    preserve_existing_target: bool = False
+
+
+@dataclass(frozen=True)
+class TimelinePlan:
+    """Describe one recoverable foreground change to the saved timeline."""
+
+    operation: Literal["archive_batch", "promote"]
+    moves: tuple[TimelineMove, ...]
+    previous_queue_ids: tuple[str, ...]
+    previous_history_ids: tuple[str, ...]
+    queue_ids: tuple[str, ...]
+    history_ids: tuple[str, ...]
+
+    def intent_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "version": 1,
+            "operation": self.operation,
+            "order_version": 2,
+            "moves": [
+                {
+                    "source": move.source.name,
+                    "target": move.target.name,
+                    "backup": move.backup.name if move.backup is not None else None,
+                }
+                for move in self.moves
+            ],
+            "queue_ids": list(self.queue_ids),
+            "history_ids": list(self.history_ids),
+        }
+        if self.operation == "archive_batch":
+            payload["previous_queue_ids"] = list(self.previous_queue_ids)
+            payload["previous_history_ids"] = list(self.previous_history_ids)
+        return payload
+
+
+def _write_timeline_plan_orders(
+    plan: TimelinePlan,
+    queue_ids: tuple[str, ...],
+    history_ids: tuple[str, ...],
+    written_orders: list[Path],
+) -> None:
+    writes = (
+        ((HISTORY_ORDER, history_ids), (QUEUE_ORDER, queue_ids))
+        if plan.operation == "archive_batch"
+        else ((QUEUE_ORDER, queue_ids), (HISTORY_ORDER, history_ids))
+    )
+    for path, ids in writes:
+        _write_saved_order(path, list(ids))
+        written_orders.append(path)
+
+
+def _apply_timeline_move(move: TimelineMove) -> bool:
+    """Apply one move, or return false when its target already has the row."""
+    if not move.source.exists():
+        if move.target.exists():
+            return False
+        raise FileNotFoundError(move.source)
+    if move.preserve_existing_target:
+        if move.backup is None:
+            raise RuntimeError("timeline duplicate has no backup path")
+        os.replace(move.source, move.backup)
+    else:
+        if move.backup is not None:
+            os.replace(move.target, move.backup)
+        os.replace(move.source, move.target)
+    return True
+
+
+def _rollback_timeline_move(move: TimelineMove) -> None:
+    if move.preserve_existing_target:
+        if move.backup is not None and move.backup.exists():
+            if not move.source.exists():
+                os.replace(move.backup, move.source)
+        elif not move.source.exists() and move.target.exists():
+            os.replace(move.target, move.source)
+        return
+    if not move.source.exists() and move.target.exists():
+        os.replace(move.target, move.source)
+    if move.backup is not None and move.backup.exists():
+        os.replace(move.backup, move.target)
+
+
+def _execute_timeline_plan(plan: TimelinePlan) -> None:
+    """Apply one journaled plan, restoring its old layout on a known failure."""
+    applied_moves: list[TimelineMove] = []
+    written_orders: list[Path] = []
+    intent_written = False
+    try:
+        _write_timeline_intent(plan.intent_payload())
+        intent_written = True
+        if plan.operation == "archive_batch":
+            _write_timeline_plan_orders(
+                plan, plan.queue_ids, plan.history_ids, written_orders
+            )
+        for move in plan.moves:
+            if move.target.parent == SPOKEN:
+                SPOKEN.mkdir(parents=True, exist_ok=True)
+            applied_moves.append(move)
+            if not _apply_timeline_move(move):
+                applied_moves.pop()
+        if plan.operation == "promote":
+            _write_timeline_plan_orders(
+                plan, plan.queue_ids, plan.history_ids, written_orders
+            )
+    except (OSError, RuntimeError, ValueError) as error:
+        if not intent_written:
+            raise
+        rollback_errors: list[str] = []
+        for move in reversed(applied_moves):
+            try:
+                _rollback_timeline_move(move)
+            except OSError as rollback_error:
+                rollback_errors.append(str(rollback_error))
+        previous_orders = {
+            QUEUE_ORDER: plan.previous_queue_ids,
+            HISTORY_ORDER: plan.previous_history_ids,
+        }
+        for path in (QUEUE_ORDER, HISTORY_ORDER):
+            if path not in written_orders:
+                continue
+            try:
+                _write_saved_order(path, list(previous_orders[path]))
+            except (OSError, RuntimeError) as rollback_error:
+                rollback_errors.append(str(rollback_error))
+        if rollback_errors:
+            raise MutationOutcomeUnconfirmed(
+                "timeline rollback failed: " + "; ".join(rollback_errors)
+            ) from error
+        try:
+            TIMELINE_INTENT.unlink(missing_ok=True)
+        except OSError as rollback_error:
+            raise MutationOutcomeUnconfirmed(
+                f"timeline rollback cleanup failed: {rollback_error}"
+            ) from error
+        raise
+    finally:
+        invalidate_history()
+
+    cleanup_complete = True
+    for move in applied_moves:
+        if move.backup is None:
+            continue
+        try:
+            move.backup.unlink(missing_ok=True)
+        except OSError as cleanup_error:
+            cleanup_complete = False
+            log(
+                "timeline duplicate cleanup deferred until restart: "
+                f"{cleanup_error}"
+            )
+    if cleanup_complete:
+        try:
+            TIMELINE_INTENT.unlink(missing_ok=True)
+        except OSError as cleanup_error:
+            log(f"timeline intent cleanup deferred until restart: {cleanup_error}")
+
+
 def _archive_many(paths: list[Path]) -> bool:
     """Move one ordered timeline block to History as one recoverable mutation."""
     unique = list(dict.fromkeys(paths))
@@ -1132,110 +1298,37 @@ def _archive_many(paths: list[Path]) -> bool:
             *(SPOKEN / path.name for path in reversed(unique)),
             *retained_history,
         ]
-        planned_moves = [
-            (
-                path,
-                SPOKEN / path.name,
-                (SPOKEN / path.name).with_name(
+        planned_moves = tuple(
+            TimelineMove(
+                source=path,
+                target=SPOKEN / path.name,
+                backup=(SPOKEN / path.name).with_name(
                     f".{path.name}.{os.getpid()}.{time.time_ns()}.duplicate"
                 )
                 if (SPOKEN / path.name).exists()
                 else None,
             )
             for path in unique
-        ]
-        moves = [
-            {
-                "source": source.name,
-                "target": destination.name,
-                "backup": backup.name if backup is not None else None,
-            }
-            for source, destination, backup in planned_moves
-        ]
-        intent = {
-            "version": 1,
-            "operation": "archive_batch",
-            "order_version": 2,
-            "moves": moves,
-            "previous_queue_ids": [public_id_for_path(path) for path in previous_queue],
-            "previous_history_ids": [public_id_for_path(path) for path in previous_history],
-            "queue_ids": [public_id_for_path(path) for path in desired_queue],
-            "history_ids": [public_id_for_path(path) for path in desired_history],
-        }
-        moved: list[tuple[Path, Path, Path | None]] = []
-        history_order_written = False
-        queue_order_written = False
+        )
+        plan = TimelinePlan(
+            operation="archive_batch",
+            moves=planned_moves,
+            previous_queue_ids=tuple(
+                public_id_for_path(path) for path in previous_queue
+            ),
+            previous_history_ids=tuple(
+                public_id_for_path(path) for path in previous_history
+            ),
+            queue_ids=tuple(public_id_for_path(path) for path in desired_queue),
+            history_ids=tuple(public_id_for_path(path) for path in desired_history),
+        )
         try:
-            _write_timeline_intent(intent)
-            SPOKEN.mkdir(parents=True, exist_ok=True)
-            _write_saved_order(HISTORY_ORDER, intent["history_ids"])
-            history_order_written = True
-            _write_saved_order(QUEUE_ORDER, intent["queue_ids"])
-            queue_order_written = True
-            for source, destination, backup in planned_moves:
-                if not source.exists():
-                    if destination.exists():
-                        continue
-                    raise FileNotFoundError(source)
-                if backup is not None:
-                    os.replace(destination, backup)
-                moved.append((source, destination, backup))
-                os.replace(source, destination)
+            _execute_timeline_plan(plan)
+        except MutationOutcomeUnconfirmed:
+            raise
         except (OSError, RuntimeError) as error:
-            rollback_errors: list[str] = []
-            for source, destination, backup in reversed(moved):
-                try:
-                    if not source.exists():
-                        os.replace(destination, source)
-                    if backup is not None and backup.exists():
-                        os.replace(backup, destination)
-                except OSError as rollback_error:
-                    rollback_errors.append(str(rollback_error))
-            if queue_order_written:
-                try:
-                    _write_saved_order(
-                        QUEUE_ORDER,
-                        [public_id_for_path(path) for path in previous_queue],
-                    )
-                except (OSError, RuntimeError) as rollback_error:
-                    rollback_errors.append(str(rollback_error))
-            if history_order_written:
-                try:
-                    _write_saved_order(
-                        HISTORY_ORDER,
-                        [public_id_for_path(path) for path in previous_history],
-                    )
-                except (OSError, RuntimeError) as rollback_error:
-                    rollback_errors.append(str(rollback_error))
-            invalidate_history()
-            if rollback_errors:
-                raise MutationOutcomeUnconfirmed(
-                    "archive rollback failed: " + "; ".join(rollback_errors)
-                ) from error
-            try:
-                TIMELINE_INTENT.unlink(missing_ok=True)
-            except OSError as rollback_error:
-                raise MutationOutcomeUnconfirmed(
-                    f"archive rollback cleanup failed: {rollback_error}"
-                ) from error
             log(f"archive error: {error}")
             return False
-
-        cleanup_complete = True
-        for _, _, backup in moved:
-            if backup is None:
-                continue
-            try:
-                backup.unlink(missing_ok=True)
-            except OSError as cleanup_error:
-                cleanup_complete = False
-                log(f"archive duplicate cleanup deferred until restart: {cleanup_error}")
-        if cleanup_complete:
-            try:
-                TIMELINE_INTENT.unlink(missing_ok=True)
-            except OSError as cleanup_error:
-                log(f"archive intent cleanup deferred until restart: {cleanup_error}")
-        invalidate_history()
         return True
 
 
@@ -2040,98 +2133,40 @@ def _promote_history_selection_unlocked(
         remaining_queue = [
             path for path in previous_queue if path.name not in target_names
         ]
-        planned_moves = [
-            (
-                archived,
-                queued,
-                archived.with_name(
+        planned_moves = tuple(
+            TimelineMove(
+                source=archived,
+                target=queued,
+                backup=archived.with_name(
                     f".{archived.name}.{os.getpid()}.{time.time_ns()}.duplicate"
                 )
                 if queued.exists()
                 else None,
+                preserve_existing_target=queued.exists(),
             )
             for archived, queued in zip(promoted, targets)
-        ]
-        moved: list[tuple[Path, Path, Path | None]] = []
+        )
+        plan = TimelinePlan(
+            operation="promote",
+            moves=planned_moves,
+            previous_queue_ids=tuple(
+                public_id_for_path(path) for path in previous_queue
+            ),
+            previous_history_ids=tuple(public_id_for_path(path) for path in history),
+            queue_ids=tuple(
+                public_id_for_path(path)
+                for path in [*playback_order, *remaining_queue]
+            ),
+            history_ids=tuple(
+                public_id_for_path(path) for path in remaining_history
+            ),
+        )
         try:
-            _write_timeline_intent(
-                {
-                    "version": 1,
-                    "operation": "promote",
-                    "moves": [
-                        {
-                            "source": archived.name,
-                            "target": target.name,
-                            "backup": backup.name if backup is not None else None,
-                        }
-                        for archived, target, backup in planned_moves
-                    ],
-                    "queue_ids": [
-                        public_id_for_path(path)
-                        for path in [*playback_order, *remaining_queue]
-                    ],
-                    "history_ids": [
-                        public_id_for_path(path) for path in remaining_history
-                    ],
-                    "order_version": 2,
-                }
-            )
-            for archived, queued, duplicate_backup in planned_moves:
-                if duplicate_backup is not None:
-                    os.replace(archived, duplicate_backup)
-                else:
-                    os.replace(archived, queued)
-                moved.append((archived, queued, duplicate_backup))
-            save_queue_order([*playback_order, *remaining_queue])
-            save_history_order(remaining_history)
-            cleanup_complete = True
-            for _, _, duplicate_backup in moved:
-                if duplicate_backup is not None:
-                    try:
-                        duplicate_backup.unlink(missing_ok=True)
-                    except OSError as cleanup_error:
-                        cleanup_complete = False
-                        log(
-                            f"could not remove legacy History duplicate "
-                            f"{duplicate_backup.name}: {cleanup_error}"
-                        )
-            if cleanup_complete:
-                try:
-                    TIMELINE_INTENT.unlink(missing_ok=True)
-                except OSError as cleanup_error:
-                    log(
-                        "History promotion intent cleanup deferred until restart: "
-                        f"{cleanup_error}"
-                    )
+            _execute_timeline_plan(plan)
+        except MutationOutcomeUnconfirmed:
+            raise
         except (OSError, RuntimeError, ValueError) as error:
-            recovery_errors = []
-            for archived, queued, duplicate_backup in reversed(moved):
-                try:
-                    os.replace(
-                        duplicate_backup if duplicate_backup is not None else queued,
-                        archived,
-                    )
-                except OSError as recovery_error:
-                    recovery_errors.append(str(recovery_error))
-            try:
-                save_queue_order(previous_queue)
-                save_history_order(history)
-            except (OSError, RuntimeError) as recovery_error:
-                recovery_errors.append(str(recovery_error))
-            if recovery_errors:
-                raise MutationOutcomeUnconfirmed(
-                    "History boundary rollback failed: "
-                    + "; ".join(recovery_errors)
-                ) from error
-            try:
-                TIMELINE_INTENT.unlink(missing_ok=True)
-            except OSError as cleanup_error:
-                raise MutationOutcomeUnconfirmed(
-                    f"History rollback cleanup failed: {cleanup_error}"
-                ) from error
             raise RuntimeError("could not move History playback boundary") from error
-        finally:
-            invalidate_history()
     return selected_target, len(promoted)
 
 

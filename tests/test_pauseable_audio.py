@@ -2167,14 +2167,16 @@ def test_history_selection_excludes_worker_claims_until_rollback_finishes(
     source.write_text("History", encoding="utf-8")
     entered_save = threading.Event()
     release_save = threading.Event()
-    real_save = engine.save_queue_order
+    real_write = engine._write_saved_order
 
-    def fail_after_worker_waits(paths=None) -> None:
-        entered_save.set()
-        assert release_save.wait(1)
-        raise PermissionError("locked")
+    def fail_after_worker_waits(path: Path, ids: list[str]) -> None:
+        if path == engine.QUEUE_ORDER and not entered_save.is_set():
+            entered_save.set()
+            assert release_save.wait(1)
+            raise PermissionError("locked")
+        real_write(path, ids)
 
-    monkeypatch.setattr(engine, "save_queue_order", fail_after_worker_waits)
+    monkeypatch.setattr(engine, "_write_saved_order", fail_after_worker_waits)
     promotion_errors = []
 
     def promote() -> None:
@@ -2197,7 +2199,6 @@ def test_history_selection_excludes_worker_claims_until_rollback_finishes(
     release_save.set()
     promotion.join(1)
     worker.join(1)
-    monkeypatch.setattr(engine, "save_queue_order", real_save)
 
     assert promotion_errors
     assert claimed == [None]
@@ -3939,6 +3940,93 @@ def test_history_snapshot_keeps_rows_during_a_transient_text_lock(
     ]
     assert items[0]["text"] == ""
     assert items[1]["text"] == "First"
+
+
+def test_timeline_plan_executes_moves_orders_and_cleanup(tmp_path: Path) -> None:
+    engine = load_engine("super_speech_engine_timeline_plan_success")
+    configure_runtime(engine, tmp_path)
+    source = engine.QUEUE / "001-af_heart-say.txt"
+    target = engine.SPOKEN / source.name
+    source.write_text("Speech", encoding="utf-8")
+    row_id = speechicle_id(engine, source)
+    plan = engine.TimelinePlan(
+        operation="archive_batch",
+        moves=(engine.TimelineMove(source, target),),
+        previous_queue_ids=(row_id,),
+        previous_history_ids=(),
+        queue_ids=(),
+        history_ids=(row_id,),
+    )
+
+    engine._execute_timeline_plan(plan)
+
+    assert not source.exists()
+    assert target.read_text(encoding="utf-8") == "Speech"
+    assert engine.queue_files_in_order() == []
+    assert engine.history_files_in_order() == [target]
+    assert not engine.TIMELINE_INTENT.exists()
+
+
+@pytest.mark.parametrize("rollback_fails", [False, True])
+def test_timeline_plan_rolls_back_after_moves_and_one_order_write(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    rollback_fails: bool,
+) -> None:
+    engine = load_engine(
+        f"super_speech_engine_timeline_plan_rollback_{rollback_fails}"
+    )
+    configure_runtime(engine, tmp_path)
+    current = engine.QUEUE / "002-af_heart-say.txt"
+    source = engine.SPOKEN / "001-af_heart-say.txt"
+    target = engine.QUEUE / source.name
+    current.write_text("Current", encoding="utf-8")
+    source.write_text("History", encoding="utf-8")
+    current_id = speechicle_id(engine, current)
+    source_id = speechicle_id(engine, source)
+    engine.save_queue_order([current])
+    engine.save_history_order([source])
+    plan = engine.TimelinePlan(
+        operation="promote",
+        moves=(engine.TimelineMove(source, target),),
+        previous_queue_ids=(current_id,),
+        previous_history_ids=(source_id,),
+        queue_ids=(source_id, current_id),
+        history_ids=(),
+    )
+    real_write = engine._write_saved_order
+    real_replace = engine.os.replace
+
+    def fail_final_history_order(path: Path, ids: list[str]) -> None:
+        if path == engine.HISTORY_ORDER and ids == []:
+            raise PermissionError("history order locked")
+        real_write(path, ids)
+
+    def maybe_fail_move_rollback(source_path, target_path) -> None:
+        if (
+            rollback_fails
+            and Path(source_path) == target
+            and Path(target_path) == source
+        ):
+            raise PermissionError("source locked")
+        real_replace(source_path, target_path)
+
+    monkeypatch.setattr(engine, "_write_saved_order", fail_final_history_order)
+    monkeypatch.setattr(engine.os, "replace", maybe_fail_move_rollback)
+
+    expected_error = engine.MutationOutcomeUnconfirmed if rollback_fails else OSError
+    with pytest.raises(expected_error):
+        engine._execute_timeline_plan(plan)
+
+    if rollback_fails:
+        assert engine.TIMELINE_INTENT.exists()
+        assert target.exists()
+        return
+    assert source.read_text(encoding="utf-8") == "History"
+    assert not target.exists()
+    assert engine.queue_files_in_order() == [current]
+    assert engine.history_files_in_order() == [source]
+    assert not engine.TIMELINE_INTENT.exists()
 
 
 def test_startup_completes_an_interrupted_clear_batch(tmp_path: Path) -> None:
