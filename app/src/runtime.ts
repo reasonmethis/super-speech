@@ -6,7 +6,7 @@ export type RuntimeState =
   | "setup_required"
   | "stopped";
 
-export const ENGINE_STATUS_VERSION = 7 as const;
+export const ENGINE_STATUS_VERSION = 8 as const;
 
 // Labels for the SHA-pinned Kokoro v1.0 voice archive bundled by prepare_resources
 export const VOICE_OPTIONS = [
@@ -53,12 +53,18 @@ export interface CurrentItem extends QueueItem {
   elapsed_seconds: number;
 }
 
+export interface StartedItem {
+  id: string;
+  started_at: number;
+}
+
 export interface EngineStatus {
   version: typeof ENGINE_STATUS_VERSION;
   state: RuntimeState;
   updated_at: number;
   engine_pid: number | null;
   current: CurrentItem | null;
+  recent_starts: StartedItem[];
   queue_count: number;
   queue: QueueItem[];
   history_count: number;
@@ -70,16 +76,57 @@ export interface EngineProcessStatus {
   engine_pid: number | null;
 }
 
+export function engineProcessIsLive(
+  status: EngineProcessStatus | null,
+  heartbeatFresh: boolean,
+  processIsLive: (processId: number) => boolean,
+  nowSeconds = Date.now() / 1000,
+): boolean {
+  return Boolean(
+    status?.engine_pid &&
+    processIsLive(status.engine_pid) &&
+    (heartbeatFresh || nowSeconds - status.updated_at < 300),
+  );
+}
+
 export interface RuntimeStatus extends EngineStatus {
   engine_running: boolean;
   installed: boolean;
+}
+
+export function compatibleEngineIsRunning(
+  ownedEngineRunning: boolean,
+  status: EngineStatus | null,
+  storedProcessRunning: boolean,
+): boolean {
+  return ownedEngineRunning || Boolean(status && storedProcessRunning);
+}
+
+export function runtimeStateForSnapshot(
+  installed: boolean,
+  engineRunning: boolean,
+  engineState: RuntimeState | undefined,
+): RuntimeState {
+  if (!installed || engineState === "setup_required") {
+    return "setup_required";
+  }
+  if (!engineRunning) {
+    return "stopped";
+  }
+  return engineState ?? "loading";
 }
 
 export function statusAfterPauseCommand(
   status: RuntimeStatus,
   paused: boolean,
 ): RuntimeStatus {
-  if (["loading", "setup_required", "stopped"].includes(status.state)) {
+  if (["setup_required", "stopped"].includes(status.state)) {
+    return status;
+  }
+  if (!status.engine_running) {
+    return { ...status, state: "stopped", current: null };
+  }
+  if (status.state === "loading") {
     return status;
   }
   const hasWork = status.current !== null || status.queue.length > 0;
@@ -103,26 +150,53 @@ export interface PlayAcceptance {
 
 export type PlayAcceptanceState = "pending" | "applied" | "failed";
 
+export function pendingPlaybackState(
+  status: EngineStatus,
+  acceptance: PlayAcceptance | null,
+  current: "playing" | "paused",
+): "playing" | "paused" {
+  return acceptance &&
+      status.updated_at >= acceptance.acceptedAt &&
+      (status.state === "playing" || status.state === "paused")
+    ? status.state
+    : current;
+}
+
 export function playAcceptanceState(
   status: EngineStatus,
   acceptance: PlayAcceptance,
 ): PlayAcceptanceState {
-  if (status.current?.id === acceptance.id) {
+  if (
+    status.recent_starts.some(
+      ({ id, started_at }) => id === acceptance.id && started_at >= acceptance.acceptedAt,
+    )
+  ) {
     return "applied";
   }
   if (status.updated_at < acceptance.acceptedAt) {
     return "pending";
   }
-  if (status.queue.some(({ id }) => id === acceptance.id)) {
+  if (status.state === "stopped") {
+    return "failed";
+  }
+  if (
+    status.current?.id === acceptance.id ||
+    status.queue.some(({ id }) => id === acceptance.id)
+  ) {
     return "pending";
   }
-  return status.history.some(({ id }) => id === acceptance.id) ? "applied" : "failed";
+  return "failed";
 }
 
 export type PlaybackPresentation =
   | { state: "playing" | "paused"; item: QueueItem }
   | { state: "loading"; item: QueueItem | null }
   | { state: "idle" | "setup_required" | "stopped"; item: null };
+
+export type PendingPlayback = {
+  item: QueueItem;
+  state: "playing" | "paused";
+};
 
 export function parsePlayAcceptance(value: unknown): PlayAcceptance | null {
   if (!value || typeof value !== "object") {
@@ -136,23 +210,24 @@ export function parsePlayAcceptance(value: unknown): PlayAcceptance | null {
 
 export function playbackPresentation(
   status: EngineStatus,
-  selectedItem: QueueItem | null,
+  pendingPlayback: PendingPlayback | null,
 ): PlaybackPresentation {
+  const selectedItem = pendingPlayback?.item ?? null;
   if (status.state === "setup_required") {
     return { state: "setup_required", item: null };
   }
-  if (selectedItem) {
-    return { state: "playing", item: selectedItem };
-  }
-  if (status.state === "stopped") {
+  if (status.state === "stopped" && !selectedItem) {
     return { state: "stopped", item: null };
   }
 
-  const activeItem = status.current ?? status.queue[0] ?? null;
+  const activeItem = selectedItem ?? status.current ?? status.queue[0] ?? null;
   if (!activeItem) {
     return status.state === "loading"
       ? { state: "loading", item: null }
       : { state: "idle", item: null };
+  }
+  if (pendingPlayback) {
+    return { state: pendingPlayback.state, item: pendingPlayback.item };
   }
   if (status.state === "paused") {
     return { state: "paused", item: activeItem };
@@ -197,6 +272,14 @@ function isCurrentItem(value: unknown): value is CurrentItem {
   );
 }
 
+function isStartedItem(value: unknown): value is StartedItem {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const item = value as Partial<StartedItem>;
+  return typeof item.id === "string" && typeof item.started_at === "number";
+}
+
 function hasStatusCore(value: Record<string, unknown>): boolean {
   return (
     typeof value.state === "string" &&
@@ -204,9 +287,12 @@ function hasStatusCore(value: Record<string, unknown>): boolean {
     typeof value.updated_at === "number" &&
     (value.engine_pid === null || typeof value.engine_pid === "number") &&
     (value.current === null || isCurrentItem(value.current)) &&
+    Array.isArray(value.recent_starts) &&
+    value.recent_starts.every(isStartedItem) &&
     typeof value.queue_count === "number" &&
     Array.isArray(value.queue) &&
-    value.queue.every(isQueueItem)
+    value.queue.every(isQueueItem) &&
+    value.queue_count === value.queue.length
   );
 }
 
@@ -355,6 +441,7 @@ export const INITIAL_STATUS: RuntimeStatus = {
   engine_running: false,
   installed: true,
   current: null,
+  recent_starts: [],
   queue_count: 0,
   queue: [],
   history_count: 0,

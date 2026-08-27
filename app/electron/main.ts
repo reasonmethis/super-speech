@@ -27,14 +27,16 @@ import { fileURLToPath } from "node:url";
 import {
   ENGINE_STATUS_VERSION,
   IPC_CHANNELS,
+  compatibleEngineIsRunning,
+  engineProcessIsLive,
   parseEngineStatus,
   parseEngineProcessStatus,
   parsePlayAcceptance,
+  runtimeStateForSnapshot,
   statusAfterPauseCommand,
   statusForEngineProcess,
   type EngineProcessStatus,
   type PlayAcceptance,
-  type RuntimeState,
   type RuntimeStatus,
   type VersionInfo,
 } from "../src/runtime";
@@ -51,7 +53,6 @@ const startHidden = smokeTest || process.argv.includes("--hidden");
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let ownedEngine: ChildProcess | null = null;
-let engineStartFailed = false;
 let quitting = false;
 
 interface EngineLaunch {
@@ -141,13 +142,10 @@ function processExists(processId: number | null | undefined): boolean {
 }
 
 function engineIsRunning(base: string, status: EngineProcessStatus | null): boolean {
-  return (
-    heartbeatIsFresh(path.join(base, "engine.alive")) ||
-    Boolean(
-      status &&
-      Date.now() / 1000 - status.updated_at < 300 &&
-      processExists(status.engine_pid),
-    )
+  return engineProcessIsLive(
+    status,
+    heartbeatIsFresh(path.join(base, "engine.alive")),
+    processExists,
   );
 }
 
@@ -189,18 +187,18 @@ function getStatus(): RuntimeStatus {
   const engine = ownedEngineRunning
     ? statusForEngineProcess(storedEngine, ownedEngine?.pid)
     : storedEngine;
-  const engineRunning = ownedEngineRunning || engineIsRunning(base, storedProcess);
+  const storedProcessRunning = engineIsRunning(base, storedProcess);
+  const engineRunning = compatibleEngineIsRunning(
+    ownedEngineRunning,
+    storedEngine,
+    storedProcessRunning,
+  );
 
-  let state: RuntimeState;
-  if (!installed || engine?.state === "setup_required") {
-    state = "setup_required";
-  } else if (engineStartFailed) {
-    state = "stopped";
-  } else if (engineRunning) {
-    state = engine?.state ?? "loading";
-  } else {
-    state = "idle";
-  }
+  const state = runtimeStateForSnapshot(
+    installed,
+    engineRunning,
+    engine?.state,
+  );
 
   const status: RuntimeStatus = {
     version: ENGINE_STATUS_VERSION,
@@ -210,6 +208,7 @@ function getStatus(): RuntimeStatus {
     engine_running: engineRunning,
     installed,
     current: engineRunning ? (engine?.current ?? null) : null,
+    recent_starts: engine?.recent_starts ?? [],
     queue_count: engine?.queue_count ?? 0,
     queue: engine?.queue ?? [],
     history_count: engine?.history_count ?? 0,
@@ -382,11 +381,9 @@ async function startEngine(): Promise<void> {
   const storedProcess = parseEngineProcessStatus(storedSnapshot);
   if (engineIsRunning(base, storedProcess)) {
     if (storedEngine) {
-      engineStartFailed = false;
       return;
     }
     if (!(await stopIncompatibleEngine(base))) {
-      engineStartFailed = true;
       return;
     }
   }
@@ -394,7 +391,6 @@ async function startEngine(): Promise<void> {
     return;
   }
   if (!launch || !modelsInstalled(modelDirectory())) {
-    engineStartFailed = true;
     return;
   }
 
@@ -409,19 +405,14 @@ async function startEngine(): Promise<void> {
       windowsHide: true,
       stdio: ["ignore", logDescriptor, logDescriptor],
     });
-    engineStartFailed = false;
     ownedEngine.once("error", () => {
-      engineStartFailed = true;
-    });
-    ownedEngine.once("exit", (code) => {
       ownedEngine = null;
-      if (!quitting && code !== 0) {
-        engineStartFailed = true;
-      }
+    });
+    ownedEngine.once("exit", () => {
+      ownedEngine = null;
     });
   } catch {
     ownedEngine = null;
-    engineStartFailed = true;
   } finally {
     closeSync(logDescriptor);
   }

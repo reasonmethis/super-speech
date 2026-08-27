@@ -64,7 +64,9 @@ it permanently. Drag a Waiting or History row's grip to reorder it directly;
 a Waiting row can also be dropped on History to archive it. The grips support
 the arrow, Home, and End keys. Current speech is the only row without a grip.
 An empty active timeline is always Idle, so Playing and Paused always identify
-an active speech item.
+an active speech item. A stopped engine remains Stopped even if speech is still
+waiting. Starting a row explicitly enters Playing; pausing it afterward remains
+Paused while that selection is prepared.
 
 In desktop mode, mutable state stays in `~/.super-speech/`. The installed model
 and engine are read-only application resources. A headless installation keeps

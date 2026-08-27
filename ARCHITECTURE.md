@@ -71,7 +71,7 @@ runtime sizes.
 
 ## Playback protocol
 
-`super-speech-engine status` publishes a version 7 snapshot with the current
+`super-speech-engine status` publishes a version 8 snapshot with the current
 speech item, the complete upcoming queue, and up to 50 recent archived items in
 their saved display order. A
 speech item is one `speak` invocation, one timeline row, and one replay target.
@@ -80,6 +80,9 @@ history entries. The current item remains active while the engine waits for its
 next rendered piece. Every entry has an opaque `id`. The total `history_count`
 can exceed the bounded
 `history` array.
+`queue_count` always matches the complete `queue` array. A bounded
+`recent_starts` receipt list lets the renderer distinguish speech that actually
+began from an archived replay that failed before its first audio piece.
 The archive currently includes completed, skipped, and cleared items, so the
 UI calls it History rather than claiming every entry played to completion.
 
@@ -98,8 +101,13 @@ Selection invalidates rendered pieces that no longer match the chosen order.
 Each selection uses an atomic request file and a private acknowledgement that
 reports the exact resulting queue ID or an engine rejection. If several
 requests arrive before one poll, the engine rejects the superseded requests
-and accepts the newest one, so every CLI caller terminates. No HTTP, WebSocket,
+and accepts the newest one. A request remains recoverable until its
+acknowledgement is durable; an unclaimed timeout cancels the request before the
+caller reports failure. No HTTP, WebSocket,
 second queue, or renderer playback state machine is needed.
+Immediate control files carry the lock owner's process ID. A delayed Stop,
+Interrupt, Skip, or Clear command is discarded if a successor engine has taken
+ownership, so a command cannot cross an engine restart boundary.
 
 Queue order is stored separately from the opaque chunk filenames. The engine
 filters that saved order against live queue files and appends new arrivals, so
@@ -109,9 +117,12 @@ waiting item into History and `delete <id>` permanently removes one History
 item. History display order is likewise stored in `history-order.json`, and
 `move-history <id> [before-id]` reorders the bounded recent History view without
 renaming or moving archive files. These commands use unique request files and
-exact acknowledgements. The engine
+exact acknowledgements. Queue text is written under a temporary name and becomes
+visible to the worker only after an atomic replace. The engine
 invalidates buffered waiting audio after queue-order mutations while preserving
-every rendered piece of the current item.
+every rendered piece of the current item. If a queue file cannot be archived,
+the engine stops and leaves that durable file visible for the next engine process
+to retry instead of retaining an unreleasable live claim.
 
 The engine status keeps waiting items in playback order, oldest first. The
 desktop timeline displays that list in reverse so new arrivals enter at the top,
@@ -121,10 +132,14 @@ current ID is scrolled into view once instead of on every status poll. When curr
 finishes, the same row therefore crosses the divider without changing its
 position relative to the other rows. Waiting and History drags translate back
 into `move` and `move-history` commands. The renderer applies the result
-immediately and rolls it back only if the engine rejects the command. Current
+immediately and reloads the authoritative snapshot if the engine rejects the command. Current
 speech is not reorderable. The status producer derives active state from the
 same current and queue snapshot, and the renderer uses a discriminated playback
 presentation, so Playing and Paused cannot exist without an active item.
+The process lifecycle remains authoritative: a dead engine is Stopped even when
+Waiting rows remain, and an accepted selection may change the displayed item but
+cannot override Paused. Timeline mutations cannot target a selection that is
+still starting.
 
 ## Distribution boundaries
 

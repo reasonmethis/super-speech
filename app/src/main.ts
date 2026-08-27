@@ -4,6 +4,7 @@ import {
   INITIAL_STATUS,
   VOICE_OPTIONS,
   moveQueueItemBefore,
+  pendingPlaybackState,
   playAcceptanceState,
   playbackPresentation,
   timelineItems,
@@ -37,6 +38,7 @@ const demoStatus: RuntimeStatus = {
     piece_count: 2,
     elapsed_seconds: 4.2,
   },
+  recent_starts: [{ id: "014-af_heart-say", started_at: Date.now() / 1000 }],
   queue_count: 2,
   queue: [
     {
@@ -90,6 +92,7 @@ const desktopApi = window.superSpeech;
 
 interface PendingSelection {
   selectedItem: TimelineItem;
+  state: "playing" | "paused";
   acceptance: PlayAcceptance | null;
   timeoutId: number;
 }
@@ -144,6 +147,16 @@ const QUEUE_REORDER_ANIMATION_MS = 140;
 const QUEUE_STATUS_CONFIRMATION_MS = 1_500;
 const CHUNK_DOUBLE_CLICK_MS = 400;
 
+function selectionBlocksTimelineMutation(itemId?: string): boolean {
+  return pendingSelection !== null &&
+    (pendingSelection.acceptance === null || pendingSelection.selectedItem.id === itemId);
+}
+
+function timelineMutationBlocked(itemId?: string): boolean {
+  return commandPending || clearPending || pendingQueueMutation !== null ||
+    selectionBlocksTimelineMutation(itemId);
+}
+
 function requiredElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
   if (!element) {
@@ -188,21 +201,24 @@ function itemReference(item: TimelineItem): string {
 }
 
 function reconcileCommands(status: RuntimeStatus): void {
+  if (pendingSelection) {
+    pendingSelection.state = pendingPlaybackState(
+      status,
+      pendingSelection.acceptance,
+      pendingSelection.state,
+    );
+  }
   const selectionState = pendingSelection?.acceptance
     ? playAcceptanceState(status, pendingSelection.acceptance)
     : "pending";
   if (pendingSelection && selectionState === "applied") {
     window.clearTimeout(pendingSelection.timeoutId);
     pendingSelection = null;
-    commandStatus.textContent = "";
+    if (commandStatus.textContent === "Selected speech is up next.") {
+      commandStatus.textContent = "";
+    }
   }
   if (pendingSelection && selectionState === "failed") {
-    window.clearTimeout(pendingSelection.timeoutId);
-    failedChunkId = pendingSelection.selectedItem.id;
-    pendingSelection = null;
-    commandStatus.textContent = "Could not start selected speech. Try again.";
-  }
-  if (pendingSelection && status.state === "stopped" && !status.engine_running) {
     window.clearTimeout(pendingSelection.timeoutId);
     failedChunkId = pendingSelection.selectedItem.id;
     pendingSelection = null;
@@ -312,7 +328,9 @@ function render(status: RuntimeStatus): void {
   currentStatus = status;
   const presentation = playbackPresentation(
     status,
-    pendingSelection?.selectedItem ?? null,
+    pendingSelection
+      ? { item: pendingSelection.selectedItem, state: pendingSelection.state }
+      : null,
   );
   const copy = statusCopy(presentation);
   const action = playbackAction(presentation.state);
@@ -333,7 +351,9 @@ function render(status: RuntimeStatus): void {
   };
   playbackButton.dataset.action = action;
   playbackButton.setAttribute("aria-label", actionLabels[action]);
-  playbackButton.disabled = commandPending || pendingQueueMutation !== null || action === "inactive";
+  playbackButton.disabled = commandPending || pendingQueueMutation !== null ||
+    (pendingSelection !== null && pendingSelection.acceptance === null) ||
+    action === "inactive";
   playbackButton.setAttribute(
     "aria-busy",
     String(commandPending || pendingSelection !== null || presentation.state === "loading"),
@@ -351,7 +371,8 @@ function render(status: RuntimeStatus): void {
 
   queueCount.textContent = `${status.queue_count} waiting`;
   clearQueueButton.classList.toggle("is-hidden", status.queue_count === 0);
-  clearQueueButton.disabled = commandPending || clearPending || pendingQueueMutation !== null;
+  clearQueueButton.disabled = commandPending || clearPending || pendingQueueMutation !== null ||
+    pendingSelection !== null;
   clearQueueButton.setAttribute("aria-disabled", String(clearQueueButton.disabled));
   clearQueueButton.setAttribute("aria-busy", String(clearPending));
   clearQueueButton.setAttribute(
@@ -386,9 +407,7 @@ function beginQueuePointerDrag(
   if (
     event.button !== 0 ||
     !event.isPrimary ||
-    commandPending ||
-    pendingQueueMutation ||
-    clearPending
+    timelineMutationBlocked(id)
   ) {
     return;
   }
@@ -809,7 +828,7 @@ function cancelQueuePointerDrag(): void {
 function handleQueueReorderKey(event: KeyboardEvent, id: string): void {
   const ids = currentStatus.queue.map((item) => item.id);
   const index = ids.indexOf(id);
-  if (index < 0 || commandPending || pendingQueueMutation || clearPending) {
+  if (index < 0 || timelineMutationBlocked(id)) {
     return;
   }
   let beforeId: string | null | undefined;
@@ -831,7 +850,7 @@ function handleQueueReorderKey(event: KeyboardEvent, id: string): void {
 function handleHistoryReorderKey(event: KeyboardEvent, id: string): void {
   const ids = currentStatus.history.map((item) => item.id);
   const index = ids.indexOf(id);
-  if (index < 0 || commandPending || pendingQueueMutation || clearPending) {
+  if (index < 0 || timelineMutationBlocked(id)) {
     return;
   }
   let beforeId: string | null | undefined;
@@ -1296,7 +1315,8 @@ function updateTimelineRows(items: TimelineItem[]): void {
   const itemById = new Map(items.map((item) => [item.id, item]));
   const pendingId = pendingSelection?.selectedItem.id ?? null;
   const commandInFlight = pendingSelection !== null && pendingSelection.acceptance === null;
-  const queueCommandInFlight = commandPending || pendingQueueMutation !== null;
+  const queueCommandInFlight = commandPending || pendingQueueMutation !== null ||
+    (pendingSelection !== null && pendingSelection.acceptance === null);
   for (const row of queueList.querySelectorAll<HTMLElement>(".queue-item")) {
     const item = itemById.get(row.dataset.itemId ?? "");
     if (!item) {
@@ -1323,7 +1343,8 @@ function updateTimelineRows(items: TimelineItem[]): void {
     }
     const dragHandle = row.querySelector<HTMLButtonElement>(".queue-drag-handle");
     if (dragHandle) {
-      dragHandle.disabled = queueCommandInFlight || clearPending;
+      dragHandle.disabled = queueCommandInFlight || clearPending ||
+        selectionBlocksTimelineMutation(item.id);
       dragHandle.setAttribute(
         "aria-label",
         `Reorder ${reference}. Drag, or use the arrow keys`,
@@ -1359,7 +1380,9 @@ function updateTimelineRows(items: TimelineItem[]): void {
   for (const action of queueActionMenu.querySelectorAll<HTMLButtonElement>(
     ".queue-menu-action",
   )) {
-    action.disabled = queueCommandInFlight || clearPending;
+    action.disabled = queueCommandInFlight || clearPending ||
+      (action.classList.contains("is-delete") &&
+        selectionBlocksTimelineMutation(openMenuItemId ?? undefined));
   }
   const voiceSelect = queueActionMenu.querySelector<HTMLSelectElement>(".queue-menu-voice");
   if (voiceSelect) {
@@ -1419,6 +1442,7 @@ async function playTimelineItem(item: TimelineItem, voice?: string): Promise<voi
   failedChunkId = null;
   const selection: PendingSelection = {
     selectedItem: voice ? { ...item, voice } : item,
+    state: "playing",
     acceptance: null,
     timeoutId: 0,
   };
@@ -1429,7 +1453,7 @@ async function playTimelineItem(item: TimelineItem, voice?: string): Promise<voi
       commandStatus.textContent = "Could not start selected speech. Try again.";
       render(currentStatus);
     }
-  }, 65_000);
+  }, 75_000);
   pendingSelection = selection;
   commandStatus.textContent = "";
   render(currentStatus);
@@ -1456,6 +1480,13 @@ async function playTimelineItem(item: TimelineItem, voice?: string): Promise<voi
     window.clearTimeout(selection.timeoutId);
     if (pendingSelection === selection) {
       pendingSelection = null;
+    }
+    if (commandResultWasUnconfirmed(error)) {
+      failedChunkId = null;
+      currentStatus = await statusAfterFailedMutation(currentStatus);
+      commandStatus.textContent = "Command result was unconfirmed. Speech state was refreshed.";
+      render(currentStatus);
+      return;
     }
     failedChunkId = item.id;
     commandStatus.textContent = "Could not start selected speech. Try again.";
@@ -1484,12 +1515,50 @@ async function waitForQueueStatus(
   return null;
 }
 
+async function statusAfterFailedMutation(fallback: RuntimeStatus): Promise<RuntimeStatus> {
+  if (!desktopApi) {
+    return fallback;
+  }
+  try {
+    return await desktopApi.getStatus();
+  } catch {
+    return fallback;
+  }
+}
+
+function commandResultWasUnconfirmed(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("result was unconfirmed");
+}
+
+async function reconcileFailedTimelineMutation(
+  fallback: RuntimeStatus,
+  id: string,
+  error: unknown,
+  failureMessage: string,
+  postcondition: (status: RuntimeStatus) => boolean,
+): Promise<void> {
+  pendingQueueMutation = null;
+  currentStatus = await statusAfterFailedMutation(fallback);
+  if (postcondition(currentStatus)) {
+    failedQueueMutationId = null;
+    commandStatus.textContent = "";
+  } else if (commandResultWasUnconfirmed(error)) {
+    failedQueueMutationId = null;
+    commandStatus.textContent = "Command result was unconfirmed. Speech state was refreshed.";
+  } else {
+    failedQueueMutationId = id;
+    commandStatus.textContent = failureMessage;
+  }
+  render(currentStatus);
+}
+
 async function moveWaitingItem(id: string, beforeId: string | null): Promise<void> {
-  if (commandPending || pendingQueueMutation || clearPending) {
+  if (timelineMutationBlocked(id)) {
     return;
   }
   const reordered = moveQueueItemBefore(currentStatus.queue, id, beforeId);
   const previousIds = currentStatus.queue.map((item) => item.id);
+  const expectedIds = reordered.map((item) => item.id);
   if (reordered.every((item, index) => item.id === previousIds[index])) {
     return;
   }
@@ -1503,7 +1572,6 @@ async function moveWaitingItem(id: string, beforeId: string | null): Promise<voi
   try {
     if (desktopApi) {
       await desktopApi.moveQueueItem(id, beforeId);
-      const expectedIds = reordered.map((item) => item.id);
       const confirmed = await waitForQueueStatus((status) =>
         status.queue.map((item) => item.id).every(
           (itemId, index) => itemId === expectedIds[index],
@@ -1520,20 +1588,25 @@ async function moveWaitingItem(id: string, beforeId: string | null): Promise<voi
     void refreshStatus();
   } catch (error) {
     console.error("Could not reorder waiting speech", error);
-    pendingQueueMutation = null;
-    currentStatus = previousStatus;
-    failedQueueMutationId = id;
-    commandStatus.textContent = "Could not reorder waiting speech. Try again.";
-    render(currentStatus);
+    await reconcileFailedTimelineMutation(
+      previousStatus,
+      id,
+      error,
+      "Could not reorder waiting speech. Try again.",
+      (status) =>
+        status.queue.length === expectedIds.length &&
+        status.queue.every((item, index) => item.id === expectedIds[index]),
+    );
   }
 }
 
 async function moveHistoryItem(id: string, beforeId: string | null): Promise<void> {
-  if (commandPending || pendingQueueMutation || clearPending) {
+  if (timelineMutationBlocked(id)) {
     return;
   }
   const reordered = moveQueueItemBefore(currentStatus.history, id, beforeId);
   const previousIds = currentStatus.history.map((item) => item.id);
+  const expectedIds = reordered.map((item) => item.id);
   if (reordered.every((item, index) => item.id === previousIds[index])) {
     return;
   }
@@ -1547,7 +1620,6 @@ async function moveHistoryItem(id: string, beforeId: string | null): Promise<voi
   try {
     if (desktopApi) {
       await desktopApi.moveHistoryItem(id, beforeId);
-      const expectedIds = reordered.map((item) => item.id);
       const confirmed = await waitForQueueStatus((status) =>
         status.history.length === expectedIds.length &&
         status.history.every((item, index) => item.id === expectedIds[index])
@@ -1563,16 +1635,20 @@ async function moveHistoryItem(id: string, beforeId: string | null): Promise<voi
     void refreshStatus();
   } catch (error) {
     console.error("Could not reorder History speech", error);
-    pendingQueueMutation = null;
-    currentStatus = previousStatus;
-    failedQueueMutationId = id;
-    commandStatus.textContent = "Could not reorder History speech. Try again.";
-    render(currentStatus);
+    await reconcileFailedTimelineMutation(
+      previousStatus,
+      id,
+      error,
+      "Could not reorder History speech. Try again.",
+      (status) =>
+        status.history.length === expectedIds.length &&
+        status.history.every((item, index) => item.id === expectedIds[index]),
+    );
   }
 }
 
 async function archiveWaitingItem(id: string): Promise<void> {
-  if (commandPending || pendingQueueMutation || clearPending) {
+  if (timelineMutationBlocked(id)) {
     return;
   }
   const item = currentStatus.queue.find((queued) => queued.id === id);
@@ -1613,16 +1689,20 @@ async function archiveWaitingItem(id: string): Promise<void> {
     void refreshStatus();
   } catch (error) {
     console.error("Could not move waiting speech to History", error);
-    pendingQueueMutation = null;
-    currentStatus = previousStatus;
-    failedQueueMutationId = id;
-    commandStatus.textContent = "Could not move waiting speech to History. Try again.";
-    render(currentStatus);
+    await reconcileFailedTimelineMutation(
+      previousStatus,
+      id,
+      error,
+      "Could not move waiting speech to History. Try again.",
+      (status) =>
+        !status.queue.some((entry) => entry.id === id) &&
+        status.history.some((entry) => entry.id === id),
+    );
   }
 }
 
 async function deleteHistoryItem(id: string): Promise<void> {
-  if (commandPending || pendingQueueMutation || clearPending) {
+  if (timelineMutationBlocked(id)) {
     return;
   }
   if (!currentStatus.history.some((item) => item.id === id)) {
@@ -1657,11 +1737,13 @@ async function deleteHistoryItem(id: string): Promise<void> {
     void refreshStatus();
   } catch (error) {
     console.error("Could not delete speech from History", error);
-    pendingQueueMutation = null;
-    currentStatus = previousStatus;
-    failedQueueMutationId = id;
-    commandStatus.textContent = "Could not delete speech from History. Try again.";
-    render(currentStatus);
+    await reconcileFailedTimelineMutation(
+      previousStatus,
+      id,
+      error,
+      "Could not delete speech from History. Try again.",
+      () => false,
+    );
   }
 }
 
@@ -1690,7 +1772,12 @@ async function refreshStatus(): Promise<void> {
 
 async function runPlaybackAction(): Promise<void> {
   const action = playbackAction(
-    playbackPresentation(currentStatus, pendingSelection?.selectedItem ?? null).state,
+    playbackPresentation(
+      currentStatus,
+      pendingSelection
+        ? { item: pendingSelection.selectedItem, state: pendingSelection.state }
+        : null,
+    ).state,
   );
   if (commandPending || pendingQueueMutation || queuePointerDrag || action === "inactive") {
     return;
@@ -1709,6 +1796,11 @@ async function runPlaybackAction(): Promise<void> {
     return;
   }
   const paused = action === "pause";
+  const previousSelectionState = pendingSelection?.state ?? null;
+  if (pendingSelection) {
+    pendingSelection.state = paused ? "paused" : "playing";
+    render(currentStatus);
+  }
   try {
     if (desktopApi) {
       render(await desktopApi.setPaused(paused));
@@ -1717,6 +1809,9 @@ async function runPlaybackAction(): Promise<void> {
     }
   } catch (error) {
     console.error("Could not change playback state", error);
+    if (pendingSelection && previousSelectionState) {
+      pendingSelection.state = previousSelectionState;
+    }
   } finally {
     commandPending = false;
     render(currentStatus);
@@ -1730,6 +1825,7 @@ clearQueueButton.addEventListener("click", async () => {
     commandPending ||
     clearPending ||
     pendingQueueMutation ||
+    pendingSelection ||
     currentStatus.queue_count === 0
   ) {
     return;

@@ -68,6 +68,14 @@ primary button, the window loses focus, or polling replaces the timeline. The
 test runs against a temporary runtime with silent audio and verifies the result
 in both the renderer and the engine queue.
 
+Runtime state has one transport authority. Engine liveness gates playback. An
+explicit Play action starts in Playing immediately, while a later Pause remains
+authoritative during preparation. The engine publishes a first-piece receipt so
+an archived row alone cannot be mistaken for successful replay. Timeline
+mutations cannot remove or reorder the item currently being selected.
+Failed optimistic mutations reconcile from the engine rather than restoring an
+older renderer snapshot.
+
 ## Engine verification
 
 The engine smoke test synthesizes and plays a silent-timing chunk with an

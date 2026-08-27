@@ -2,12 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   ENGINE_STATUS_VERSION,
+  compatibleEngineIsRunning,
+  engineProcessIsLive,
   moveQueueItemBefore,
+  pendingPlaybackState,
   playAcceptanceState,
   playbackPresentation,
   parseEngineStatus,
   parseEngineProcessStatus,
   parsePlayAcceptance,
+  runtimeStateForSnapshot,
   statusForEngineProcess,
   statusAfterPauseCommand,
   timelineItems,
@@ -20,6 +24,7 @@ const status: EngineStatus = {
   updated_at: 1,
   engine_pid: 41,
   current: null,
+  recent_starts: [],
   queue_count: 0,
   queue: [],
   history_count: 0,
@@ -38,6 +43,25 @@ test("ignores status until the new engine has published its process ID", () => {
   assert.equal(statusForEngineProcess(status, undefined), null);
 });
 
+test("does not treat a stale heartbeat as a live engine", () => {
+  const process = { updated_at: 100, engine_pid: 41 };
+  assert.equal(engineProcessIsLive(process, true, () => false, 101), false);
+  assert.equal(engineProcessIsLive(process, false, () => true, 101), true);
+  assert.equal(engineProcessIsLive(process, true, () => true, 1_000), true);
+});
+
+test("a stopped engine cannot be presented as active because work is queued", () => {
+  assert.equal(runtimeStateForSnapshot(true, false, "playing"), "stopped");
+  assert.equal(runtimeStateForSnapshot(true, true, "playing"), "playing");
+  assert.equal(runtimeStateForSnapshot(false, false, undefined), "setup_required");
+});
+
+test("an incompatible external engine cannot leave the app loading forever", () => {
+  assert.equal(compatibleEngineIsRunning(false, null, true), false);
+  assert.equal(compatibleEngineIsRunning(false, status, true), true);
+  assert.equal(compatibleEngineIsRunning(true, null, false), true);
+});
+
 test("accepts a complete current-version status", () => {
   assert.equal(parseEngineStatus(status), status);
 });
@@ -54,6 +78,10 @@ test("rejects an older status while retaining its process metadata", () => {
 test("rejects a partial current-version status instead of inventing missing fields", () => {
   const { history: _history, ...partial } = status;
   assert.equal(parseEngineStatus(partial), null);
+});
+
+test("rejects a status whose waiting count disagrees with its queue", () => {
+  assert.equal(parseEngineStatus({ ...status, queue_count: 1 }), null);
 });
 
 test("normalizes an engine play acknowledgement", () => {
@@ -89,7 +117,37 @@ test("does not mistake an existing History row for started playback", () => {
   );
   assert.equal(
     playAcceptanceState(
+      { ...status, state: "stopped", updated_at: 13, queue_count: 1, queue: [archived] },
+      acceptance,
+    ),
+    "failed",
+  );
+  assert.equal(
+    playAcceptanceState(
       { ...status, state: "playing", updated_at: 13, current: { ...archived, piece: 1, piece_count: 1, elapsed_seconds: 0 }, history_count: 1, history: [archived] },
+      acceptance,
+    ),
+    "pending",
+  );
+  assert.equal(
+    playAcceptanceState(
+      { ...status, updated_at: 13, history_count: 1, history: [archived] },
+      acceptance,
+    ),
+    "failed",
+  );
+  assert.equal(
+    playAcceptanceState(
+      {
+        ...status,
+        updated_at: 13,
+        recent_starts: [
+          { id: "009-af_heart-say", started_at: 13 },
+          { id: archived.id, started_at: 12.5 },
+        ],
+        history_count: 1,
+        history: [archived],
+      },
       acceptance,
     ),
     "applied",
@@ -146,9 +204,14 @@ test("reflects pause commands immediately without creating an empty paused state
   assert.equal(statusAfterPauseCommand(active, true).state, "paused");
   assert.equal(statusAfterPauseCommand({ ...active, queue_count: 0, queue: [] }, true).state, "idle");
   assert.equal(statusAfterPauseCommand({ ...active, state: "loading" }, true).state, "loading");
+  assert.equal(statusAfterPauseCommand({ ...active, engine_running: false }, true).state, "stopped");
+  assert.equal(
+    statusAfterPauseCommand({ ...active, state: "loading", engine_running: false }, true).state,
+    "stopped",
+  );
 });
 
-test("presents a selected item as playing before the engine starts audio", () => {
+test("keeps an accepted selection paused until the user resumes it", () => {
   const selected = {
     id: "007-bm_fable-say",
     filename: "007-bm_fable-say.txt",
@@ -162,7 +225,38 @@ test("presents a selected item as playing before the engine starts audio", () =>
       state: "paused",
       history_count: 1,
       history: [selected],
-    }, selected),
+    }, { item: selected, state: "paused" }),
+    { state: "paused", item: selected },
+  );
+});
+
+test("a fresh external transport command updates an accepted selection", () => {
+  const acceptance = { id: "007-bm_fable-say", acceptedAt: 12 };
+
+  assert.equal(
+    pendingPlaybackState({ ...status, state: "paused", updated_at: 11 }, acceptance, "playing"),
+    "playing",
+  );
+  assert.equal(
+    pendingPlaybackState({ ...status, state: "paused", updated_at: 13 }, acceptance, "playing"),
+    "paused",
+  );
+  assert.equal(
+    pendingPlaybackState({ ...status, state: "playing", updated_at: 14 }, acceptance, "paused"),
+    "playing",
+  );
+});
+
+test("an explicit selection starts playing even from a stale paused snapshot", () => {
+  const selected = {
+    id: "007-bm_fable-say",
+    filename: "007-bm_fable-say.txt",
+    text: "Selected",
+    voice: "bm_fable",
+  };
+
+  assert.deepEqual(
+    playbackPresentation({ ...status, state: "paused" }, { item: selected, state: "playing" }),
     { state: "playing", item: selected },
   );
 });
@@ -175,7 +269,7 @@ test("presents a selection immediately while a stopped engine restarts", () => {
     voice: "bm_fable",
   };
   assert.deepEqual(
-    playbackPresentation(status, selected),
+    playbackPresentation(status, { item: selected, state: "playing" }),
     { state: "playing", item: selected },
   );
 });
