@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   ENGINE_STATUS_VERSION,
   activeTimelineIds,
+  clearRequestWasApplied,
   compatibleEngineIsRunning,
   currentPieceSegments,
   engineProcessIsLive,
@@ -252,6 +253,46 @@ test("active timeline IDs include Current and Waiting", () => {
   };
   assert.deepEqual([...activeTimelineIds({ current, queue: [waiting] })], ["c", "w"]);
   assert.deepEqual([...activeTimelineIds({ current: null, queue: [] })], []);
+});
+
+test("clear confirmation requires a newer status without the baseline IDs", () => {
+  const baseline = new Set(["selected"]);
+  const selected = {
+    id: "selected",
+    filename: "selected-af_heart-say.txt",
+    text: "Selected",
+    voice: "af_heart",
+    piece: 0,
+    piece_count: 1,
+    piece_start: null,
+    piece_end: null,
+    elapsed_seconds: 0,
+  };
+
+  assert.equal(
+    clearRequestWasApplied(
+      { ...status, updated_at: 10, current: null, queue: [] },
+      baseline,
+      10,
+    ),
+    false,
+  );
+  assert.equal(
+    clearRequestWasApplied(
+      { ...status, updated_at: 11, current: selected, queue: [] },
+      baseline,
+      10,
+    ),
+    false,
+  );
+  assert.equal(
+    clearRequestWasApplied(
+      { ...status, updated_at: 12, current: null, queue: [] },
+      baseline,
+      10,
+    ),
+    true,
+  );
 });
 
 test("normalizes an engine play acknowledgement", () => {

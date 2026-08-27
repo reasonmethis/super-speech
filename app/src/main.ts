@@ -3,7 +3,7 @@ import {
   ENGINE_STATUS_VERSION,
   INITIAL_STATUS,
   VOICE_OPTIONS,
-  activeTimelineIds,
+  clearRequestWasApplied,
   currentPieceSegments,
   moveQueueItemBefore,
   pendingPlaybackState,
@@ -162,6 +162,7 @@ let failedChunkId: string | null = null;
 let clearPending = false;
 let clearFailed = false;
 let clearBaselineIds = new Set<string>();
+let clearRequestedAfter: number | null = null;
 let clearTimeoutId: number | null = null;
 let expandedItemId: string | null = null;
 let renderedTimelineKey: string | null = null;
@@ -276,9 +277,8 @@ function reconcileCommands(status: RuntimeStatus): void {
     pendingSelection = null;
     commandStatus.textContent = "Could not start selected speech. Try again.";
   }
-  const activeIds = activeTimelineIds(status);
-  const clearWasApplied = clearBaselineIds.size > 0 &&
-    [...clearBaselineIds].every((id) => !activeIds.has(id));
+  const clearWasApplied = clearRequestedAfter !== null &&
+    clearRequestWasApplied(status, clearBaselineIds, clearRequestedAfter);
   if (clearWasApplied) {
     const restoreFocus = document.activeElement === clearQueueButton;
     if (clearTimeoutId !== null) {
@@ -288,6 +288,7 @@ function reconcileCommands(status: RuntimeStatus): void {
     clearPending = false;
     clearFailed = false;
     clearBaselineIds = new Set();
+    clearRequestedAfter = null;
     commandStatus.textContent = "";
     if (restoreFocus) {
       queueList.focus({ preventScroll: true });
@@ -2006,6 +2007,7 @@ clearQueueButton.addEventListener("click", async () => {
     return;
   }
   const projectedActiveIds = new Set(projectedActiveItems.map(({ id }) => id));
+  const selectionAcceptedAt = pendingSelection?.acceptance?.acceptedAt ?? 0;
   if (pendingSelection) {
     window.clearTimeout(pendingSelection.timeoutId);
     pendingSelection = null;
@@ -2013,6 +2015,7 @@ clearQueueButton.addEventListener("click", async () => {
   clearPending = true;
   clearFailed = false;
   clearBaselineIds = projectedActiveIds;
+  clearRequestedAfter = Math.max(currentStatus.updated_at, selectionAcceptedAt);
   commandStatus.textContent = "";
   clearTimeoutId = window.setTimeout(() => {
     clearTimeoutId = null;
@@ -2032,6 +2035,8 @@ clearQueueButton.addEventListener("click", async () => {
       window.clearTimeout(clearTimeoutId);
       clearTimeoutId = null;
       clearPending = false;
+      clearBaselineIds = new Set();
+      clearRequestedAfter = null;
       render(currentStatus);
     }
   } catch (error) {
@@ -2042,6 +2047,8 @@ clearQueueButton.addEventListener("click", async () => {
     clearTimeoutId = null;
     clearPending = false;
     clearFailed = true;
+    clearBaselineIds = new Set();
+    clearRequestedAfter = null;
     commandStatus.textContent = "Could not clear speech. Try again.";
     render(currentStatus);
   }

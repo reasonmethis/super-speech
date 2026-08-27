@@ -450,6 +450,18 @@ export function activeTimelineIds(
   ]);
 }
 
+export function clearRequestWasApplied(
+  status: Pick<EngineStatus, "updated_at" | "current" | "queue">,
+  baselineIds: ReadonlySet<string>,
+  requestedAfter: number,
+): boolean {
+  if (baselineIds.size === 0 || status.updated_at <= requestedAfter) {
+    return false;
+  }
+  const activeIds = activeTimelineIds(status);
+  return [...baselineIds].every((id) => !activeIds.has(id));
+}
+
 /**
  * Reclassify one existing row as Current without changing visual order
  * sourceId identifies the original card when a voice change creates a replacement ID
