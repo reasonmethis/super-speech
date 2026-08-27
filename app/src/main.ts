@@ -2006,6 +2006,7 @@ clearQueueButton.addEventListener("click", async () => {
   ) {
     return;
   }
+  const clearRequestedAt = Date.now() / 1000;
   const projectedActiveIds = new Set(projectedActiveItems.map(({ id }) => id));
   const selectionAcceptedAt = pendingSelection?.acceptance?.acceptedAt ?? 0;
   if (pendingSelection) {
@@ -2015,7 +2016,11 @@ clearQueueButton.addEventListener("click", async () => {
   clearPending = true;
   clearFailed = false;
   clearBaselineIds = projectedActiveIds;
-  clearRequestedAfter = Math.max(currentStatus.updated_at, selectionAcceptedAt);
+  clearRequestedAfter = Math.max(
+    clearRequestedAt,
+    currentStatus.updated_at,
+    selectionAcceptedAt,
+  );
   commandStatus.textContent = "";
   clearTimeoutId = window.setTimeout(() => {
     clearTimeoutId = null;

@@ -279,6 +279,14 @@ test("clear confirmation requires a newer status without the baseline IDs", () =
   );
   assert.equal(
     clearRequestWasApplied(
+      { ...status, updated_at: 10.5, current: null, queue: [] },
+      baseline,
+      11,
+    ),
+    false,
+  );
+  assert.equal(
+    clearRequestWasApplied(
       { ...status, updated_at: 11, current: selected, queue: [] },
       baseline,
       10,
