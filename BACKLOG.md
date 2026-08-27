@@ -76,7 +76,8 @@ work session without having to reconstruct the product decisions.
 - Default voice, speaking speed, output device, and volume controls
 - Global pause/resume shortcut
 - Optional mini-player that stays above other windows
-- Light theme, high-contrast mode, reduced motion, and full keyboard navigation
+- [x] Persisted Dark and Light appearance themes
+- High-contrast mode, reduced motion controls, and full keyboard navigation
 - Friendly recovery for a missing audio device or a failed model load
 
 ## P2: maintenance

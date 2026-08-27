@@ -12,6 +12,7 @@ import {
   parseEngineProcessStatus,
   parsePlayAcceptance,
   runtimeStateForSnapshot,
+  statusAfterTransientRead,
   statusForEngineProcess,
   statusAfterPauseCommand,
   timelineItems,
@@ -64,6 +65,16 @@ test("an incompatible external engine cannot leave the app loading forever", () 
 
 test("accepts a complete current-version status", () => {
   assert.equal(parseEngineStatus(status), status);
+});
+
+test("keeps the last status through a transient read failure", () => {
+  assert.equal(statusAfterTransientRead(null, status), status);
+  assert.equal(statusAfterTransientRead(null, null), null);
+  assert.equal(statusAfterTransientRead(status, null), status);
+  assert.equal(
+    statusAfterTransientRead({ ...status, version: ENGINE_STATUS_VERSION - 1 }, status),
+    null,
+  );
 });
 
 test("rejects an older status while retaining its process metadata", () => {

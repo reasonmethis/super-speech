@@ -86,7 +86,32 @@ const queueList = requiredElement<HTMLDivElement>("queue-list");
 const queueActionMenu = requiredElement<HTMLDivElement>("queue-action-menu");
 const commandStatus = requiredElement<HTMLDivElement>("command-status");
 const versionLabel = requiredElement<HTMLSpanElement>("version-label");
+const ambientRings = [...document.querySelectorAll<HTMLElement>(".ring")];
 const desktopApi = window.superSpeech;
+const themeButtons = [...document.querySelectorAll<HTMLButtonElement>("[data-theme-choice]")];
+
+type Theme = "dark" | "light";
+
+function applyTheme(theme: Theme): void {
+  document.body.dataset.theme = theme;
+  document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute(
+    "content",
+    theme === "light" ? "#eef0f5" : "#0b0d14",
+  );
+  for (const button of themeButtons) {
+    button.setAttribute("aria-pressed", String(button.dataset.themeChoice === theme));
+  }
+}
+
+const savedTheme = localStorage.getItem("super-speech-theme");
+applyTheme(savedTheme === "light" ? "light" : "dark");
+for (const button of themeButtons) {
+  button.addEventListener("click", () => {
+    const theme = button.dataset.themeChoice === "light" ? "light" : "dark";
+    localStorage.setItem("super-speech-theme", theme);
+    applyTheme(theme);
+  });
+}
 
 interface PendingSelection {
   selectedItem: TimelineItem;
@@ -139,6 +164,7 @@ const suppressedChunkClicks = new WeakSet<HTMLButtonElement>();
 let pendingChunkExpansion: PendingChunkExpansion | null = null;
 let openMenuItemId: string | null = null;
 let revealedCurrentItemId: string | null = null;
+let ringSettlingAnimations: Animation[] = [];
 
 const POINTER_GESTURE_THRESHOLD = 5;
 const QUEUE_REORDER_ANIMATION_MS = 140;
@@ -321,6 +347,34 @@ function playbackIconMarkup(state: PlaybackPresentation["state"]): string {
   return '<img class="idle-icon" src="./icon.svg" alt="">';
 }
 
+function setPlaybackState(state: PlaybackPresentation["state"]): void {
+  const previous = document.body.dataset.state;
+  if (state === "playing") {
+    for (const animation of ringSettlingAnimations) {
+      animation.cancel();
+    }
+    ringSettlingAnimations = [];
+  }
+  if (
+    previous !== "playing" ||
+    state === "playing" ||
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  ) {
+    document.body.dataset.state = state;
+    return;
+  }
+
+  const snapshots = ambientRings.map((ring) => {
+    const style = getComputedStyle(ring);
+    return { opacity: style.opacity, transform: style.transform };
+  });
+  document.body.dataset.state = state;
+  ringSettlingAnimations = ambientRings.map((ring, index) => ring.animate(
+    [snapshots[index], { opacity: "1", transform: "scale(1)" }],
+    { duration: 520, easing: "ease-out" },
+  ));
+}
+
 function render(status: RuntimeStatus): void {
   reconcileCommands(status);
   currentStatus = status;
@@ -333,7 +387,7 @@ function render(status: RuntimeStatus): void {
   const copy = statusCopy(presentation);
   const action = playbackAction(presentation.state);
   const showPlaybackCopy = copy.title !== undefined;
-  document.body.dataset.state = presentation.state;
+  setPlaybackState(presentation.state);
 
   statusDot.className = `status-dot state-${presentation.state}`;
   statusLabel.textContent = copy.label;
@@ -1118,7 +1172,9 @@ function createTimelineDivider(section: TimelineSection): HTMLDivElement {
 function revealCurrentItem(): void {
   const currentId = currentStatus.current?.id ?? null;
   if (!currentId) {
-    revealedCurrentItemId = null;
+    if (currentStatus.state === "idle" && currentStatus.queue_count === 0) {
+      revealedCurrentItemId = null;
+    }
     return;
   }
   if (currentId === revealedCurrentItemId) {
@@ -1157,7 +1213,6 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     updateTimelineDividers(items, historyTotal);
     updateTimelineRows(items);
     revealCurrentItem();
-    updateTimelineFade();
     return;
   }
   cancelQueuePointerDrag();
@@ -1180,7 +1235,6 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     empty.className = "queue-empty";
     empty.innerHTML = '<span class="empty-check">&#10003;</span><span>No speech yet</span>';
     queueList.append(empty);
-    updateTimelineFade();
     return;
   }
 
@@ -1297,7 +1351,6 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
   updateTimelineDividers(items, historyTotal);
   updateTimelineRows(items);
   revealCurrentItem();
-  updateTimelineFade();
   if (focusedItemId) {
     const row = queueList.querySelector<HTMLElement>(`[data-item-id="${focusedItemId}"]`);
     const preferred = focusedControlClass
@@ -1387,11 +1440,6 @@ function updateTimelineRows(items: TimelineItem[]): void {
   }
 }
 
-function updateTimelineFade(): void {
-  const remaining = queueList.scrollHeight - queueList.clientHeight - queueList.scrollTop;
-  queueList.classList.toggle("has-more", remaining > 1);
-}
-
 function setExpandedItem(id: string | null): void {
   expandedItemId = id;
   const itemById = new Map(timelineItems(currentStatus).map((item) => [item.id, item]));
@@ -1409,7 +1457,6 @@ function setExpandedItem(id: string | null): void {
       accessibleText.hidden = !expanded;
     }
   }
-  updateTimelineFade();
 }
 
 async function playTimelineItem(item: TimelineItem, voice?: string): Promise<void> {
@@ -1910,7 +1957,6 @@ queueList.addEventListener("scroll", () => {
   if (openMenuItemId) {
     setOpenActionMenu(openMenuItemId);
   }
-  updateTimelineFade();
 }, { passive: true });
 window.addEventListener("pointermove", updateQueuePointerDrag, true);
 window.addEventListener("pointermove", updateChunkPointerGesture, true);

@@ -195,6 +195,37 @@ try {
     env: environment,
   });
   const page = await electronApp.firstWindow();
+  const settingsButton = page.locator("#settings-button");
+  const settingsPanel = page.locator("#settings-panel");
+  await settingsButton.click();
+  assert(
+    await settingsPanel.evaluate((panel) => panel.matches(":popover-open")),
+    "The Settings button did not open its panel",
+  );
+  await settingsPanel.getByRole("button", { name: "Light" }).click();
+  assert.equal(await page.locator("body").getAttribute("data-theme"), "light");
+  assert.equal(
+    await page.evaluate(() => localStorage.getItem("super-speech-theme")),
+    "light",
+    "The light theme choice must persist",
+  );
+  assert.equal(
+    await page.locator('meta[name="theme-color"]').getAttribute("content"),
+    "#eef0f5",
+  );
+  if (process.env.SUPER_SPEECH_SCREENSHOT) {
+    const screenshot = path.parse(process.env.SUPER_SPEECH_SCREENSHOT);
+    await page.screenshot({
+      path: path.join(screenshot.dir, `${screenshot.name}-light${screenshot.ext}`),
+    });
+  }
+  await settingsPanel.getByRole("button", { name: "Dark" }).click();
+  assert.equal(await page.locator("body").getAttribute("data-theme"), "dark");
+  await page.keyboard.press("Escape");
+  assert(
+    !await settingsPanel.evaluate((panel) => panel.matches(":popover-open")),
+    "Escape must close Settings",
+  );
   const maximizeButton = page.locator("#maximize-button");
   await maximizeButton.click();
   await waitFor(
@@ -262,6 +293,22 @@ try {
     "Every waiting row must have a reorder handle",
   );
   assert.equal(
+    await page.locator("#queue-list").evaluate((list) => getComputedStyle(list).maskImage),
+    "none",
+    "The Speechicles viewport must have a clean bottom edge",
+  );
+  assert.equal(
+    await page.locator(".queue-item").first().evaluate((row) => getComputedStyle(row).borderRadius),
+    "9px",
+    "Speechicle cards must use the tighter corner radius",
+  );
+  assert(
+    await page.locator("footer").evaluate((footer) =>
+      window.innerHeight - footer.getBoundingClientRect().bottom <= 10
+    ),
+    "The footer must sit close to the bottom edge",
+  );
+  assert.equal(
     await page.locator("#speech-heading").textContent(),
     "Speechicles",
     "The timeline must use the Speechicles brand name",
@@ -305,6 +352,12 @@ try {
   await waitFor(
     async () => await page.locator("body").getAttribute("data-state") === "paused",
     "The Electron window did not return to the paused layout",
+  );
+  assert(
+    await page.locator(".ring-one").evaluate((ring) =>
+      ring.getAnimations().some((animation) => animation.effect?.getTiming().duration === 520)
+    ),
+    "The ambient rings must settle smoothly when playback stops",
   );
   await page.evaluate(() => {
     const animate = Element.prototype.animate;

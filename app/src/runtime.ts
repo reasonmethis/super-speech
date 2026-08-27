@@ -319,6 +319,13 @@ export function parseEngineStatus(value: unknown): EngineStatus | null {
   return null;
 }
 
+export function statusAfterTransientRead(
+  value: unknown,
+  previous: EngineStatus | null,
+): EngineStatus | null {
+  return parseEngineStatus(value) ?? (value === null ? previous : null);
+}
+
 export function parseEngineProcessStatus(value: unknown): EngineProcessStatus | null {
   if (!value || typeof value !== "object") {
     return null;

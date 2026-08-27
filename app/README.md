@@ -14,7 +14,8 @@ resulting queue ID, so the renderer never infers acceptance from matching text.
 The renderer projects one timeline with Waiting, Current, and History dividers,
 under the Speechicles heading. It reveals a new current row once, then leaves
 scrolling under user control while status polling preserves the existing row
-nodes.
+nodes. The renderer stores its Dark or Light appearance choice in the app's
+local profile; speech and queue state remain engine-owned.
 
 ## Prerequisites
 

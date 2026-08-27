@@ -33,8 +33,10 @@ import {
   parseEngineProcessStatus,
   parsePlayAcceptance,
   runtimeStateForSnapshot,
+  statusAfterTransientRead,
   statusAfterPauseCommand,
   statusForEngineProcess,
+  type EngineStatus,
   type EngineProcessStatus,
   type PlayAcceptance,
   type RuntimeStatus,
@@ -54,6 +56,7 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let ownedEngine: ChildProcess | null = null;
 let quitting = false;
+let lastEngineStatus: EngineStatus | null = null;
 
 interface EngineLaunch {
   command: string;
@@ -182,8 +185,12 @@ function getStatus(): RuntimeStatus {
   const installed = modelsInstalled(modelDirectory());
   const ownedEngineRunning = ownedEngine !== null && ownedEngine.exitCode === null;
   const storedSnapshot = readStatusSnapshot(base);
-  const storedEngine = parseEngineStatus(storedSnapshot);
-  const storedProcess = parseEngineProcessStatus(storedSnapshot);
+  const storedEngine = statusAfterTransientRead(storedSnapshot, lastEngineStatus);
+  if (storedSnapshot !== null && storedEngine) {
+    lastEngineStatus = storedEngine;
+  }
+  const storedProcess = parseEngineProcessStatus(storedSnapshot) ??
+    (storedSnapshot === null ? lastEngineStatus : null);
   const engine = ownedEngineRunning
     ? statusForEngineProcess(storedEngine, ownedEngine?.pid)
     : storedEngine;

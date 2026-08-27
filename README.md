@@ -68,6 +68,10 @@ an active speech item. A stopped engine remains Stopped even if speech is still
 waiting. Starting a row explicitly enters Playing; pausing it afterward remains
 Paused while that selection is prepared.
 
+The title-bar Settings button switches between persisted Dark and Light themes.
+The light theme uses a cool gray window background so the white Super Speech
+icon remains distinct.
+
 In desktop mode, mutable state stays in `~/.super-speech/`. The installed model
 and engine are read-only application resources. A headless installation keeps
 its corresponding runtime inside the installed skill instead.
