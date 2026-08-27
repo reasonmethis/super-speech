@@ -386,7 +386,12 @@ function renderCurrentSpeechText(
   if (pieceKey !== lastFollowedPieceKey) {
     lastFollowedPieceKey = pieceKey;
     requestAnimationFrame(() => {
-      active.scrollIntoView({ block: "center", behavior: "smooth" });
+      active.scrollIntoView({
+        block: "center",
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+          ? "auto"
+          : "smooth",
+      });
     });
   }
 }
@@ -482,6 +487,7 @@ function render(status: RuntimeStatus): void {
     playbackCopy.tabIndex = 0;
     playbackCopy.setAttribute("role", "button");
     playbackCopy.setAttribute("aria-expanded", String(playbackExpanded));
+    playbackCopy.setAttribute("aria-describedby", "playback-title current-text");
     playbackCopy.setAttribute(
       "aria-label",
       playbackExpanded ? "Collapse current speech text" : "Expand current speech text",
@@ -490,6 +496,7 @@ function render(status: RuntimeStatus): void {
     playbackCopy.removeAttribute("tabindex");
     playbackCopy.removeAttribute("role");
     playbackCopy.removeAttribute("aria-expanded");
+    playbackCopy.removeAttribute("aria-describedby");
     playbackCopy.removeAttribute("aria-label");
   }
   renderCurrentSpeechText(copy.body ?? "", followedCurrent);
@@ -520,10 +527,11 @@ function render(status: RuntimeStatus): void {
     voicePill.classList.add("is-hidden");
   }
 
-  const activeCount = activeTimelineIds(status).size;
+  const visibleItems = visibleTimelineItems(status);
+  const activeCount = visibleItems.filter(({ kind }) => kind !== "history").length;
   clearQueueButton.classList.toggle("is-hidden", activeCount === 0);
   clearQueueButton.disabled = commandPending || clearPending || pendingQueueMutation !== null ||
-    pendingSelection !== null;
+    (pendingSelection !== null && pendingSelection.acceptance === null);
   clearQueueButton.setAttribute("aria-disabled", String(clearQueueButton.disabled));
   clearQueueButton.setAttribute("aria-busy", String(clearPending));
   clearQueueButton.setAttribute(
@@ -539,7 +547,6 @@ function render(status: RuntimeStatus): void {
     : clearFailed
       ? "Retry clear all"
       : "Clear all";
-  const visibleItems = visibleTimelineItems(status);
   const hiddenHistoryCount = Math.max(0, status.history_count - status.history.length);
   const projectedHistoryTotal = hiddenHistoryCount +
     visibleItems.filter(({ kind }) => kind === "history").length;
@@ -1986,18 +1993,26 @@ playbackCopy.addEventListener("keydown", (event) => {
 });
 
 clearQueueButton.addEventListener("click", async () => {
+  const projectedActiveItems = visibleTimelineItems().filter(
+    ({ kind }) => kind !== "history",
+  );
   if (
     commandPending ||
     clearPending ||
     pendingQueueMutation ||
-    pendingSelection ||
-    activeTimelineIds(currentStatus).size === 0
+    (pendingSelection !== null && pendingSelection.acceptance === null) ||
+    projectedActiveItems.length === 0
   ) {
     return;
   }
+  const projectedActiveIds = new Set(projectedActiveItems.map(({ id }) => id));
+  if (pendingSelection) {
+    window.clearTimeout(pendingSelection.timeoutId);
+    pendingSelection = null;
+  }
   clearPending = true;
   clearFailed = false;
-  clearBaselineIds = activeTimelineIds(currentStatus);
+  clearBaselineIds = projectedActiveIds;
   commandStatus.textContent = "";
   clearTimeoutId = window.setTimeout(() => {
     clearTimeoutId = null;

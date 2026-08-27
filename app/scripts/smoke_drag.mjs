@@ -28,6 +28,7 @@ const environment = {
   SUPER_SPEECH_HOME: runtime,
   SUPER_SPEECH_MODEL_DIR: path.join(appDirectory, "build-resources", "models", "kokoro"),
   SUPER_SPEECH_SILENT: "1",
+  SUPER_SPEECH_SPLIT_CHARS: "250",
   SUPER_SPEECH_SKIP_SKILL_INSTALL: "1",
 };
 
@@ -210,6 +211,10 @@ try {
   await waitFor(
     async () => await page.locator("#current-text").textContent() === followedText,
     "The compact playback card did not follow the current speech piece",
+  );
+  assert.equal(
+    await page.locator("#playback-copy").getAttribute("aria-describedby"),
+    "playback-title current-text",
   );
   await page.locator(".queue-item.is-current").waitFor();
   assert(
@@ -1219,6 +1224,7 @@ try {
   );
   assert.equal(await page.locator("#playback-copy").getAttribute("role"), null);
   assert.equal(await page.locator("#playback-copy").getAttribute("aria-label"), null);
+  assert.equal(await page.locator("#playback-copy").getAttribute("aria-describedby"), null);
 
   runEngine(
     "speak",

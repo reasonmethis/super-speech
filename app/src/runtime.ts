@@ -450,6 +450,10 @@ export function activeTimelineIds(
   ]);
 }
 
+/**
+ * Reclassify one existing row as Current without changing visual order
+ * sourceId identifies the original card when a voice change creates a replacement ID
+ */
 export function timelineItemsAtBoundary(
   status: Pick<EngineStatus, "current" | "queue" | "history">,
   boundary: QueueItem,

@@ -79,7 +79,8 @@ Sentence-aligned pieces are an internal synthesis and buffering detail, not sepa
 history entries. The current item remains active while the engine waits for its
 next rendered piece. While a piece is active, `piece_start` and `piece_end`
 identify its zero-based, end-exclusive Unicode code-point range in the complete
-Current text. Before the first piece starts, both ranges are null. Every entry
+Current text. Before the first piece starts, `piece` is 0 and both ranges are
+null. Active pieces use `piece` values from 1 through `piece_count`. Every entry
 has an opaque `id`. The total `history_count`
 can exceed the bounded
 `history` array.
