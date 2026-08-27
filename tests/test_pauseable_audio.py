@@ -383,6 +383,53 @@ def test_status_stays_playing_while_queued_audio_is_being_prepared(
     assert status["queue"] == []
 
 
+@pytest.mark.parametrize("cached_projection", ["missing", "mismatched"])
+def test_status_uses_queue_first_when_cached_progress_cannot_apply(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cached_projection: str,
+) -> None:
+    engine = load_engine(f"super_speech_engine_status_{cached_projection}_progress")
+    configure_runtime(engine, tmp_path)
+    first = engine.QUEUE / "001-af_heart-say.txt"
+    second = engine.QUEUE / "002-bm_fable-say.txt"
+    first.write_text("Durable first", encoding="utf-8")
+    second.write_text("Cached second", encoding="utf-8")
+    state = engine.State()
+    if cached_projection == "mismatched":
+        set_current(engine, state, second, piece=2, piece_count=3)
+    monkeypatch.setattr(engine, "activate_next_chunk", lambda _state: False)
+
+    status = engine.publish_status("idle", state, force=True)
+
+    assert status is not None
+    assert status["current"]["id"] == speechicle_id(engine, first)
+    assert status["current"]["text"] == "Durable first"
+    assert status["current"]["piece"] == 0
+    assert [item["id"] for item in status["queue"]] == [
+        speechicle_id(engine, second)
+    ]
+
+
+def test_activation_replaces_progress_that_is_not_for_queue_first(tmp_path: Path) -> None:
+    engine = load_engine("super_speech_engine_activation_durable_first")
+    configure_runtime(engine, tmp_path)
+    first = engine.QUEUE / "001-af_heart-say.txt"
+    second = engine.QUEUE / "002-bm_fable-say.txt"
+    first.write_text("Durable first", encoding="utf-8")
+    second.write_text("Stale projection", encoding="utf-8")
+    state = engine.State()
+    set_current(engine, state, second, piece=1, piece_count=2)
+    state.saw_stop = True
+
+    assert engine.activate_next_chunk(state)
+
+    assert state.current is not None
+    assert state.current.filename == first.name
+    assert state.current.progress.piece == 0
+    assert not hasattr(state, "selection_name")
+
+
 def test_status_cannot_be_paused_without_current_or_waiting_speech(
     tmp_path: Path,
 ) -> None:
@@ -660,8 +707,30 @@ def test_moving_a_waiting_chunk_resets_banked_audio_but_keeps_current(
     assert buffered.get_nowait() == (current, "current piece")
     assert buffered.empty()
     assert state.claims == {current.name: generations[current.name]}
-    assert state.selection_name is None
     assert engine.claim_next_queued_chunk(state) == third
+
+
+def test_reset_waiting_buffer_keeps_queue_first_claim_without_cached_progress(
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_reset_without_projection")
+    configure_runtime(engine, tmp_path)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-bm_fable-say.txt"
+    current.write_text("Current", encoding="utf-8")
+    waiting.write_text("Waiting", encoding="utf-8")
+    buffered: queue.Queue = queue.Queue()
+    buffered.put((current, "current piece"))
+    buffered.put((waiting, "waiting piece"))
+    state = engine.State()
+    _, current_generation = engine._record_claim(state, current)
+    engine._record_claim(state, waiting)
+
+    assert engine._reset_waiting_buffer(buffered, state) == 1
+
+    assert buffered.get_nowait() == (current, "current piece")
+    assert buffered.empty()
+    assert state.claims == {current.name: current_generation}
 
 
 def test_archiving_one_waiting_chunk_preserves_current_and_remaining_queue(
@@ -697,21 +766,21 @@ def test_archiving_one_waiting_chunk_preserves_current_and_remaining_queue(
     assert set(state.claims) == {current.name}
 
 
-def test_queue_mutation_cannot_cancel_an_accepted_selection(tmp_path: Path) -> None:
-    engine = load_engine("super_speech_engine_selected_queue_mutation")
+def test_waiting_mutation_rejects_queue_first_without_a_projection(tmp_path: Path) -> None:
+    engine = load_engine("super_speech_engine_first_queue_mutation")
     configure_runtime(engine, tmp_path)
-    selected = engine.QUEUE / "002-bm_fable-say.txt"
-    selected.write_text("Selected", encoding="utf-8")
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-bm_fable-say.txt"
+    current.write_text("Current", encoding="utf-8")
+    waiting.write_text("Waiting", encoding="utf-8")
     state = engine.State()
-    state.selection_name = selected.name
 
-    with pytest.raises(ValueError, match="selected speech is starting"):
+    with pytest.raises(ValueError, match="waiting chunk not found"):
         engine.apply_queue_command(
-            queue.Queue(), state, "archive", speechicle_id(engine, selected), None
+            queue.Queue(), state, "archive", speechicle_id(engine, current), None
         )
 
-    assert selected.exists()
-    assert state.selection_name == selected.name
+    assert engine.queue_files_in_order() == [current, waiting]
 
 
 def test_deleting_one_history_chunk_preserves_waiting_queue(tmp_path: Path) -> None:
@@ -841,10 +910,12 @@ def test_waiting_move_publishes_a_committed_result(
     engine = load_engine("super_speech_engine_queue_request")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    first = engine.QUEUE / "001-af_heart-say.txt"
-    second = engine.QUEUE / "002-bm_fable-say.txt"
-    first.write_text("First", encoding="utf-8")
-    second.write_text("Second", encoding="utf-8")
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    first = engine.QUEUE / "002-bm_fable-say.txt"
+    second = engine.QUEUE / "003-af_heart-say.txt"
+    current.write_text("Current", encoding="utf-8")
+    first.write_text("First waiting", encoding="utf-8")
+    second.write_text("Second waiting", encoding="utf-8")
 
     request_id = request_mutation(
         engine,
@@ -857,6 +928,7 @@ def test_waiting_move_publishes_a_committed_result(
     committed_result(engine, request_id)
 
     assert [path.stem for path in engine.queue_files_in_order()] == [
+        current.stem,
         second.stem,
         first.stem,
     ]
@@ -1038,7 +1110,9 @@ def test_unconfirmed_waiting_archive_stops_the_engine(
     engine = load_engine("super_speech_engine_queue_archive_unconfirmed")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    waiting = engine.QUEUE / "001-af_heart-say.txt"
+    current = engine.QUEUE / "001-bm_fable-say.txt"
+    waiting = engine.QUEUE / "002-af_heart-say.txt"
+    current.write_text("Current", encoding="utf-8")
     waiting.write_text("Waiting", encoding="utf-8")
     state = engine.State()
     engine._record_claim(state, waiting)
@@ -1419,6 +1493,32 @@ def test_playing_current_chunk_resumes_without_reordering(
     assert result["result_id"] == speechicle_id(engine, current)
 
 
+def test_playing_queue_first_resumes_when_cached_projection_is_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_play_current_without_projection")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-bm_fable-say.txt"
+    current.write_text("Current", encoding="utf-8")
+    waiting.write_text("Waiting", encoding="utf-8")
+    engine.PAUSE.touch()
+    state = engine.State()
+
+    request_id = request_mutation(
+        engine, "play", id=speechicle_id(engine, current), voice=None
+    )
+    assert engine.process_mutation_requests(queue.Queue(), state) is None
+
+    assert committed_result(engine, request_id)["result_id"] == speechicle_id(
+        engine, current
+    )
+    assert not engine.PAUSE.exists()
+    assert engine.queue_files_in_order() == [current, waiting]
+    assert not list(engine.SPOKEN.glob("*.txt"))
+
+
 def test_selecting_upcoming_chunk_archives_everything_older(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1472,15 +1572,20 @@ def test_selecting_waiting_chunk_without_playback_archives_older_waiting_items(
     newer = engine.QUEUE / "003-af_heart-say.txt"
     for path in (older, selected, newer):
         path.write_text(path.stem, encoding="utf-8")
+    state = engine.State()
 
     request_mutation(
         engine, "play", id=speechicle_id(engine, selected), voice=None
     )
-    assert engine.process_mutation_requests(queue.Queue(), engine.State()) == "select"
+    assert engine.process_mutation_requests(queue.Queue(), state) == "select"
 
     assert not older.exists()
     assert (engine.SPOKEN / older.name).exists()
     assert engine.queue_files_in_order() == [selected, newer]
+    assert state.current is not None and state.current.skip_initial_gap
+    assert engine.consume_initial_gap_skip(state, selected.name)
+    assert not engine.consume_initial_gap_skip(state, selected.name)
+    assert state.current is not None and not state.current.skip_initial_gap
 
 
 def test_selecting_waiting_chunk_rejects_an_archive_failure(
@@ -1503,7 +1608,6 @@ def test_selecting_waiting_chunk_rejects_an_archive_failure(
 
     result = rejected_result(engine, request_id)
     assert "could not select" in str(result["error"])
-    assert state.selection_name is None
     assert older.exists()
     assert selected.exists()
 
@@ -1620,6 +1724,7 @@ def test_history_selection_moves_only_the_playback_boundary(
     for path in history:
         path.write_text(path.stem, encoding="utf-8")
     engine.save_history_order(history)
+    active: list[Path] = []
     if include_active:
         active = [
             engine.enqueue_text("006-af_heart-say", "af_heart"),
@@ -1657,6 +1762,10 @@ def test_history_selection_moves_only_the_playback_boundary(
     selected_status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
     assert selected_status["current"]["id"] == speechicle_id(engine, selected)
+    assert engine.queue_files_in_order() == [
+        *[engine.QUEUE / path.name for path in reversed(history[: history_index + 1])],
+        *active,
+    ]
     assert visible_ids() == original_order
 
     restarted = engine.State()
@@ -2362,7 +2471,9 @@ def test_selection_interrupts_an_inter_chunk_gap(
     engine = load_engine("super_speech_engine_play_gap")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    current = engine.QUEUE / "001-af_heart-say.txt"
     selected = engine.QUEUE / "002-bm_fable-say.txt"
+    current.write_text("Current", encoding="utf-8")
     selected.write_text("Selected", encoding="utf-8")
     state = engine.State()
 
@@ -2381,8 +2492,10 @@ def test_reordering_during_a_gap_discards_the_held_piece(
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     held = engine.QUEUE / "001-af_heart-say.txt"
-    selected = engine.QUEUE / "002-bm_fable-say.txt"
+    waiting = engine.QUEUE / "002-bm_fable-say.txt"
+    selected = engine.QUEUE / "003-af_heart-say.txt"
     held.write_text("Held", encoding="utf-8")
+    waiting.write_text("Waiting", encoding="utf-8")
     selected.write_text("Selected", encoding="utf-8")
     state = engine.State()
     engine._record_claim(state, held)
@@ -2391,7 +2504,7 @@ def test_reordering_during_a_gap_discards_the_held_piece(
         "move",
         section="waiting",
         id=speechicle_id(engine, selected),
-        before_id=speechicle_id(engine, held),
+        before_id=speechicle_id(engine, waiting),
     )
 
     assert engine.gap_wait(1.0, queue.Queue(), state) == "queue_changed"
@@ -2399,7 +2512,7 @@ def test_reordering_during_a_gap_discards_the_held_piece(
 
     assert held.is_file()
     assert state.claims == {}
-    assert engine.claim_next_queued_chunk(state) == selected
+    assert engine.claim_next_queued_chunk(state) == held
 
 
 def test_queue_mutation_invalidates_the_piece_held_before_playback(
@@ -2449,7 +2562,6 @@ def test_stale_worker_release_preserves_a_replacement_current_claim(
     current.write_text("Current", encoding="utf-8")
     state = engine.State()
     set_current(engine, state, current)
-    state.selection_name = current.name
     _, old_generation = engine._record_claim(state, current)
     engine.invalidate_claim(state, current.name)
     _, replacement_generation = engine._record_claim(state, current)
@@ -2458,7 +2570,6 @@ def test_stale_worker_release_preserves_a_replacement_current_claim(
 
     assert state.claims == {current.name: replacement_generation}
     assert state.current is not None and state.current.filename == current.name
-    assert state.selection_name == current.name
 
 
 def test_piece_transition_for_another_filename_is_ignored(tmp_path: Path) -> None:
@@ -2811,7 +2922,6 @@ def test_invalidated_synthesis_failure_cannot_stop_the_selected_boundary(
             selected.read_text(encoding="utf-8"),
             engine.voice_from_name(selected.name),
         )
-        state.selection_name = selected.name
     assert engine.archive(old)
     release_synthesis.set()
     assert selected_synthesis.wait(1)
@@ -2912,7 +3022,6 @@ def test_transient_current_read_failure_remains_claimable_during_stop(
     waiting = engine.QUEUE / "001-af_heart-say.txt"
     waiting.write_text("Waiting", encoding="utf-8")
     state = engine.State()
-    set_current(engine, state, waiting)
     engine._record_claim(state, waiting)
     with state.lock:
         state.claims.pop(waiting.name, None)
@@ -4070,10 +4179,13 @@ def test_mutations_commit_and_publish_results_in_one_fifo_order(
     engine = load_engine("super_speech_engine_mutation_fifo")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    first = engine.QUEUE / "001-af_heart-say.txt"
-    second = engine.QUEUE / "002-bm_fable-say.txt"
-    first.write_text("First", encoding="utf-8")
-    second.write_text("Second", encoding="utf-8")
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    first = engine.QUEUE / "002-bm_fable-say.txt"
+    second = engine.QUEUE / "003-af_heart-say.txt"
+    current.write_text("Current", encoding="utf-8")
+    first.write_text("First waiting", encoding="utf-8")
+    second.write_text("Second waiting", encoding="utf-8")
+    current_id = speechicle_id(engine, current)
     first_id = speechicle_id(engine, first)
     second_id = speechicle_id(engine, second)
     move_request = request_mutation(
@@ -4084,7 +4196,7 @@ def test_mutations_commit_and_publish_results_in_one_fifo_order(
         before_id=first_id,
     )
     play_request = request_mutation(
-        engine, "play", id=second_id, voice=None
+        engine, "play", id=current_id, voice=None
     )
     published: list[str] = []
     real_publish = engine.publish_mutation_result
@@ -4098,10 +4210,10 @@ def test_mutations_commit_and_publish_results_in_one_fifo_order(
     assert engine.process_mutation_requests(queue.Queue(), engine.State()) == "queue_changed"
 
     assert published == [move_request, play_request]
-    assert committed_result(engine, move_request)["snapshot"]["current"]["id"] == second_id
+    assert committed_result(engine, move_request)["snapshot"]["current"]["id"] == current_id
     play_result = committed_result(engine, play_request)
-    assert play_result["result_id"] == second_id
-    assert play_result["snapshot"]["current"]["id"] == second_id
+    assert play_result["result_id"] == current_id
+    assert play_result["snapshot"]["current"]["id"] == current_id
 
 
 def test_later_waiting_move_does_not_hide_an_earlier_playback_selection(
