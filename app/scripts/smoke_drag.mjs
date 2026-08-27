@@ -177,6 +177,32 @@ async function playbackSnapshot(page) {
   });
 }
 
+async function playbackExpansionSnapshot(page) {
+  return page.evaluate(() => {
+    const bounds = (selector) => {
+      const rect = document.querySelector(selector)?.getBoundingClientRect();
+      if (!rect) {
+        throw new Error(`Missing ${selector}`);
+      }
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    };
+    const card = bounds("#playback-card");
+    const cardStyle = getComputedStyle(document.querySelector("#playback-card"));
+    return {
+      height: card.height,
+      stable: {
+        card: { x: card.x, y: card.y, width: card.width },
+        button: bounds("#playback-button"),
+        ring: bounds(".ambient-ring"),
+        backgroundColor: cardStyle.backgroundColor,
+        backgroundImage: cardStyle.backgroundImage,
+        padding: cardStyle.padding,
+        cursor: getComputedStyle(document.querySelector("#playback-copy")).cursor,
+      },
+    };
+  });
+}
+
 try {
   runEngine("pause");
   runEngine("speak", "Drag test one has enough words to keep silent playback active while the interface checks that playing and paused layouts stay perfectly aligned.");
@@ -225,6 +251,8 @@ try {
     }),
     "The app must reveal the current row when playback first appears",
   );
+  const compactPlayback = await playbackExpansionSnapshot(page);
+  assert.equal(compactPlayback.stable.cursor, "pointer");
   await page.locator("#playback-copy").click();
   assert(
     await page.locator("#playback-card").evaluate((card) => card.classList.contains("is-expanded")),
@@ -235,11 +263,15 @@ try {
     await page.locator(".queue-section").evaluate((section) => section.inert),
     "Expanded playback must remove the covered timeline from keyboard navigation",
   );
-  const expandedBounds = await page.locator("#playback-card").boundingBox();
+  const expandedPlayback = await playbackExpansionSnapshot(page);
   const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
-  assert(expandedBounds && viewport);
-  assert(expandedBounds.width >= viewport.width - 40);
-  assert(expandedBounds.height >= viewport.height - 90);
+  assert.deepEqual(
+    expandedPlayback.stable,
+    compactPlayback.stable,
+    "Expanding playback must preserve its top, width, styling, button, and rings",
+  );
+  assert(expandedPlayback.height > compactPlayback.height);
+  assert(expandedPlayback.height >= viewport.height - 70);
   if (process.env.SUPER_SPEECH_SCREENSHOT) {
     const screenshot = path.parse(process.env.SUPER_SPEECH_SCREENSHOT);
     await page.screenshot({

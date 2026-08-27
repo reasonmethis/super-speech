@@ -291,10 +291,8 @@ button {
 .playback-card.is-expanded {
   position: fixed;
   z-index: 20;
-  inset: 60px 16px 16px;
+  inset: 52px 24px 8px;
   min-height: 0;
-  padding: 18px 28px 24px;
-  background: var(--page-bg);
 }
 
 body.playback-expanded .queue-section,
@@ -486,7 +484,7 @@ body[data-state="loading"] .playback-icon,
 
 .playback-copy.is-expandable {
   border-radius: 10px;
-  cursor: zoom-in;
+  cursor: pointer;
 }
 
 .playback-copy.is-expandable:focus-visible {
@@ -494,22 +492,10 @@ body[data-state="loading"] .playback-icon,
   outline-offset: 5px;
 }
 
-.playback-card.is-expanded .playback-control {
-  width: 88px;
-  height: 88px;
-  flex-basis: 88px;
-  margin-top: 16px;
-  transform: scale(0.78);
-}
-
 .playback-card.is-expanded .playback-copy {
   min-height: 0;
   flex: 1;
-  margin-top: 16px;
-  padding: 18px 12px 8px;
   overflow-y: auto;
-  cursor: zoom-out;
-  text-align: left;
   user-select: text;
 }
 
@@ -520,6 +506,7 @@ body[data-state="loading"] .playback-icon,
   color: var(--text-secondary);
   font-size: 16px;
   line-height: 1.75;
+  text-align: left;
   white-space: pre-wrap;
   -webkit-line-clamp: unset;
 }

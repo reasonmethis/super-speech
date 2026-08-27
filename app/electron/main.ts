@@ -516,6 +516,7 @@ function createWindow(): void {
     maximizable: true,
     fullscreenable: false,
     frame: false,
+    roundedCorners: false,
     transparent: false,
     backgroundColor: "#0b0d14",
     show: false,
