@@ -506,7 +506,7 @@ def test_persistent_status_publication_failure_stops_the_engine(
     configure_runtime(engine, tmp_path)
     engine.ensure_identity_catalog()
     state = engine.State()
-    engine._status_failure_started = engine.time.time() - 6
+    engine._status_failure_started = engine.time.monotonic() - 6
     real_replace = engine.os.replace
 
     def fail_replace(*_args) -> None:
@@ -554,6 +554,40 @@ def test_status_publication_uses_a_fresh_temporary_file_after_failure(
     log = engine.LOG.read_text(encoding="utf-8")
     assert "status publication failed: PermissionError" in log
     assert "status publication recovered" in log
+
+
+def test_backward_wall_clock_cannot_throttle_or_regress_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_backward_status_clock")
+    configure_runtime(engine, tmp_path)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    current.write_text("Current progress", encoding="utf-8")
+    state = engine.State()
+    engine.ensure_identity_catalog()
+    monotonic_times = iter([10.0, 10.1, 10.3])
+    wall_times = iter([100.0, 80.0])
+    monkeypatch.setattr(engine.time, "monotonic", lambda: next(monotonic_times))
+    monkeypatch.setattr(engine.time, "time", lambda: next(wall_times))
+
+    initial = engine.publish_status("playing", state, force=True)
+    assert initial is not None
+    assert engine.update_current_piece(
+        state,
+        current.name,
+        2,
+        2,
+        4,
+        len("Current progress"),
+    )
+
+    assert engine.publish_status("playing", state) is None
+    progress = engine.publish_status("playing", state)
+
+    assert progress is not None
+    assert progress["current"]["piece"] == 2
+    assert initial["updated_at"] == 100.0
+    assert progress["updated_at"] > initial["updated_at"]
 
 
 def test_stopped_status_contains_the_same_queue_items_as_its_count(
@@ -731,6 +765,57 @@ def test_reset_waiting_buffer_keeps_queue_first_claim_without_cached_progress(
     assert buffered.get_nowait() == (current, "current piece")
     assert buffered.empty()
     assert state.claims == {current.name: current_generation}
+
+
+@pytest.mark.parametrize("action", ["move", "archive"])
+def test_waiting_mutation_preserves_mid_speechicle_piece_stream(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, action: str
+) -> None:
+    engine = load_engine(f"super_speech_engine_mid_piece_{action}")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-bm_fable-say.txt"
+    moved = engine.QUEUE / "003-af_heart-say.txt"
+    for path in (current, waiting, moved):
+        path.write_text(path.stem, encoding="utf-8")
+    held_piece = (current, "piece 3")
+    remaining_pieces = [(current, "piece 4"), (current, "piece 5")]
+    buffered: queue.Queue = queue.Queue()
+    for entry in [*remaining_pieces, (waiting, "stale"), (moved, "stale")]:
+        buffered.put(entry)
+    state = engine.State()
+    set_current(engine, state, current, piece=2, piece_count=5)
+    _, current_generation = engine._record_claim(state, current)
+    engine._record_claim(state, waiting)
+    engine._record_claim(state, moved)
+    if action == "move":
+        request_id = request_mutation(
+            engine,
+            "move",
+            section="waiting",
+            id=speechicle_id(engine, moved),
+            before_id=speechicle_id(engine, waiting),
+        )
+    else:
+        request_id = request_mutation(
+            engine, "archive", id=speechicle_id(engine, waiting)
+        )
+
+    assert (
+        engine.process_mutation_requests(buffered, state, held_piece[0].name)
+        == "queue_changed"
+    )
+
+    committed_result(engine, request_id)
+    assert held_piece == (current, "piece 3")
+    assert [buffered.get_nowait(), buffered.get_nowait()] == remaining_pieces
+    assert buffered.empty()
+    assert state.current is not None and state.current.progress.piece == 2
+    assert state.claims == {current.name: current_generation}
+    assert not engine.buffered_piece_is_stale(
+        state, current.name, current_generation
+    )
 
 
 def test_archiving_one_waiting_chunk_preserves_current_and_remaining_queue(
@@ -1491,6 +1576,42 @@ def test_playing_current_chunk_resumes_without_reordering(
     assert set(state.claims) == {current.name}
     assert buffered.get_nowait() == "banked piece"
     assert result["result_id"] == speechicle_id(engine, current)
+
+
+@pytest.mark.parametrize(
+    ("play_time", "pause_time", "pause_remains"),
+    [
+        (2_000_000_000, 1_000_000_000, False),
+        (1_000_000_000, 2_000_000_000, True),
+    ],
+)
+def test_play_and_pause_apply_in_publication_order(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    play_time: int,
+    pause_time: int,
+    pause_remains: bool,
+) -> None:
+    engine = load_engine(f"super_speech_engine_ordered_pause_{pause_remains}")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    current.write_text("Current", encoding="utf-8")
+    state = engine.State()
+    set_current(engine, state, current)
+    request_id = request_mutation(
+        engine, "play", id=speechicle_id(engine, current), voice=None
+    )
+    request_path = next(engine.BASE.glob(f"MUTATION.*.{request_id}.json"))
+    engine.PAUSE.touch()
+    os.utime(request_path, ns=(play_time, play_time))
+    os.utime(engine.PAUSE, ns=(pause_time, pause_time))
+
+    assert engine.process_mutation_requests(queue.Queue(), state) is None
+
+    result = committed_result(engine, request_id)
+    assert engine.PAUSE.exists() is pause_remains
+    assert result["snapshot"]["state"] == ("paused" if pause_remains else "playing")
 
 
 def test_playing_queue_first_resumes_when_cached_projection_is_missing(
@@ -2485,7 +2606,7 @@ def test_selection_interrupts_an_inter_chunk_gap(
     assert engine.claim_next_queued_chunk(state) == selected
 
 
-def test_reordering_during_a_gap_discards_the_held_piece(
+def test_reordering_during_a_gap_preserves_the_held_current_piece(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     engine = load_engine("super_speech_engine_queue_gap")
@@ -2498,7 +2619,7 @@ def test_reordering_during_a_gap_discards_the_held_piece(
     waiting.write_text("Waiting", encoding="utf-8")
     selected.write_text("Selected", encoding="utf-8")
     state = engine.State()
-    engine._record_claim(state, held)
+    _, generation = engine._record_claim(state, held)
     request_id = request_mutation(
         engine,
         "move",
@@ -2507,15 +2628,16 @@ def test_reordering_during_a_gap_discards_the_held_piece(
         before_id=speechicle_id(engine, waiting),
     )
 
-    assert engine.gap_wait(1.0, queue.Queue(), state) == "queue_changed"
+    assert engine.gap_wait(0.01, queue.Queue(), state) is None
     committed_result(engine, request_id)
 
     assert held.is_file()
-    assert state.claims == {}
-    assert engine.claim_next_queued_chunk(state) == held
+    assert state.claims == {held.name: generation}
+    assert not engine.buffered_piece_is_stale(state, held.name, generation)
+    assert engine.queue_files_in_order() == [held, selected, waiting]
 
 
-def test_queue_mutation_invalidates_the_piece_held_before_playback(
+def test_queue_mutation_preserves_the_current_piece_held_before_playback(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     engine = load_engine("super_speech_engine_queue_held_piece_generation")
@@ -2543,14 +2665,10 @@ def test_queue_mutation_invalidates_the_piece_held_before_playback(
         engine.process_mutation_requests(queue.Queue(), state, held_path.name)
         == "queue_changed"
     )
-    replacement_claim = engine.claim_next_queued_chunk_with_generation(state)
-
-    assert replacement_claim is not None
-    replacement_path, new_generation = replacement_claim
-    assert replacement_path == held_path
-    assert new_generation != old_generation
-    assert engine.buffered_piece_is_stale(state, held_path.name, old_generation)
-    assert not engine.buffered_piece_is_stale(state, held_path.name, new_generation)
+    assert state.claims == {held_path.name: old_generation}
+    assert not engine.buffered_piece_is_stale(
+        state, held_path.name, old_generation
+    )
 
 
 def test_stale_worker_release_preserves_a_replacement_current_claim(
@@ -2634,7 +2752,7 @@ def test_queue_mutation_keeps_an_active_playback_claim_without_buffered_audio(
     assert not engine.buffered_piece_is_stale(state, current_path.name, generation)
 
 
-def test_queue_mutation_invalidates_the_piece_held_during_a_gap(
+def test_queue_mutation_preserves_the_current_piece_held_during_a_gap(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     engine = load_engine("super_speech_engine_queue_gap_generation")
@@ -2658,15 +2776,12 @@ def test_queue_mutation_invalidates_the_piece_held_during_a_gap(
         before_id=speechicle_id(engine, waiting),
     )
 
-    assert engine.gap_wait(1.0, queue.Queue(), state) == "queue_changed"
-    replacement_claim = engine.claim_next_queued_chunk_with_generation(state)
+    assert engine.gap_wait(0.01, queue.Queue(), state) is None
 
-    assert replacement_claim is not None
-    replacement_path, new_generation = replacement_claim
-    assert replacement_path == held_path
-    assert new_generation != old_generation
-    assert engine.buffered_piece_is_stale(state, held_path.name, old_generation)
-    assert not engine.buffered_piece_is_stale(state, held_path.name, new_generation)
+    assert state.claims == {held_path.name: old_generation}
+    assert not engine.buffered_piece_is_stale(
+        state, held_path.name, old_generation
+    )
 
 
 @pytest.mark.parametrize("outcome", ["done", "skip"])

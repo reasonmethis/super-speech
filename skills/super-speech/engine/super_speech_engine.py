@@ -40,6 +40,7 @@ Env:
 import argparse
 import hashlib
 import json
+import math
 import os
 import queue
 import re
@@ -1443,7 +1444,26 @@ def consume_continue(st: State) -> bool:
     return accepted
 
 
-_last_status_write = 0.0
+def consume_pause_older_than(command: Path) -> None:
+    """Resume only when Pause was published before this accepted command."""
+    try:
+        command_time = command.stat().st_mtime_ns
+        pause_time = PAUSE.stat().st_mtime_ns
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+    if pause_time > command_time:
+        return
+    try:
+        if PAUSE.stat().st_mtime_ns <= command_time:
+            PAUSE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+_last_status_write_monotonic = 0.0
+_last_status_updated_at = 0.0
 _status_failure_started: float | None = None
 _history_dirty = True
 _history_count = 0
@@ -1785,10 +1805,15 @@ def publish_status(
     force: bool = False,
 ) -> dict[str, object] | None:
     """Publish an atomic runtime snapshot for the desktop controller."""
-    global _last_status_write, _status_failure_started
-    now = time.time()
-    if not force and now - _last_status_write < 0.25:
+    global _last_status_write_monotonic, _last_status_updated_at
+    global _status_failure_started
+    monotonic_now = time.monotonic()
+    if not force and monotonic_now - _last_status_write_monotonic < 0.25:
         return None
+    updated_at = max(
+        time.time(),
+        math.nextafter(_last_status_updated_at, math.inf),
+    )
 
     activate_next_chunk(st)
     with st.lock:
@@ -1871,7 +1896,7 @@ def publish_status(
         "version": STATUS_VERSION,
         "timeline_revision": timeline_revision,
         "state": playback_state,
-        "updated_at": now,
+        "updated_at": updated_at,
         "engine_pid": os.getpid(),
         "current": current,
         "queue_count": len(queue_items),
@@ -1886,19 +1911,20 @@ def publish_status(
         temp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         os.replace(temp_path, STATUS)
         STATUS_FAILURE.unlink(missing_ok=True)
-        _last_status_write = now
+        _last_status_write_monotonic = monotonic_now
+        _last_status_updated_at = updated_at
         if _status_failure_started is not None:
             log(
                 "status publication recovered after "
-                f"{now - _status_failure_started:.1f} seconds"
+                f"{monotonic_now - _status_failure_started:.1f} seconds"
             )
         _status_failure_started = None
         return payload
     except OSError as error:
         if _status_failure_started is None:
-            _status_failure_started = now
+            _status_failure_started = monotonic_now
             log(f"status publication failed: {type(error).__name__}: {error}")
-        elif now - _status_failure_started >= 5.0:
+        elif monotonic_now - _status_failure_started >= 5.0:
             try:
                 STATUS_FAILURE.touch()
             except OSError as marker_error:
@@ -2185,8 +2211,7 @@ def _apply_play_mutation_locked(
             or requested_voice == voice_from_name(current_path.name)
         )
     ):
-        PAUSE.unlink(missing_ok=True)
-        log(f"PLAY current {chunk_id}; resumed")
+        log(f"PLAY current {chunk_id}; accepted")
         return None
 
     target = next(
@@ -2256,7 +2281,6 @@ def _apply_play_mutation_locked(
             log(f"could not select {chunk_id}: {error}")
             raise RuntimeError(f"could not select {chunk_id}") from error
 
-    PAUSE.unlink(missing_ok=True)
     try:
         selected_text = target.read_text(encoding="utf-8").strip()
     except OSError:
@@ -2540,6 +2564,7 @@ def process_mutation_requests(
         try:
             if isinstance(request, PlayMutation):
                 play_effect = apply_play_mutation(buf, st, request)
+                consume_pause_older_than(claimed)
                 effect = play_effect or effect
                 invalidate_held_chunk = invalidate_held_chunk or play_effect == "select"
                 result_id = request.id
@@ -2560,12 +2585,10 @@ def process_mutation_requests(
                 if request.section == "waiting":
                     if effect is None:
                         effect = "queue_changed"
-                    invalidate_held_chunk = True
             elif isinstance(request, ArchiveMutation):
                 apply_queue_command(buf, st, "archive", request.id, None)
                 if effect is None:
                     effect = "queue_changed"
-                invalidate_held_chunk = True
             elif isinstance(request, DeleteMutation):
                 apply_queue_command(buf, st, "delete", request.id, None)
             else:
@@ -2832,7 +2855,9 @@ def gap_wait(seconds: float, buf: "queue.Queue", st: State) -> str | None:
         mutation_effect = process_mutation_requests(buf, st, held_chunk_name)
         if mutation_effect in {"select", "clear"}:
             return mutation_effect
-        if mutation_effect == "queue_changed":
+        if mutation_effect == "queue_changed" and (
+            held_chunk_name is None or not _claimed(st, held_chunk_name)
+        ):
             return "queue_changed"
         if consume_control(STOP):
             reject_pending_requests("engine stopped before command was applied", st)
@@ -3139,7 +3164,10 @@ def run_engine_loop(
                 continue
 
             mutation_effect = process_mutation_requests(buf, st, path.name)
-            if mutation_effect is not None:
+            if mutation_effect is not None and (
+                mutation_effect != "queue_changed"
+                or buffered_piece_is_stale(st, path.name, claim_generation)
+            ):
                 continue
 
             skip_initial_gap = first and consume_initial_gap_skip(st, path.name)
