@@ -54,8 +54,17 @@ def configure_runtime(engine, tmp_path: Path) -> None:
     engine.INSTANCE_LOCK = tmp_path / "engine.lock"
     engine.TIMELINE_LOCK = tmp_path / "timeline.lock"
     engine.TIMELINE_INTENT = tmp_path / "timeline-intent.json"
-    engine.QUEUE.mkdir()
-    engine.SPOKEN.mkdir()
+    engine.IDENTITY_INDEX = tmp_path / "speechicle-index.json"
+    engine._identity_cache_path = None
+    engine._identity_cache = None
+    engine._identity_ready_path = None
+    engine.QUEUE.mkdir(exist_ok=True)
+    engine.SPOKEN.mkdir(exist_ok=True)
+
+
+def speechicle_id(engine, path: Path) -> str:
+    engine.ensure_identity_catalog()
+    return engine.public_id_for_path(path)
 
 
 def test_split_text_pieces_retains_source_ranges_with_unicode_and_spacing() -> None:
@@ -169,7 +178,7 @@ def test_status_stays_playing_while_the_current_item_waits_for_its_next_piece(
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
     assert status["state"] == "playing"
-    assert status["current"]["id"] == current.stem
+    assert status["current"]["id"] == speechicle_id(engine, current)
 
 
 def test_started_receipts_are_bounded_and_keep_multiple_fast_items(
@@ -321,7 +330,7 @@ def test_engine_stream_failure_leaves_current_item_visible_in_stopped_queue(
 
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
     assert status["state"] == "stopped"
-    assert status["current"]["id"] == queued.stem
+    assert status["current"]["id"] == speechicle_id(engine, queued)
     assert status["queue"] == []
 
 
@@ -337,7 +346,7 @@ def test_status_stays_playing_while_queued_audio_is_being_prepared(
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
     assert status["state"] == "playing"
-    assert status["current"]["id"] == queued.stem
+    assert status["current"]["id"] == speechicle_id(engine, queued)
     assert status["current"]["piece"] == 0
     assert status["queue"] == []
 
@@ -384,9 +393,9 @@ def test_status_count_matches_the_items_in_the_same_snapshot(
     engine.publish_status("idle", engine.State(), force=True)
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
-    assert status["current"]["id"] == readable.stem
+    assert status["current"]["id"] == speechicle_id(engine, readable)
     assert status["queue_count"] == len(status["queue"]) == 1
-    assert status["queue"][0]["id"] == unreadable.stem
+    assert status["queue"][0]["id"] == speechicle_id(engine, unreadable)
     assert status["queue"][0]["text"] == ""
 
 
@@ -423,6 +432,7 @@ def test_persistent_status_publication_failure_stops_the_engine(
 ) -> None:
     engine = load_engine("super_speech_engine_status_write_failure")
     configure_runtime(engine, tmp_path)
+    engine.ensure_identity_catalog()
     state = engine.State()
     engine._status_failure_started = engine.time.time() - 6
     real_replace = engine.os.replace
@@ -449,6 +459,7 @@ def test_status_publication_uses_a_fresh_temporary_file_after_failure(
 ) -> None:
     engine = load_engine("super_speech_engine_status_fresh_temporary")
     configure_runtime(engine, tmp_path)
+    engine.ensure_identity_catalog()
     state = engine.State()
     temporary_paths: list[Path] = []
     real_replace = engine.os.replace
@@ -484,7 +495,7 @@ def test_stopped_status_contains_the_same_queue_items_as_its_count(
     engine.print_status()
     status = json.loads(capsys.readouterr().out)
 
-    assert status["current"]["id"] == waiting.stem
+    assert status["current"]["id"] == speechicle_id(engine, waiting)
     assert status["queue_count"] == len(status["queue"]) == 0
 
 
@@ -532,8 +543,7 @@ def test_queue_order_preserves_stable_ids_and_appends_new_arrivals(tmp_path: Pat
         path.write_text(path.stem, encoding="utf-8")
 
     engine.save_queue_order([third, first, second])
-    new_arrival = engine.QUEUE / "004-bm_george-say.txt"
-    new_arrival.write_text("New", encoding="utf-8")
+    new_arrival = engine.enqueue_text("New", "bm_george")
 
     assert [path.stem for path in engine.queue_files_in_order()] == [
         third.stem,
@@ -607,7 +617,13 @@ def test_moving_a_waiting_chunk_resets_banked_audio_but_keeps_current(
     state.playing = current.name
     state.claimed.update(path.name for path in (current, second, third))
 
-    engine.apply_queue_command(buffered, state, "move", third.stem, second.stem)
+    engine.apply_queue_command(
+        buffered,
+        state,
+        "move",
+        speechicle_id(engine, third),
+        speechicle_id(engine, second),
+    )
 
     assert [path.stem for path in engine.queue_files_in_order()] == [
         current.stem,
@@ -639,7 +655,9 @@ def test_archiving_one_waiting_chunk_preserves_current_and_remaining_queue(
     state.playing = current.name
     state.claimed.update(path.name for path in (current, archived, remaining))
 
-    engine.apply_queue_command(buffered, state, "archive", archived.stem, None)
+    engine.apply_queue_command(
+        buffered, state, "archive", speechicle_id(engine, archived), None
+    )
 
     assert not archived.exists()
     assert (engine.SPOKEN / archived.name).is_file()
@@ -661,7 +679,7 @@ def test_queue_mutation_cannot_cancel_an_accepted_selection(tmp_path: Path) -> N
 
     with pytest.raises(ValueError, match="selected speech is starting"):
         engine.apply_queue_command(
-            queue.Queue(), state, "archive", selected.stem, None
+            queue.Queue(), state, "archive", speechicle_id(engine, selected), None
         )
 
     assert selected.exists()
@@ -677,7 +695,9 @@ def test_deleting_one_history_chunk_preserves_waiting_queue(tmp_path: Path) -> N
     history.write_text("History", encoding="utf-8")
     assert engine.history_snapshot()[0] == 1
 
-    engine.apply_queue_command(queue.Queue(), engine.State(), "delete", history.stem, None)
+    engine.apply_queue_command(
+        queue.Queue(), engine.State(), "delete", speechicle_id(engine, history), None
+    )
 
     assert waiting.read_text(encoding="utf-8") == "Waiting"
     assert not history.exists()
@@ -692,7 +712,7 @@ def test_deleting_an_already_absent_history_chunk_is_idempotent(tmp_path: Path) 
         queue.Queue(),
         engine.State(),
         "delete",
-        "001-af_heart-say",
+        f"sp_{'1' * 32}",
         None,
     )
 
@@ -711,11 +731,15 @@ def test_history_delete_is_rejected_while_the_same_item_is_active(
 
     with pytest.raises(ValueError, match="history chunk is active"):
         engine.apply_queue_command(
-            queue.Queue(), engine.State(), "delete", history.stem, None
+            queue.Queue(),
+            engine.State(),
+            "delete",
+            speechicle_id(engine, queued),
+            None,
         )
 
     assert queued.exists()
-    assert history.exists()
+    assert not history.exists()
 
 
 def test_history_delete_succeeds_when_the_order_sidecar_cannot_update(
@@ -732,7 +756,9 @@ def test_history_delete_succeeds_when_the_order_sidecar_cannot_update(
 
     monkeypatch.setattr(engine, "save_history_order", fail_order_update)
 
-    engine.apply_queue_command(queue.Queue(), engine.State(), "delete", history.stem, None)
+    engine.apply_queue_command(
+        queue.Queue(), engine.State(), "delete", speechicle_id(engine, history), None
+    )
 
     assert not history.exists()
     assert engine.history_snapshot() == (0, [])
@@ -792,7 +818,9 @@ def test_queue_request_is_applied_and_acknowledged(
     first.write_text("First", encoding="utf-8")
     second.write_text("Second", encoding="utf-8")
 
-    request_id = engine.request_queue_command("move", second.stem, first.stem)
+    request_id = engine.request_queue_command(
+        "move", speechicle_id(engine, second), speechicle_id(engine, first)
+    )
     assert engine.process_queue_requests(queue.Queue(), engine.State())
     engine.wait_for_queue_ack(request_id, timeout=0.1)
 
@@ -810,7 +838,7 @@ def test_timed_out_unclaimed_queue_request_cannot_apply_later(
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     waiting = engine.QUEUE / "001-af_heart-say.txt"
     waiting.write_text("Keep me", encoding="utf-8")
-    request_id = engine.request_queue_command("archive", waiting.stem)
+    request_id = engine.request_queue_command("archive", speechicle_id(engine, waiting))
 
     with pytest.raises(RuntimeError, match="did not acknowledge"):
         engine.wait_for_queue_ack(request_id, timeout=0.01)
@@ -825,7 +853,7 @@ def test_timeout_retries_a_transient_request_cancellation_lock(
     engine = load_engine("super_speech_engine_queue_cancel_retry")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    request_id = engine.request_queue_command("delete", "001-af_heart-say")
+    request_id = engine.request_queue_command("delete", f"sp_{'1' * 32}")
     real_replace = engine.os.replace
     failures = 0
 
@@ -851,7 +879,7 @@ def test_persistently_locked_unclaimed_request_returns_unconfirmed(
     engine = load_engine("super_speech_engine_queue_cancel_locked")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    request_id = engine.request_queue_command("delete", "001-af_heart-say")
+    request_id = engine.request_queue_command("delete", f"sp_{'1' * 32}")
     monkeypatch.setattr(engine, "cancel_unclaimed_request", lambda *_args: False)
 
     with pytest.raises(RuntimeError, match="result was unconfirmed"):
@@ -866,7 +894,7 @@ def test_ack_published_at_the_timeout_boundary_is_still_observed(
     engine = load_engine("super_speech_engine_queue_ack_boundary")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    request_id = engine.request_queue_command("delete", "001-af_heart-say")
+    request_id = engine.request_queue_command("delete", f"sp_{'1' * 32}")
     request = next(engine.BASE.glob(f"QUEUE_COMMAND.*.{request_id}.json"))
     real_wait = engine.wait_for_ack_payload
     calls = 0
@@ -896,7 +924,7 @@ def test_history_delete_request_is_applied_and_acknowledged(
     history = engine.SPOKEN / "001-af_heart-say.txt"
     history.write_text("History", encoding="utf-8")
 
-    request_id = engine.request_queue_command("delete", history.stem)
+    request_id = engine.request_queue_command("delete", speechicle_id(engine, history))
     assert engine.process_queue_requests(queue.Queue(), engine.State())
     engine.wait_for_queue_ack(request_id, timeout=0.1)
 
@@ -944,7 +972,7 @@ def test_queue_request_rejects_the_current_chunk(
     state = engine.State()
     state.playing = current.name
 
-    request_id = engine.request_queue_command("archive", current.stem)
+    request_id = engine.request_queue_command("archive", speechicle_id(engine, current))
     assert not engine.process_queue_requests(queue.Queue(), state)
 
     with pytest.raises(RuntimeError, match="waiting chunk not found"):
@@ -962,7 +990,7 @@ def test_unconfirmed_waiting_archive_stops_the_engine(
     waiting.write_text("Waiting", encoding="utf-8")
     state = engine.State()
     state.claimed.add(waiting.name)
-    request_id = engine.request_queue_command("archive", waiting.stem)
+    request_id = engine.request_queue_command("archive", speechicle_id(engine, waiting))
 
     def fail_archive(_path: Path) -> bool:
         raise engine.MutationOutcomeUnconfirmed("rollback failed")
@@ -976,14 +1004,14 @@ def test_unconfirmed_waiting_archive_stops_the_engine(
         engine.wait_for_queue_ack(request_id, timeout=0.1)
 
 
-def test_enqueue_text_skips_a_number_reserved_by_another_writer(tmp_path: Path) -> None:
+def test_enqueue_text_ignores_a_stale_legacy_reservation(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_enqueue_race")
     configure_runtime(engine, tmp_path)
     (engine.QUEUE / "001.reserve").touch()
 
     queued = engine.enqueue_text("New words", "af_heart")
 
-    assert queued.name == "002-af_heart-say.txt"
+    assert queued.name == "001-af_heart-say.txt"
 
 
 @pytest.mark.parametrize(
@@ -1015,13 +1043,15 @@ def test_speak_command_starts_engine_before_queueing(
         return queued
 
     monkeypatch.setattr(engine, "enqueue_text", enqueue)
+    public_id = f"sp_{'1' * 32}"
+    monkeypatch.setattr(engine, "public_id_for_path", lambda _path: public_id)
     monkeypatch.setattr(
         engine, "wait_for_queue_acceptance", lambda: calls.append("accept")
     )
 
     assert engine.cli(["speak", "Hello there", "--gap-ms", "300"]) == 0
     assert calls == ["start", ("Hello there", "af_heart", 300), "accept"]
-    assert capsys.readouterr().out.strip() == str(queued)
+    assert capsys.readouterr().out.strip() == public_id
 
 
 def test_start_engine_waits_for_fresh_status_after_startup_cleanup(
@@ -1202,12 +1232,12 @@ def test_play_requests_acknowledge_a_superseded_caller(
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
 
-    first_request_id = engine.request_play("001-af_heart-say")
-    second_request_id = engine.request_play("002-bm_fable-say")
+    first_request_id = engine.request_play(f"sp_{'1' * 32}")
+    second_request_id = engine.request_play(f"sp_{'2' * 32}")
 
     taken = engine.take_play_request()
     assert taken is not None
-    assert taken[:3] == ("002-bm_fable-say", None, second_request_id)
+    assert taken[:3] == (f"sp_{'2' * 32}", None, second_request_id)
     taken[3].unlink()
     assert engine.take_play_request() is None
     with pytest.raises(RuntimeError, match="superseded by a newer play request"):
@@ -1222,8 +1252,9 @@ def test_interrupt_rejects_pending_requests_without_a_timeout(
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     selected = engine.QUEUE / "001-af_heart-say.txt"
     selected.write_text("Selected", encoding="utf-8")
-    play_request = engine.request_play(selected.stem)
-    queue_request = engine.request_queue_command("move", selected.stem)
+    selected_id = speechicle_id(engine, selected)
+    play_request = engine.request_play(selected_id)
+    queue_request = engine.request_queue_command("move", selected_id)
     engine.INTERRUPT.touch()
 
     assert engine.gap_wait(1.0, queue.Queue(), engine.State()) == "interrupt"
@@ -1245,17 +1276,18 @@ def test_play_command_starts_engine_then_publishes_the_requested_id(
         return "a" * 24
 
     monkeypatch.setattr(engine, "request_play", request)
+    public_id = f"sp_{'7' * 32}"
     monkeypatch.setattr(
         engine,
         "wait_for_play_ack",
         lambda request_id: calls.append(("wait", request_id))
-        or {"id": "007-bm_fable-say", "accepted_at": 1.0},
+        or {"id": public_id, "accepted_at": 1.0},
     )
 
-    assert engine.cli(["play", "007-bm_fable-say", "--voice", "af_heart"]) == 0
+    assert engine.cli(["play", public_id, "--voice", "af_heart"]) == 0
     assert calls == [
         "start",
-        ("007-bm_fable-say", "af_heart"),
+        (public_id, "af_heart"),
         ("wait", "a" * 24),
     ]
 
@@ -1269,11 +1301,12 @@ def test_play_command_keeps_stdout_as_json_when_ack_cleanup_is_locked(
     configure_runtime(engine, tmp_path)
     request_id = "a" * 24
     acknowledgement = engine.play_ack_path(request_id)
+    public_id = f"sp_{'7' * 32}"
     acknowledgement.write_text(
         json.dumps(
             {
                 "ok": True,
-                "result_id": "007-bm_fable-say",
+                "result_id": public_id,
                 "accepted_at": 1.0,
             }
         ),
@@ -1290,11 +1323,11 @@ def test_play_command_keeps_stdout_as_json_when_ack_cleanup_is_locked(
     monkeypatch.setattr(engine, "request_play", lambda *_args: request_id)
     monkeypatch.setattr(Path, "unlink", lock_ack)
 
-    assert engine.cli(["play", "007-bm_fable-say"]) == 0
+    assert engine.cli(["play", public_id]) == 0
 
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {
-        "id": "007-bm_fable-say",
+        "id": public_id,
         "accepted_at": 1.0,
     }
     assert "could not remove acknowledgement" in captured.err
@@ -1330,7 +1363,7 @@ def test_playing_current_chunk_resumes_without_reordering(
     state.claimed.add(current.name)
     state.saw_stop = True
 
-    request_id = engine.request_play(current.stem)
+    request_id = engine.request_play(speechicle_id(engine, current))
     assert engine.process_play_request(buffered, state) is None
     acceptance = engine.wait_for_play_ack(request_id, timeout=0.1)
 
@@ -1340,7 +1373,7 @@ def test_playing_current_chunk_resumes_without_reordering(
     assert state.claimed == {current.name}
     assert state.recent_starts == []
     assert buffered.get_nowait() == "banked piece"
-    assert acceptance["id"] == current.stem
+    assert acceptance["id"] == speechicle_id(engine, current)
 
 
 def test_selecting_upcoming_chunk_archives_everything_older(
@@ -1363,7 +1396,7 @@ def test_selecting_upcoming_chunk_archives_everything_older(
     state.playing = current.name
     state.claimed.update({current.name, older.name, selected.name})
 
-    request_id = engine.request_play(selected.stem)
+    request_id = engine.request_play(speechicle_id(engine, selected))
     assert engine.process_play_request(buffered, state) == "select"
     acceptance = engine.wait_for_play_ack(request_id, timeout=0.1)
 
@@ -1379,7 +1412,7 @@ def test_selecting_upcoming_chunk_archives_everything_older(
     assert engine.claim_next_queued_chunk(state) == selected
     assert engine.claim_next_queued_chunk(state) == newer
     assert engine.claim_next_queued_chunk(state) is None
-    assert acceptance["id"] == selected.stem
+    assert acceptance["id"] == speechicle_id(engine, selected)
 
 
 def test_selecting_waiting_chunk_without_playback_archives_older_waiting_items(
@@ -1394,7 +1427,7 @@ def test_selecting_waiting_chunk_without_playback_archives_older_waiting_items(
     for path in (older, selected, newer):
         path.write_text(path.stem, encoding="utf-8")
 
-    engine.request_play(selected.stem)
+    engine.request_play(speechicle_id(engine, selected))
     assert engine.process_play_request(queue.Queue(), engine.State()) == "select"
 
     assert not older.exists()
@@ -1415,7 +1448,7 @@ def test_selecting_waiting_chunk_rejects_an_archive_failure(
     monkeypatch.setattr(engine, "_archive_many", lambda _paths: False)
     state = engine.State()
 
-    request_id = engine.request_play(selected.stem)
+    request_id = engine.request_play(speechicle_id(engine, selected))
     assert engine.process_play_request(queue.Queue(), state) is None
 
     with pytest.raises(RuntimeError, match="could not select"):
@@ -1446,7 +1479,7 @@ def test_selection_rolls_back_earlier_archives_when_a_later_archive_fails(
         real_replace(source, destination)
 
     monkeypatch.setattr(engine.os, "replace", fail_second)
-    request_id = engine.request_play(selected.stem)
+    request_id = engine.request_play(speechicle_id(engine, selected))
     assert engine.process_play_request(queue.Queue(), engine.State()) is None
 
     with pytest.raises(RuntimeError, match="could not select"):
@@ -1476,7 +1509,7 @@ def test_voice_selection_rolls_back_when_archiving_an_older_item_fails(
         real_replace(source, destination)
 
     monkeypatch.setattr(engine.os, "replace", fail_second)
-    request_id = engine.request_play(selected.stem, "bm_fable")
+    request_id = engine.request_play(speechicle_id(engine, selected), "bm_fable")
     assert engine.process_play_request(queue.Queue(), engine.State()) is None
 
     with pytest.raises(RuntimeError, match="could not select"):
@@ -1495,14 +1528,16 @@ def test_replaying_history_reuses_its_id_without_duplicating_history(
     archived.write_text("Say this again", encoding="utf-8")
     state = engine.State()
 
-    request_id = engine.request_play(archived.stem)
+    request_id = engine.request_play(speechicle_id(engine, archived))
     assert engine.process_play_request(queue.Queue(), state) == "select"
 
     replay = engine.QUEUE / archived.name
     assert not archived.exists()
     assert replay.read_text(encoding="utf-8") == "Say this again"
     assert engine.claim_next_queued_chunk(state) == replay
-    assert engine.wait_for_play_ack(request_id, timeout=0.1)["id"] == archived.stem
+    assert engine.wait_for_play_ack(request_id, timeout=0.1)["id"] == speechicle_id(
+        engine, archived
+    )
     assert engine.archive(replay)
     assert [path.name for path in engine.SPOKEN.glob("*.txt")] == [archived.name]
 
@@ -1529,11 +1564,9 @@ def test_history_selection_moves_only_the_playback_boundary(
     engine.save_history_order(history)
     if include_active:
         active = [
-            engine.QUEUE / "006-af_heart-say.txt",
-            engine.QUEUE / "007-af_heart-say.txt",
+            engine.enqueue_text("006-af_heart-say", "af_heart"),
+            engine.enqueue_text("007-af_heart-say", "af_heart"),
         ]
-        for path in active:
-            path.write_text(path.stem, encoding="utf-8")
         engine.save_queue_order(active)
 
     def visible_ids() -> list[str]:
@@ -1557,18 +1590,22 @@ def test_history_selection_moves_only_the_playback_boundary(
     original_order = visible_ids()
     selected = history[history_index]
 
-    request_id = engine.request_play(selected.stem)
+    request_id = engine.request_play(speechicle_id(engine, selected))
     assert engine.process_play_request(queue.Queue(), state) == "select"
-    assert engine.wait_for_play_ack(request_id, timeout=0.1)["id"] == selected.stem
+    assert engine.wait_for_play_ack(request_id, timeout=0.1)["id"] == speechicle_id(
+        engine, selected
+    )
     selected_status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
-    assert selected_status["current"]["id"] == selected.stem
+    assert selected_status["current"]["id"] == speechicle_id(engine, selected)
     assert visible_ids() == original_order
 
     restarted = engine.State()
     engine.publish_status("idle", restarted, force=True)
     assert visible_ids() == original_order
-    assert json.loads(engine.STATUS.read_text(encoding="utf-8"))["current"]["id"] == selected.stem
+    assert json.loads(engine.STATUS.read_text(encoding="utf-8"))["current"][
+        "id"
+    ] == speechicle_id(engine, selected)
 
     selected_in_queue = engine.QUEUE / selected.name
     assert engine.finish_chunk_playback(selected_in_queue, "done", True, restarted)
@@ -1589,7 +1626,7 @@ def test_history_replay_stays_first_after_an_engine_restart(
         path.write_text(path.stem, encoding="utf-8")
     engine.save_queue_order([first, second])
 
-    request_id = engine.request_play(archived.stem)
+    request_id = engine.request_play(speechicle_id(engine, archived))
     assert engine.process_play_request(queue.Queue(), engine.State()) == "select"
     engine.wait_for_play_ack(request_id, timeout=0.1)
 
@@ -1668,8 +1705,10 @@ def test_startup_removes_a_promotion_duplicate_backup(tmp_path: Path) -> None:
     duplicate_history.write_text("Legacy History copy", encoding="utf-8")
     duplicate_queue.write_text("Active copy", encoding="utf-8")
     selected.write_text("Selected", encoding="utf-8")
-    engine.save_queue_order([duplicate_queue])
-    engine.save_history_order([duplicate_history, selected])
+    engine._write_order_payload(engine.QUEUE_ORDER, [duplicate_queue.stem], 1)
+    engine._write_order_payload(
+        engine.HISTORY_ORDER, [duplicate_history.stem, selected.stem], 1
+    )
     os.replace(duplicate_history, backup)
     engine._write_timeline_intent(
         {
@@ -1704,8 +1743,8 @@ def test_startup_removes_a_promotion_duplicate_backup(tmp_path: Path) -> None:
     assert not engine.TIMELINE_INTENT.exists()
 
 
-def test_promotion_retains_its_intent_until_duplicate_cleanup_finishes(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_promotion_migrates_a_legacy_sequence_collision_before_moving(
+    tmp_path: Path,
 ) -> None:
     engine = load_engine("super_speech_engine_promotion_deferred_duplicate")
     configure_runtime(engine, tmp_path)
@@ -1717,26 +1756,17 @@ def test_promotion_retains_its_intent_until_duplicate_cleanup_finishes(
     selected.write_text("Selected", encoding="utf-8")
     engine.save_queue_order([duplicate_queue])
     engine.save_history_order([duplicate_history, selected])
-    real_unlink = Path.unlink
-
-    def lock_duplicate(path: Path, *args, **kwargs) -> None:
-        if path.name.endswith(".duplicate"):
-            raise PermissionError("locked")
-        real_unlink(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "unlink", lock_duplicate)
     target, _ = engine.promote_history_selection(selected)
 
     assert target == engine.QUEUE / selected.name
-    assert engine.TIMELINE_INTENT.exists()
-    assert list(engine.SPOKEN.glob("*.duplicate"))
-
-    monkeypatch.setattr(Path, "unlink", real_unlink)
-    engine.repair_interrupted_timeline_transition()
-
     assert not engine.TIMELINE_INTENT.exists()
     assert not list(engine.SPOKEN.glob("*.duplicate"))
-    assert engine.queue_files_in_order() == [target, duplicate_queue]
+    assert engine.queue_files_in_order()[0] == target
+    assert any(
+        path.read_text(encoding="utf-8") == "Legacy History copy"
+        for path in [*engine.QUEUE.glob("*.txt"), *engine.SPOKEN.glob("*.txt")]
+    )
+    assert duplicate_queue.read_text(encoding="utf-8") == "Active copy"
 
 
 def test_enqueue_waits_while_history_rows_are_moving(tmp_path: Path) -> None:
@@ -1865,7 +1895,10 @@ def test_history_selection_rollback_preserves_a_legacy_queue_duplicate(
         engine.promote_history_selection(selected)
 
     assert duplicate_queue.read_text(encoding="utf-8") == "Active copy"
-    assert duplicate_history.read_text(encoding="utf-8") == "Legacy replay"
+    assert any(
+        path.read_text(encoding="utf-8") == "Legacy replay"
+        for path in engine.SPOKEN.glob("*.txt")
+    )
     assert selected.read_text(encoding="utf-8") == "Selected"
 
 
@@ -1892,7 +1925,7 @@ def test_history_selection_reports_unconfirmed_if_rollback_cannot_finish(
         real_replace(source, destination)
 
     monkeypatch.setattr(engine.os, "replace", fail_forward_and_rollback)
-    request_id = engine.request_play(selected.stem)
+    request_id = engine.request_play(speechicle_id(engine, selected))
 
     assert engine.process_play_request(queue.Queue(), engine.State()) is None
     with pytest.raises(RuntimeError, match="result was unconfirmed"):
@@ -1910,11 +1943,14 @@ def test_replaying_history_with_another_voice_preserves_text_and_gap(
     archived.write_text("Say this another way", encoding="utf-8")
     state = engine.State()
 
-    request_id = engine.request_play(archived.stem, "af_heart")
+    original_id = speechicle_id(engine, archived)
+    request_id = engine.request_play(original_id, "af_heart")
     assert engine.process_play_request(queue.Queue(), state) == "select"
     acceptance = engine.wait_for_play_ack(request_id, timeout=0.1)
-    variant = engine.QUEUE / f"{acceptance['id']}.txt"
+    variant = engine._find_chunk(engine.QUEUE, acceptance["id"])
 
+    assert acceptance["id"] == original_id
+    assert variant is not None
     assert not archived.exists()
     assert variant.name == "007-af_heart-g350-say.txt"
     assert variant.read_text(encoding="utf-8") == "Say this another way"
@@ -1940,7 +1976,7 @@ def test_history_voice_change_keeps_the_row_position(
     engine.publish_status("idle", state, force=True)
     before = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
-    request_id = engine.request_play(history[1].stem, "bm_fable")
+    request_id = engine.request_play(speechicle_id(engine, history[1]), "bm_fable")
     assert engine.process_play_request(queue.Queue(), state) == "select"
     acceptance = engine.wait_for_play_ack(request_id, timeout=0.1)
     after = json.loads(engine.STATUS.read_text(encoding="utf-8"))
@@ -1970,7 +2006,7 @@ def test_history_voice_rejection_restores_the_history_boundary(
         path.write_text(path.stem, encoding="utf-8")
     engine.save_history_order(history)
 
-    request_id = engine.request_play(history[-1].stem, "bm_fable")
+    request_id = engine.request_play(speechicle_id(engine, history[-1]), "bm_fable")
     assert engine.process_play_request(queue.Queue(), engine.State()) is None
 
     with pytest.raises(RuntimeError, match="could not replay"):
@@ -1994,11 +2030,14 @@ def test_changing_a_waiting_voice_keeps_the_selection_position(
     newer.write_text("Newer", encoding="utf-8")
     state = engine.State()
 
-    request_id = engine.request_play(selected.stem, "af_heart")
+    original_id = speechicle_id(engine, selected)
+    request_id = engine.request_play(original_id, "af_heart")
     assert engine.process_play_request(queue.Queue(), state) == "select"
     acceptance = engine.wait_for_play_ack(request_id, timeout=0.1)
-    variant = engine.QUEUE / f"{acceptance['id']}.txt"
+    variant = engine._find_chunk(engine.QUEUE, acceptance["id"])
 
+    assert acceptance["id"] == original_id
+    assert variant is not None
     assert variant.name == "002-af_heart-g500-say.txt"
     assert variant.read_text(encoding="utf-8") == "Selected words"
     assert not older.exists()
@@ -2022,11 +2061,14 @@ def test_changing_the_current_voice_replaces_it_without_changing_text(
     state.playing = current.name
     state.claimed.add(current.name)
 
-    request_id = engine.request_play(current.stem, "bm_fable")
+    original_id = speechicle_id(engine, current)
+    request_id = engine.request_play(original_id, "bm_fable")
     assert engine.process_play_request(queue.Queue(), state) == "select"
     acceptance = engine.wait_for_play_ack(request_id, timeout=0.1)
-    variant = engine.QUEUE / f"{acceptance['id']}.txt"
+    variant = engine._find_chunk(engine.QUEUE, acceptance["id"])
 
+    assert acceptance["id"] == original_id
+    assert variant is not None
     assert variant.name == "001-bm_fable-g600-say.txt"
     assert variant.read_text(encoding="utf-8") == "Current words"
     assert not current.exists()
@@ -2041,7 +2083,7 @@ def test_play_ack_reports_a_missing_chunk(
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
 
-    request_id = engine.request_play("999-af_heart-say")
+    request_id = engine.request_play(f"sp_{'f' * 32}")
     assert engine.process_play_request(queue.Queue(), engine.State()) is None
 
     with pytest.raises(RuntimeError, match="chunk not found"):
@@ -2072,7 +2114,10 @@ def test_engine_loop_replays_history_before_the_existing_queue(
     archived.write_text("Replay me", encoding="utf-8")
     play_request = engine.BASE / f"PLAY.1.{'a' * 24}.json"
     play_request.write_text(
-        json.dumps({"id": archived.stem, "request_id": "a" * 24}), encoding="utf-8"
+        json.dumps(
+            {"id": speechicle_id(engine, archived), "request_id": "a" * 24}
+        ),
+        encoding="utf-8",
     )
 
     played_samples: list[int] = []
@@ -2146,7 +2191,7 @@ def test_engine_loop_replays_history_before_the_existing_queue(
     assert len(list(engine.SPOKEN.glob("*.txt"))) == 2
     assert not list(engine.QUEUE.glob("*.txt"))
     final_status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
-    assert final_status["recent_starts"][0]["id"] == queued.stem
+    assert final_status["recent_starts"][0]["id"] == speechicle_id(engine, queued)
 
 
 def test_idle_selection_replaces_worker_claims_and_becomes_next(
@@ -2162,7 +2207,7 @@ def test_idle_selection_replaces_worker_claims_and_becomes_next(
     state = engine.State()
     state.claimed.add(earlier.name)
 
-    engine.request_play(selected.stem)
+    engine.request_play(speechicle_id(engine, selected))
     assert engine.process_play_request(queue.Queue(), state) == "select"
 
     assert state.playing == selected.name
@@ -2205,7 +2250,7 @@ def test_selecting_a_prefetched_item_restarts_synthesis_at_piece_one(
     worker.start()
     try:
         assert entered_second_piece.wait(1)
-        engine.request_play(selected.stem)
+        engine.request_play(speechicle_id(engine, selected))
         assert engine.process_play_request(buffered, state) == "select"
         assert buffered.empty()
         release_second_piece.set()
@@ -2231,7 +2276,7 @@ def test_selection_interrupts_an_inter_chunk_gap(
     selected.write_text("Selected", encoding="utf-8")
     state = engine.State()
 
-    engine.request_play(selected.stem)
+    engine.request_play(speechicle_id(engine, selected))
 
     assert engine.gap_wait(1.0, queue.Queue(), state) == "select"
     assert engine.claim_next_queued_chunk(state) == selected
@@ -2249,7 +2294,9 @@ def test_reordering_during_a_gap_discards_the_held_piece(
     selected.write_text("Selected", encoding="utf-8")
     state = engine.State()
     state.claimed.add(held.name)
-    request_id = engine.request_queue_command("move", selected.stem, held.stem)
+    request_id = engine.request_queue_command(
+        "move", speechicle_id(engine, selected), speechicle_id(engine, held)
+    )
 
     assert engine.gap_wait(1.0, queue.Queue(), state) == "queue_changed"
     engine.wait_for_queue_ack(request_id, timeout=0.1)
@@ -2275,7 +2322,9 @@ def test_queue_mutation_invalidates_the_piece_held_before_playback(
     first_claim = engine.claim_next_queued_chunk_with_generation(state)
     assert first_claim is not None
     held_path, old_generation = first_claim
-    engine.request_queue_command("move", moved.stem, waiting.stem)
+    engine.request_queue_command(
+        "move", speechicle_id(engine, moved), speechicle_id(engine, waiting)
+    )
 
     assert engine.process_queue_requests(queue.Queue(), state, held_path.name)
     replacement_claim = engine.claim_next_queued_chunk_with_generation(state)
@@ -2304,7 +2353,9 @@ def test_queue_mutation_keeps_an_active_playback_claim_without_buffered_audio(
     claim = engine.claim_next_queued_chunk_with_generation(state)
     assert claim is not None
     current_path, generation = claim
-    engine.request_queue_command("move", moved.stem, waiting.stem)
+    engine.request_queue_command(
+        "move", speechicle_id(engine, moved), speechicle_id(engine, waiting)
+    )
 
     assert engine.process_queue_requests(queue.Queue(), state)
 
@@ -2328,7 +2379,9 @@ def test_queue_mutation_invalidates_the_piece_held_during_a_gap(
     first_claim = engine.claim_next_queued_chunk_with_generation(state)
     assert first_claim is not None
     held_path, old_generation = first_claim
-    engine.request_queue_command("move", moved.stem, waiting.stem)
+    engine.request_queue_command(
+        "move", speechicle_id(engine, moved), speechicle_id(engine, waiting)
+    )
 
     assert engine.gap_wait(1.0, queue.Queue(), state) == "queue_changed"
     replacement_claim = engine.claim_next_queued_chunk_with_generation(state)
@@ -2620,11 +2673,11 @@ def test_clear_wins_a_synthesis_failure_after_the_first_claim_check(
         def create(*_args, **_kwargs):
             raise RuntimeError("synthesis failed")
 
-    def block_after_claim_check(message: str) -> None:
+    def block_after_claim_check(message: str, **kwargs) -> None:
         if message.startswith("synth error"):
             entered_error_log.set()
             assert release_error_log.wait(1)
-        original_log(message)
+        original_log(message, **kwargs)
 
     monkeypatch.setattr(engine, "log", block_after_claim_check)
     worker = threading.Thread(
@@ -2813,7 +2866,7 @@ def test_play_and_stop_follow_publication_order(
     state = engine.State()
     state.playing = current.name
     state.saw_stop = True
-    request_id = engine.request_play(current.stem)
+    request_id = engine.request_play(speechicle_id(engine, current))
     request = next(engine.BASE.glob(f"PLAY.*.{request_id}.json"))
     engine.STOP.touch()
     play_time, stop_time = (
@@ -2827,7 +2880,9 @@ def test_play_and_stop_follow_publication_order(
     engine.process_play_request(queue.Queue(), state)
 
     if play_is_newer:
-        assert engine.wait_for_play_ack(request_id, timeout=0.1)["id"] == current.stem
+        assert engine.wait_for_play_ack(request_id, timeout=0.1)[
+            "id"
+        ] == speechicle_id(engine, current)
         assert not engine.STOP.exists()
         assert not state.saw_stop
     else:
@@ -2884,6 +2939,9 @@ def test_speak_waits_for_engine_acceptance_after_queueing_new_work(
         lambda _text, _voice, _gap: engine.QUEUE / "001-af_heart-say.txt",
     )
     monkeypatch.setattr(
+        engine, "public_id_for_path", lambda _path: f"sp_{'1' * 32}"
+    )
+    monkeypatch.setattr(
         engine,
         "wait_for_queue_acceptance",
         lambda: starts.append("accept") or True,
@@ -2906,7 +2964,9 @@ def test_speak_reports_durable_queueing_when_engine_cannot_accept_immediately(
 
     captured = capsys.readouterr()
     assert "speech remains queued; playback will begin when the engine is ready" in captured.err
-    assert Path(captured.out.strip()).read_text(encoding="utf-8") == "New work"
+    queued = engine._find_chunk(engine.QUEUE, captured.out.strip())
+    assert queued is not None
+    assert queued.read_text(encoding="utf-8") == "New work"
 
 
 def test_queue_acceptance_waits_until_the_engine_consumes_continue(
@@ -3102,7 +3162,7 @@ def test_startup_rejects_an_abandoned_claim_without_leaving_its_caller_waiting(
     claim.write_text(
         json.dumps(
             {
-                "id": "001-af_heart-say",
+                "id": f"sp_{'1' * 32}",
                 "voice": None,
                 "request_id": request_id,
             }
@@ -3125,7 +3185,7 @@ def test_failed_ack_keeps_the_applied_claim_without_repeating_the_mutation(
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     history = engine.SPOKEN / "001-af_heart-say.txt"
     history.write_text("Delete once", encoding="utf-8")
-    request_id = engine.request_queue_command("delete", history.stem)
+    request_id = engine.request_queue_command("delete", speechicle_id(engine, history))
     monkeypatch.setattr(engine, "publish_queue_ack", lambda *_args, **_kwargs: False)
 
     assert engine.process_queue_requests(queue.Queue(), engine.State())
@@ -3228,12 +3288,18 @@ def test_history_reordering_is_persisted_within_the_recent_window(tmp_path: Path
     for path in (first, second, third):
         path.write_text(path.stem, encoding="utf-8")
 
-    engine.apply_queue_command(queue.Queue(), engine.State(), "move_history", third.stem, None)
+    engine.apply_queue_command(
+        queue.Queue(),
+        engine.State(),
+        "move_history",
+        speechicle_id(engine, third),
+        None,
+    )
 
     assert engine.history_files_in_order() == [second, third, first]
     assert [item["id"] for item in engine.history_snapshot()[1]] == [
-        second.stem,
-        third.stem,
+        speechicle_id(engine, second),
+        speechicle_id(engine, third),
     ]
 
 
@@ -3245,8 +3311,7 @@ def test_new_history_item_stays_newest_after_manual_reordering(tmp_path: Path) -
     first.write_text("First", encoding="utf-8")
     second.write_text("Second", encoding="utf-8")
     engine.save_history_order([first, second])
-    newest = engine.QUEUE / "003-af_heart-say.txt"
-    newest.write_text("Newest", encoding="utf-8")
+    newest = engine.enqueue_text("Newest", "af_heart")
 
     assert engine.archive(newest)
 
@@ -3275,10 +3340,12 @@ def test_new_archive_and_history_reorder_commit_in_one_serial_order(
         real_save(paths)
 
     monkeypatch.setattr(engine, "save_history_order", pause_reorder_save)
+    second_id = speechicle_id(engine, second)
+    first_id = speechicle_id(engine, first)
     reorder = threading.Thread(
         name="history-reorder",
         target=engine.apply_queue_command,
-        args=(queue.Queue(), engine.State(), "move_history", second.stem, first.stem),
+        args=(queue.Queue(), engine.State(), "move_history", second_id, first_id),
     )
     archive = threading.Thread(target=engine.archive, args=(newest,))
     reorder.start()
@@ -3352,11 +3419,12 @@ def test_history_orders_legacy_suffixed_ids_by_their_leading_sequence(
 
     _, history = engine.history_snapshot()
 
-    assert [item["id"].split("-", 1)[0] for item in history] == [
-        "10224",
-        "10223",
-        "8552a",
+    assert [item["text"] for item in history] == [
+        "10224-af_heart-say.txt",
+        "10223-af_heart-say.txt",
+        "8552a-af_bella-say.txt",
     ]
+    assert all(engine.is_public_id(item["id"]) for item in history)
 
 
 def test_history_snapshot_refreshes_only_after_an_archive_move(tmp_path: Path) -> None:
@@ -3371,8 +3439,7 @@ def test_history_snapshot_refreshes_only_after_an_archive_move(tmp_path: Path) -
     assert first_count == cached_count == 1
     assert cached_items is first_items
 
-    second = engine.QUEUE / "002-bm_fable-say.txt"
-    second.write_text("Second", encoding="utf-8")
+    second = engine.enqueue_text("Second", "bm_fable")
     assert engine.archive(second)
     refreshed_count, refreshed_items = engine.history_snapshot()
 
@@ -3389,9 +3456,9 @@ def test_history_snapshot_keeps_rows_during_a_transient_text_lock(
     first = engine.SPOKEN / "001-af_heart-say.txt"
     first.write_text("First", encoding="utf-8")
     assert engine.history_snapshot()[1][0]["text"] == "First"
-    second = engine.SPOKEN / "002-af_heart-say.txt"
-    second.write_text("Second", encoding="utf-8")
-    engine.invalidate_history()
+    queued_second = engine.enqueue_text("Second", "af_heart")
+    assert engine.archive(queued_second)
+    second = engine.SPOKEN / queued_second.name
     original_read_text = Path.read_text
 
     def locked_text(path: Path, *args, **kwargs) -> str:
@@ -3403,7 +3470,10 @@ def test_history_snapshot_keeps_rows_during_a_transient_text_lock(
     count, items = engine.history_snapshot()
 
     assert count == len(items) == 2
-    assert [item["id"] for item in items] == [second.stem, first.stem]
+    assert [item["id"] for item in items] == [
+        speechicle_id(engine, second),
+        speechicle_id(engine, first),
+    ]
     assert items[0]["text"] == ""
     assert items[1]["text"] == "First"
 
@@ -3422,14 +3492,22 @@ def test_startup_completes_an_interrupted_clear_batch(tmp_path: Path) -> None:
         {
             "version": 1,
             "operation": "archive_batch",
+            "order_version": 2,
             "moves": [
                 {"source": current.name, "target": current.name},
                 {"source": waiting.name, "target": waiting.name},
             ],
-            "previous_queue_ids": [current.stem, waiting.stem],
-            "previous_history_ids": [earlier.stem],
+            "previous_queue_ids": [
+                speechicle_id(engine, current),
+                speechicle_id(engine, waiting),
+            ],
+            "previous_history_ids": [speechicle_id(engine, earlier)],
             "queue_ids": [],
-            "history_ids": [waiting.stem, current.stem, earlier.stem],
+            "history_ids": [
+                speechicle_id(engine, waiting),
+                speechicle_id(engine, current),
+                speechicle_id(engine, earlier),
+            ],
         }
     )
     os.replace(current, engine.SPOKEN / current.name)
@@ -3452,6 +3530,8 @@ def test_archive_succeeds_when_committed_intent_cleanup_is_deferred(
     configure_runtime(engine, tmp_path)
     current = engine.QUEUE / "001-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
+    engine.ensure_identity_catalog()
+    waiting = engine.enqueue_text("Waiting", "af_heart")
     real_unlink = Path.unlink
 
     def locked_intent(path: Path, *args, **kwargs) -> None:
@@ -3465,9 +3545,6 @@ def test_archive_succeeds_when_committed_intent_cleanup_is_deferred(
     assert (engine.SPOKEN / current.name).exists()
     assert engine.TIMELINE_INTENT.exists()
     pending_intent = engine.TIMELINE_INTENT.read_text(encoding="utf-8")
-    waiting = engine.QUEUE / "002-af_heart-say.txt"
-    waiting.write_text("Waiting", encoding="utf-8")
-
     with pytest.raises(PermissionError, match="locked"):
         engine.archive(waiting)
     assert waiting.exists()
@@ -3516,6 +3593,11 @@ def test_archive_rollback_restores_a_preexisting_history_copy(
     blocked.write_text("Blocked", encoding="utf-8")
     engine.save_queue_order([duplicate_queue, blocked])
     engine.save_history_order([duplicate_history])
+    migrated_history = next(
+        path
+        for path in engine.SPOKEN.glob("*.txt")
+        if path.read_text(encoding="utf-8") == "History copy"
+    )
     real_replace = engine.os.replace
 
     def fail_blocked(source, destination) -> None:
@@ -3527,10 +3609,10 @@ def test_archive_rollback_restores_a_preexisting_history_copy(
 
     assert not engine._archive_many([duplicate_queue, blocked])
     assert duplicate_queue.read_text(encoding="utf-8") == "Active copy"
-    assert duplicate_history.read_text(encoding="utf-8") == "History copy"
+    assert migrated_history.read_text(encoding="utf-8") == "History copy"
     assert blocked.read_text(encoding="utf-8") == "Blocked"
     assert engine.queue_files_in_order() == [duplicate_queue, blocked]
-    assert engine.history_files_in_order() == [duplicate_history]
+    assert engine.history_files_in_order() == [migrated_history]
     assert not engine.TIMELINE_INTENT.exists()
 
 
@@ -3591,5 +3673,131 @@ def test_clear_archives_a_paused_current_and_publishes_idle(tmp_path: Path) -> N
     assert status["state"] == "idle"
     assert status["current"] is None
     assert status["queue"] == []
-    assert [item["id"] for item in status["history"]] == [current.stem]
+    assert [item["id"] for item in status["history"]] == [
+        speechicle_id(engine, current)
+    ]
+
+
+def test_identity_migration_recovers_with_the_ids_saved_before_interruption(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    interrupted = load_engine("super_speech_engine_identity_interrupted")
+    configure_runtime(interrupted, tmp_path)
+    queued = interrupted.QUEUE / "004-af_heart-say.txt"
+    collision = interrupted.SPOKEN / "004-bm_fable-say.txt"
+    malformed = interrupted.SPOKEN / "4oops-af_bella-say.txt"
+    queued.write_text("Queued", encoding="utf-8")
+    collision.write_text("Collision", encoding="utf-8")
+    malformed.write_text("Malformed", encoding="utf-8")
+    interrupted._write_order_payload(interrupted.QUEUE_ORDER, [queued.stem], 1)
+    interrupted._write_order_payload(
+        interrupted.HISTORY_ORDER, [malformed.stem, collision.stem], 1
+    )
+
+    def stop_after_journal(_intent: dict[str, object]) -> None:
+        raise RuntimeError("simulated interruption")
+
+    monkeypatch.setattr(
+        interrupted, "_apply_identity_migration_intent", stop_after_journal
+    )
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        interrupted.ensure_identity_catalog()
+    saved_intent = json.loads(
+        interrupted.TIMELINE_INTENT.read_text(encoding="utf-8")
+    )
+
+    recovered = load_engine("super_speech_engine_identity_recovered")
+    configure_runtime(recovered, tmp_path)
+    recovered.repair_interrupted_timeline_transition()
+
+    catalog = json.loads(recovered.IDENTITY_INDEX.read_text(encoding="utf-8"))
+    assert catalog == saved_intent["catalog"]
+    assert json.loads(recovered.QUEUE_ORDER.read_text(encoding="utf-8")) == {
+        "version": 2,
+        "ids": saved_intent["queue_ids"],
+    }
+    assert json.loads(recovered.HISTORY_ORDER.read_text(encoding="utf-8")) == {
+        "version": 2,
+        "ids": saved_intent["history_ids"],
+    }
+    files = [
+        *recovered.QUEUE.glob("*.txt"),
+        *recovered.SPOKEN.glob("*.txt"),
+        *recovered.FAILED.glob("*.txt"),
+    ]
+    sequences = [recovered.strict_sequence(path.name) for path in files]
+    assert None not in sequences
+    assert len(set(sequences)) == len(sequences)
+    assert not recovered.TIMELINE_INTENT.exists()
+
+
+def test_deleted_identity_and_sequence_are_never_reused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_identity_delete")
+    configure_runtime(engine, tmp_path)
+    first = engine.enqueue_text("First", "af_heart")
+    first_id = speechicle_id(engine, first)
+    first_sequence = engine.strict_sequence(first.name)
+    assert engine.archive(first)
+    engine.apply_queue_command(
+        queue.Queue(), engine.State(), "delete", first_id, None
+    )
+
+    second = engine.enqueue_text("Second", "af_heart")
+    second_id = speechicle_id(engine, second)
+
+    assert engine.strict_sequence(second.name) > first_sequence
+    assert second_id != first_id
+    assert engine._find_chunk(engine.QUEUE, first_id) is None
+    assert engine._find_chunk(engine.SPOKEN, first_id) is None
+
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    request_id = engine.request_play(first_id)
+    assert engine.process_play_request(queue.Queue(), engine.State()) is None
+    with pytest.raises(RuntimeError, match="chunk not found"):
+        engine.wait_for_play_ack(request_id, timeout=0.1)
+
+
+def test_voice_and_history_lifecycle_preserve_one_public_identity(
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_identity_lifecycle")
+    configure_runtime(engine, tmp_path)
+    engine.AVAILABLE_VOICES = {"af_heart", "bm_fable"}
+    original = engine.enqueue_text("Same words", "af_heart", 250)
+    public_id = speechicle_id(engine, original)
+
+    changed = engine._replace_queue_voice(original, "bm_fable")
+    assert speechicle_id(engine, changed) == public_id
+    assert engine.archive(changed)
+    archived = engine._find_chunk(engine.SPOKEN, public_id)
+    assert archived is not None
+
+    replayed, _ = engine.promote_history_selection(archived, "af_heart")
+
+    assert speechicle_id(engine, replayed) == public_id
+    assert replayed.name.endswith("-af_heart-g250-say.txt")
+
+
+def test_public_status_contains_no_storage_filenames(tmp_path: Path) -> None:
+    engine = load_engine("super_speech_engine_public_status_shape")
+    configure_runtime(engine, tmp_path)
+    waiting = engine.QUEUE / "001-af_heart-say.txt"
+    archived = engine.SPOKEN / "002-bm_fable-say.txt"
+    waiting.write_text("Waiting", encoding="utf-8")
+    archived.write_text("History", encoding="utf-8")
+
+    engine.publish_status("idle", engine.State(), force=True)
+    status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
+
+    assert status["version"] == 11
+    assert "filename" not in json.dumps(status)
+    visible = [
+        *([status["current"]] if status["current"] else []),
+        *status["queue"],
+        *status["history"],
+    ]
+    assert visible
+    assert all(engine.is_public_id(item["id"]) for item in visible)
     assert not engine.PAUSE.exists()

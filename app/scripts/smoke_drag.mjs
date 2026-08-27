@@ -44,7 +44,20 @@ function runEngine(...args) {
 }
 
 function status() {
-  return JSON.parse(readFileSync(path.join(runtime, "status.json"), "utf8"));
+  const snapshot = JSON.parse(readFileSync(path.join(runtime, "status.json"), "utf8"));
+  const rows = [
+    ...(snapshot.current ? [snapshot.current] : []),
+    ...snapshot.queue,
+    ...snapshot.history,
+  ];
+  for (const row of rows) {
+    assert.match(row.id, /^sp_[0-9a-f]{32}$/, "Status leaked an invalid Speechicle ID");
+    assert(!Object.hasOwn(row, "filename"), "Status leaked an internal filename");
+  }
+  for (const start of snapshot.recent_starts) {
+    assert.match(start.id, /^sp_[0-9a-f]{32}$/, "Recent starts leaked an invalid Speechicle ID");
+  }
+  return snapshot;
 }
 
 function processExists(processId) {
@@ -1254,7 +1267,7 @@ try {
     30_000,
   );
   assert.equal(status().current?.text, currentBeforeVoiceChange.text);
-  assert.notEqual(status().current?.id, currentBeforeVoiceChange.id);
+  assert.equal(status().current?.id, currentBeforeVoiceChange.id);
   runEngine("pause");
 
   const clearIds = [

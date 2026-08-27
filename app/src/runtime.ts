@@ -6,7 +6,13 @@ export type RuntimeState =
   | "setup_required"
   | "stopped";
 
-export const ENGINE_STATUS_VERSION = 10 as const;
+export const ENGINE_STATUS_VERSION = 11 as const;
+
+const SPEECHICLE_ID = /^sp_[0-9a-f]{32}$/;
+
+export function isSpeechicleId(value: unknown): value is string {
+  return typeof value === "string" && SPEECHICLE_ID.test(value);
+}
 
 // Labels for the SHA-pinned Kokoro v1.0 voice archive bundled by prepare_resources
 export const VOICE_OPTIONS = [
@@ -42,7 +48,6 @@ export const VOICE_OPTIONS = [
 
 export interface QueueItem {
   id: string;
-  filename: string;
   text: string;
   voice: string;
 }
@@ -225,7 +230,7 @@ export function parsePlayAcceptance(value: unknown): PlayAcceptance | null {
     return null;
   }
   const acceptance = value as Record<string, unknown>;
-  return typeof acceptance.id === "string" && typeof acceptance.accepted_at === "number"
+  return isSpeechicleId(acceptance.id) && typeof acceptance.accepted_at === "number"
     ? { id: acceptance.id, acceptedAt: acceptance.accepted_at }
     : null;
 }
@@ -273,10 +278,10 @@ function isQueueItem(value: unknown): value is QueueItem {
   if (!value || typeof value !== "object") {
     return false;
   }
-  const item = value as Partial<QueueItem>;
+  const item = value as Partial<QueueItem> & Record<string, unknown>;
   return (
-    typeof item.id === "string" &&
-    typeof item.filename === "string" &&
+    isSpeechicleId(item.id) &&
+    !("filename" in item) &&
     typeof item.text === "string" &&
     typeof item.voice === "string"
   );
@@ -319,7 +324,7 @@ function isStartedItem(value: unknown): value is StartedItem {
     return false;
   }
   const item = value as Partial<StartedItem>;
-  return typeof item.id === "string" && typeof item.started_at === "number";
+  return isSpeechicleId(item.id) && typeof item.started_at === "number";
 }
 
 function playbackBoundaryMatchesState(value: Record<string, unknown>): boolean {
@@ -420,7 +425,6 @@ function timelineItem(
 ): TimelineItem {
   return {
     id: item.id,
-    filename: item.filename,
     text: item.text,
     voice: item.voice,
     kind,
@@ -462,19 +466,13 @@ export function clearRequestWasApplied(
   return [...baselineIds].every((id) => !activeIds.has(id));
 }
 
-/**
- * Reclassify one existing row as Current without changing visual order
- * sourceId identifies the original card when a voice change creates a replacement ID
- */
+/** Reclassify one existing row as Current without changing visual order */
 export function timelineItemsAtBoundary(
   status: Pick<EngineStatus, "current" | "queue" | "history">,
   boundary: QueueItem,
-  sourceId = boundary.id,
 ): TimelineItem[] {
   const items = timelineItems(status);
-  const boundaryIndex = items.findIndex(
-    ({ id }) => id === sourceId || id === boundary.id,
-  );
+  const boundaryIndex = items.findIndex(({ id }) => id === boundary.id);
   if (boundaryIndex < 0) {
     return items;
   }

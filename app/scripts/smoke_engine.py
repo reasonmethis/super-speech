@@ -6,8 +6,9 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 APP_DIR = Path(__file__).resolve().parents[1]
 ENGINE = APP_DIR / "build-resources" / "engine" / (
@@ -41,15 +42,6 @@ def process_exists(process_id: int | None) -> bool:
     return True
 
 
-def wait_for_file(path: Path, timeout: float = 45.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if path.is_file():
-            return
-        time.sleep(0.25)
-    raise RuntimeError(f"timed out waiting for {path.name}")
-
-
 def read_status(environment: dict[str, str]) -> dict[str, Any]:
     result = subprocess.run(
         [str(ENGINE), "status"],
@@ -58,7 +50,10 @@ def read_status(environment: dict[str, str]) -> dict[str, Any]:
         capture_output=True,
         text=True,
     )
-    return json.loads(result.stdout)
+    status = json.loads(result.stdout)
+    if status.get("version") != 11 or "filename" in result.stdout:
+        raise RuntimeError("frozen engine exposed an invalid public status shape")
+    return status
 
 
 def wait_for_status(
@@ -108,7 +103,7 @@ def main() -> None:
             "SUPER_SPEECH_SILENT": "1",
         }
         try:
-            subprocess.run(
+            speak_result = subprocess.run(
                 [
                     str(ENGINE),
                     "speak",
@@ -124,31 +119,47 @@ def main() -> None:
                 ],
                 env=environment,
                 check=True,
+                capture_output=True,
+                text=True,
             )
-            spoken = runtime / "spoken" / "001-af_heart-g0-say.txt"
-            wait_for_file(spoken)
+            speechicle_id = speak_result.stdout.strip()
+            if not speechicle_id.startswith("sp_"):
+                raise RuntimeError("frozen engine returned an invalid Speechicle ID")
+            wait_for_status(
+                environment,
+                lambda status: status.get("state") == "idle"
+                and any(
+                    item.get("id") == speechicle_id
+                    for item in status.get("history", [])
+                ),
+            )
+            spoken_files = list((runtime / "spoken").glob("*.txt"))
+            if len(spoken_files) != 1:
+                raise RuntimeError("frozen engine did not archive exactly one Speechicle")
+            spoken = spoken_files[0]
             original_text = spoken.read_text(encoding="utf-8")
             replay_result = subprocess.run(
-                [str(ENGINE), "play", spoken.stem],
+                [str(ENGINE), "play", speechicle_id],
                 env=environment,
                 check=True,
                 capture_output=True,
                 text=True,
             )
             replay_id = json.loads(replay_result.stdout).get("id")
-            if replay_id != spoken.stem:
+            if replay_id != speechicle_id:
                 raise RuntimeError(
                     "frozen engine returned an invalid replay acknowledgement"
                 )
             wait_for_status(
                 environment,
-                lambda status: (status.get("current") or {}).get("id") == spoken.stem,
+                lambda status: (status.get("current") or {}).get("id")
+                == speechicle_id,
             )
             subprocess.run([str(ENGINE), "pause"], env=environment, check=True)
             wait_for_status(
                 environment,
                 lambda status: status.get("state") == "paused"
-                and (status.get("current") or {}).get("id") == spoken.stem,
+                and (status.get("current") or {}).get("id") == speechicle_id,
             )
             subprocess.run([str(ENGINE), "resume"], env=environment, check=True)
             wait_for_status(
@@ -156,7 +167,7 @@ def main() -> None:
                 lambda status: status.get("state") == "idle"
                 and status.get("current") is None
                 and any(
-                    item.get("id") == spoken.stem
+                    item.get("id") == speechicle_id
                     for item in status.get("history", [])
                 ),
             )

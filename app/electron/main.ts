@@ -29,6 +29,7 @@ import {
   IPC_CHANNELS,
   compatibleEngineIsRunning,
   engineProcessIsLive,
+  isSpeechicleId,
   parseEngineStatus,
   parseEngineProcessStatus,
   parsePlayAcceptance,
@@ -269,10 +270,18 @@ function runEngineCommand(...arguments_: string[]): Promise<string> {
 }
 
 async function playChunk(id: string, voice?: string): Promise<PlayAcceptance> {
+  if (!isSpeechicleId(id)) {
+    throw new Error(`Invalid Speechicle ID: ${id}`);
+  }
   const output = await runEngineCommand("play", id, ...(voice ? ["--voice", voice] : []));
   const acceptance = parsePlayAcceptance(JSON.parse(output));
   if (!acceptance) {
-    throw new Error("Engine returned an incomplete play acknowledgement");
+    throw new Error("Engine protocol error: incomplete play acknowledgement");
+  }
+  if (acceptance.id !== id) {
+    throw new Error(
+      `Engine protocol error: play acknowledgement changed ${id} to ${acceptance.id}`,
+    );
   }
   return acceptance;
 }

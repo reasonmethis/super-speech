@@ -33,8 +33,7 @@ const demoStatus: RuntimeStatus = {
   engine_running: true,
   installed: true,
   current: {
-    id: "014-af_heart-say",
-    filename: "014-af_heart-say.txt",
+    id: "sp_00000000000000000000000000000014",
     text: "The first desktop version is taking shape. You can pause it without losing your place.",
     voice: "af_heart",
     piece: 1,
@@ -43,18 +42,19 @@ const demoStatus: RuntimeStatus = {
     piece_end: 42,
     elapsed_seconds: 4.2,
   },
-  recent_starts: [{ id: "014-af_heart-say", started_at: Date.now() / 1000 }],
+  recent_starts: [{
+    id: "sp_00000000000000000000000000000014",
+    started_at: Date.now() / 1000,
+  }],
   queue_count: 2,
   queue: [
     {
-      id: "015-bm_fable-say",
-      filename: "015-bm_fable-say.txt",
+      id: "sp_00000000000000000000000000000015",
       text: "Click this speech item to expand it, or double-click to play it now.",
       voice: "bm_fable",
     },
     {
-      id: "016-af_bella-say",
-      filename: "016-af_bella-say.txt",
+      id: "sp_00000000000000000000000000000016",
       text: "Every voice and source app will be easy to spot at a glance.",
       voice: "af_bella",
     },
@@ -62,14 +62,12 @@ const demoStatus: RuntimeStatus = {
   history_count: 2,
   history: [
     {
-      id: "013-bm_george-say",
-      filename: "013-bm_george-say.txt",
+      id: "sp_00000000000000000000000000000013",
       text: "Earlier speech stays available here whenever you want to hear it again.",
       voice: "bm_george",
     },
     {
-      id: "012-af_aoede-say",
-      filename: "012-af_aoede-say.txt",
+      id: "sp_00000000000000000000000000000012",
       text: "The app keeps upcoming speech intact when you choose something else.",
       voice: "af_aoede",
     },
@@ -124,7 +122,6 @@ for (const button of themeButtons) {
 
 interface PendingSelection {
   selectedItem: TimelineItem;
-  sourceItemId: string;
   state: "playing" | "paused";
   acceptance: PlayAcceptance | null;
   timeoutId: number;
@@ -234,11 +231,7 @@ function timelineAction(item: TimelineItem, pending: boolean, failed: boolean): 
 
 function visibleTimelineItems(status = currentStatus): TimelineItem[] {
   return pendingSelection
-    ? timelineItemsAtBoundary(
-      status,
-      pendingSelection.selectedItem,
-      pendingSelection.sourceItemId,
-    )
+    ? timelineItemsAtBoundary(status, pendingSelection.selectedItem)
     : timelineItems(status);
 }
 
@@ -1596,7 +1589,6 @@ async function playTimelineItem(item: TimelineItem, voice?: string): Promise<voi
   failedChunkId = null;
   const selection: PendingSelection = {
     selectedItem: voice ? { ...item, voice } : item,
-    sourceItemId: item.id,
     state: "playing",
     acceptance: null,
     timeoutId: 0,
@@ -1616,12 +1608,12 @@ async function playTimelineItem(item: TimelineItem, voice?: string): Promise<voi
     if (desktopApi) {
       const acceptance = await desktopApi.playChunk(item.id, voice);
       if (pendingSelection === selection) {
+        if (acceptance.id !== item.id) {
+          throw new Error(
+            `Engine protocol error: play acknowledgement changed ${item.id} to ${acceptance.id}`,
+          );
+        }
         selection.acceptance = acceptance;
-        selection.selectedItem = {
-          ...selection.selectedItem,
-          id: acceptance.id,
-          filename: `${acceptance.id}.txt`,
-        };
         commandStatus.textContent = "Selected speech is up next.";
         render(currentStatus);
       }
@@ -1649,7 +1641,9 @@ async function playTimelineItem(item: TimelineItem, voice?: string): Promise<voi
       return;
     }
     failedChunkId = item.id;
-    commandStatus.textContent = "Could not start selected speech. Try again.";
+    commandStatus.textContent = engineProtocolError(error)
+      ? "The app and speech engine returned incompatible data. Restart or reinstall Super Speech."
+      : "Could not start selected speech. Try again.";
     render(currentStatus);
   }
 }
@@ -1688,6 +1682,10 @@ async function statusAfterFailedMutation(fallback: RuntimeStatus): Promise<Runti
 
 function commandResultWasUnconfirmed(error: unknown): boolean {
   return error instanceof Error && error.message.includes("result was unconfirmed");
+}
+
+function engineProtocolError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("Engine protocol error");
 }
 
 async function reconcileFailedTimelineMutation(

@@ -56,6 +56,18 @@ from pathlib import Path
 from typing import BinaryIO, NamedTuple
 
 from pauseable_audio import PauseableAudio
+from speechicle_identity import (
+    IdentityCatalog,
+    allocate_identity,
+    is_public_id,
+    load_catalog,
+    migration_from_intent,
+    plan_identity_migration,
+    read_order_payload as _read_order_payload,
+    sequence_for_public_id,
+    strict_sequence,
+    write_catalog,
+)
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -87,6 +99,7 @@ STATUS_FAILURE = BASE / "status.failed"
 INSTANCE_LOCK = BASE / "engine.lock"
 TIMELINE_LOCK = BASE / "timeline.lock"
 TIMELINE_INTENT = BASE / "timeline-intent.json"
+IDENTITY_INDEX = BASE / "speechicle-index.json"
 
 
 def default_model_directory() -> Path:
@@ -121,7 +134,7 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
 ENGINE_VERSION = "0.4.11"
-STATUS_VERSION = 10
+STATUS_VERSION = 11
 QUEUE_ACTIONS = frozenset({"move", "move_history", "archive", "delete"})
 
 
@@ -183,9 +196,20 @@ class EngineInstanceLock(InterprocessFileLock):
         super().__init__(INSTANCE_LOCK)
 
 
+_timeline_lock_local = threading.local()
+
+
 @contextmanager
 def timeline_mutation_lock(timeout: float = 10.0):
     """Serialize cross-process operations that move or allocate timeline rows."""
+    depth = getattr(_timeline_lock_local, "depth", 0)
+    if depth:
+        _timeline_lock_local.depth = depth + 1
+        try:
+            yield
+        finally:
+            _timeline_lock_local.depth -= 1
+        return
     lock = InterprocessFileLock(TIMELINE_LOCK)
     deadline = time.monotonic() + timeout
     try:
@@ -193,8 +217,10 @@ def timeline_mutation_lock(timeout: float = 10.0):
             if time.monotonic() >= deadline:
                 raise RuntimeError("timed out waiting for the speech timeline lock")
             time.sleep(0.01)
+        _timeline_lock_local.depth = 1
         yield
     finally:
+        _timeline_lock_local.depth = 0
         lock.release()
 
 
@@ -384,33 +410,17 @@ def chunk_sequence(path: Path) -> int | None:
     return int(match.group()) if match else None
 
 
-def _next_chunk_number() -> int:
-    QUEUE.mkdir(parents=True, exist_ok=True)
-    SPOKEN.mkdir(parents=True, exist_ok=True)
-    existing = [*QUEUE.glob("*.txt"), *SPOKEN.glob("*.txt"), *FAILED.glob("*.txt")]
-    numbers = [
-        sequence
-        for path in existing
-        if (sequence := chunk_sequence(path)) is not None
-    ]
-    numbers.extend(
-        int(path.stem) for path in QUEUE.glob("*.reserve") if path.stem.isdigit()
-    )
-    return max(numbers, default=0) + 1
-
-
 def _reserve_queue_file_unlocked(filename_tail: str, text: str) -> Path:
-    number = _next_chunk_number()
-    for candidate in range(number, number + 100):
-        reservation = QUEUE / f"{candidate:03d}.reserve"
-        try:
-            reservation_descriptor = os.open(
-                reservation, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
-            )
-        except FileExistsError:
-            continue
-        os.close(reservation_descriptor)
+    _ensure_identity_catalog_unlocked()
+    for _ in range(100):
+        catalog = _load_identity_catalog(refresh=True)
+        catalog, candidate, _ = allocate_identity(catalog)
+        # Retire the sequence before creating its file. A failed write may leave a
+        # gap, but a later Speechicle can never inherit the abandoned identity
+        _write_identity_catalog(catalog)
         path = QUEUE / f"{candidate:03d}-{filename_tail}"
+        if any((directory / path.name).exists() for directory in (QUEUE, SPOKEN, FAILED)):
+            continue
         temporary = QUEUE / f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
         try:
             temporary.write_text(text, encoding="utf-8")
@@ -421,7 +431,6 @@ def _reserve_queue_file_unlocked(filename_tail: str, text: str) -> Path:
             raise
         finally:
             temporary.unlink(missing_ok=True)
-            reservation.unlink(missing_ok=True)
     raise RuntimeError("could not reserve a speech queue number")
 
 
@@ -456,15 +465,145 @@ def history_sort_key(path: Path) -> tuple[bool, int, str]:
 
 _queue_order_lock = threading.RLock()
 _order_cache: dict[Path, list[str]] = {}
+_identity_cache_lock = threading.RLock()
+_identity_cache_path: Path | None = None
+_identity_cache: IdentityCatalog | None = None
+_identity_ready_path: Path | None = None
+
+
+def _write_order_payload(path: Path, ids: list[str], version: int) -> None:
+    if not ids:
+        path.unlink(missing_ok=True)
+        _order_cache[path] = []
+        return
+    temporary = path.with_name(
+        f"{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp"
+    )
+    try:
+        temporary.write_text(
+            json.dumps({"version": version, "ids": ids}), encoding="utf-8"
+        )
+        os.replace(temporary, path)
+        _order_cache[path] = ids
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _load_identity_catalog(*, refresh: bool = False) -> IdentityCatalog:
+    global _identity_cache_path, _identity_cache
+    with _identity_cache_lock:
+        if refresh or _identity_cache_path != IDENTITY_INDEX or _identity_cache is None:
+            try:
+                catalog = load_catalog(IDENTITY_INDEX)
+            except (TypeError, ValueError) as error:
+                raise RuntimeError(str(error)) from error
+            if catalog is None:
+                raise RuntimeError("speech identity catalog is missing")
+            _identity_cache_path = IDENTITY_INDEX
+            _identity_cache = catalog
+        return _identity_cache
+
+
+def _write_identity_catalog(catalog: IdentityCatalog) -> None:
+    global _identity_cache_path, _identity_cache
+    write_catalog(IDENTITY_INDEX, catalog)
+    with _identity_cache_lock:
+        _identity_cache_path = IDENTITY_INDEX
+        _identity_cache = catalog
+
+
+def public_id_for_path(path: Path) -> str:
+    sequence = strict_sequence(path.name)
+    if sequence is None:
+        raise RuntimeError(f"speech file has no storage sequence: {path.name}")
+    catalog = _load_identity_catalog()
+    public_id = catalog.public_id(sequence)
+    if public_id is None:
+        catalog = _load_identity_catalog(refresh=True)
+        public_id = catalog.public_id(sequence)
+    if public_id is None:
+        raise RuntimeError(f"speech file has no public identity: {path.name}")
+    return public_id
+
+
+def _path_for_public_id(directory: Path, public_id: str) -> Path | None:
+    sequence = sequence_for_public_id(_load_identity_catalog(), public_id)
+    if sequence is None:
+        return None
+    return next(
+        (path for path in directory.glob("*.txt") if strict_sequence(path.name) == sequence),
+        None,
+    )
+
+
+def _apply_identity_migration_intent(intent: dict[str, object]) -> None:
+    try:
+        migration = migration_from_intent(intent)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("invalid pending identity migration") from error
+    directories = {"queue": QUEUE, "spoken": SPOKEN, "failed": FAILED}
+    for removal in migration.removals:
+        (directories[removal.directory] / removal.name).unlink(missing_ok=True)
+    for move in migration.moves:
+        source = directories[move.source_directory] / move.source
+        target = directories[move.target_directory] / move.target
+        if source == target or (target.exists() and not source.exists()):
+            continue
+        if source.exists() and not target.exists():
+            os.replace(source, target)
+            continue
+        raise RuntimeError(f"identity migration could not reconcile {source.name}")
+    _write_identity_catalog(migration.catalog)
+    _write_order_payload(QUEUE_ORDER, list(migration.queue_ids), 2)
+    _write_order_payload(HISTORY_ORDER, list(migration.history_ids), 2)
+
+
+def _ensure_identity_catalog_unlocked() -> None:
+    global _identity_ready_path
+    if _identity_ready_path == IDENTITY_INDEX and IDENTITY_INDEX.exists():
+        return
+    try:
+        existing = load_catalog(IDENTITY_INDEX)
+        migration = plan_identity_migration(
+            QUEUE,
+            SPOKEN,
+            FAILED,
+            QUEUE_ORDER,
+            HISTORY_ORDER,
+            existing,
+            DEFAULT_VOICE,
+        )
+    except (TypeError, ValueError) as error:
+        raise RuntimeError(str(error)) from error
+    if migration is not None:
+        intent = migration.intent_payload()
+        _write_timeline_intent(intent)
+        _apply_identity_migration_intent(intent)
+        TIMELINE_INTENT.unlink()
+        log(f"migrated {migration.row_count} speech identity row(s)", stderr=True)
+    else:
+        if existing is None:
+            raise RuntimeError("speech identity catalog migration did not create a catalog")
+        _write_identity_catalog(existing)
+    _identity_ready_path = IDENTITY_INDEX
+
+
+def ensure_identity_catalog() -> None:
+    if _identity_ready_path == IDENTITY_INDEX and IDENTITY_INDEX.exists():
+        return
+    with timeline_mutation_lock(), _history_order_lock, _queue_order_lock:
+        _recover_timeline_intent()
+        _ensure_identity_catalog_unlocked()
 
 
 def _read_saved_order(path: Path) -> list[str]:
+    ensure_identity_catalog()
     for attempt in range(3):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             ids = (
                 payload.get("ids", [])
-                if isinstance(payload, dict) and payload.get("version") == 1
+                if isinstance(payload, dict) and payload.get("version") == 2
                 else []
             )
             result = (
@@ -491,21 +630,7 @@ def _read_saved_order(path: Path) -> list[str]:
 
 
 def _write_saved_order(path: Path, ids: list[str]) -> None:
-    if not ids:
-        path.unlink(missing_ok=True)
-        _order_cache[path] = []
-        return
-    temporary = path.with_name(
-        f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-    )
-    try:
-        temporary.write_text(
-            json.dumps({"version": 1, "ids": ids}), encoding="utf-8"
-        )
-        os.replace(temporary, path)
-        _order_cache[path] = ids
-    finally:
-        temporary.unlink(missing_ok=True)
+    _write_order_payload(path, ids, 2)
 
 
 def _write_timeline_intent(payload: dict[str, object]) -> None:
@@ -523,20 +648,12 @@ def _write_timeline_intent(payload: dict[str, object]) -> None:
 
 def queue_files_in_order() -> list[Path]:
     """Return live queue files in explicit order, then append new arrivals."""
+    ensure_identity_catalog()
     with _queue_order_lock:
-        live = {path.stem: path for path in QUEUE.glob("*.txt")}
+        live = {public_id_for_path(path): path for path in QUEUE.glob("*.txt")}
         ordered = []
-        for chunk_id in _read_saved_order(QUEUE_ORDER):
-            matched = live.pop(chunk_id, None)
-            if matched is None:
-                saved_sequence = chunk_sequence(Path(chunk_id))
-                variants = [
-                    path
-                    for path in live.values()
-                    if chunk_sequence(path) == saved_sequence
-                ]
-                if saved_sequence is not None and len(variants) == 1:
-                    matched = live.pop(variants[0].stem)
+        for speechicle_id in _read_saved_order(QUEUE_ORDER):
+            matched = live.pop(speechicle_id, None)
             if matched is not None:
                 ordered.append(matched)
         ordered.extend(sorted(live.values(), key=chunk_sort_key))
@@ -545,15 +662,24 @@ def queue_files_in_order() -> list[Path]:
 
 def save_queue_order(paths: list[Path] | None = None) -> None:
     """Atomically persist the order of files that are still in the queue."""
+    ensure_identity_catalog()
     with _queue_order_lock:
         ordered = paths if paths is not None else queue_files_in_order()
-        live_ids = {path.stem for path in QUEUE.glob("*.txt")}
-        ids = [path.stem for path in ordered if path.stem in live_ids]
+        live_ids = {public_id_for_path(path) for path in QUEUE.glob("*.txt")}
+        ids = [
+            public_id_for_path(path)
+            for path in ordered
+            if public_id_for_path(path) in live_ids
+        ]
         missing = sorted(
-            (path for path in QUEUE.glob("*.txt") if path.stem not in ids),
+            (
+                path
+                for path in QUEUE.glob("*.txt")
+                if public_id_for_path(path) not in ids
+            ),
             key=chunk_sort_key,
         )
-        ids.extend(path.stem for path in missing)
+        ids.extend(public_id_for_path(path) for path in missing)
         _write_saved_order(QUEUE_ORDER, ids)
 
 
@@ -725,8 +851,8 @@ def play_ack_path(request_id: str) -> Path:
 
 def request_play(chunk_id: str, voice: str | None = None) -> str:
     """Atomically publish one uniquely acknowledged selection request."""
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", chunk_id):
-        raise ValueError("chunk ID contains invalid characters")
+    if not is_public_id(chunk_id):
+        raise ValueError("invalid Speechicle ID")
     if voice is not None and not re.fullmatch(r"[ab][fm]_[a-z0-9_]+", voice):
         raise ValueError("invalid Kokoro voice")
     if not engine_is_running():
@@ -772,10 +898,8 @@ def read_play_claim(claimed: Path) -> tuple[str, str | None, str] | None:
         chunk_id = payload.get("id")
         voice = payload.get("voice")
         request_id = payload.get("request_id")
-        if not isinstance(chunk_id, str) or not re.fullmatch(
-            r"[A-Za-z0-9_-]+", chunk_id
-        ):
-            raise ValueError("invalid chunk ID")
+        if not is_public_id(chunk_id):
+            raise ValueError("invalid Speechicle ID")
         if voice is not None and not (
             isinstance(voice, str) and re.fullmatch(r"[ab][fm]_[a-z0-9_]+", voice)
         ):
@@ -943,7 +1067,7 @@ def wait_for_play_ack(request_id: str, timeout: float = 60.0) -> dict[str, objec
         raise RuntimeError(str(payload.get("error") or "engine rejected play request"))
     result_id = payload.get("result_id")
     accepted_at = payload.get("accepted_at")
-    if not isinstance(result_id, str) or not isinstance(accepted_at, (int, float)):
+    if not is_public_id(result_id) or not isinstance(accepted_at, (int, float)):
         raise RuntimeError("engine returned an incomplete play acknowledgement")
     return {"id": result_id, "accepted_at": accepted_at}
 
@@ -973,8 +1097,8 @@ def request_queue_command(
     if action not in QUEUE_ACTIONS:
         raise ValueError("invalid queue action")
     for value in (chunk_id, before_id):
-        if value is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", value):
-            raise ValueError("chunk ID contains invalid characters")
+        if value is not None and not is_public_id(value):
+            raise ValueError("invalid Speechicle ID")
     if action not in {"move", "move_history"} and before_id is not None:
         raise ValueError(f"{action} does not accept a destination")
     if not engine_is_running():
@@ -1031,10 +1155,8 @@ def read_queue_claim(claimed: Path) -> tuple[str, str, str | None, str] | None:
         if action not in QUEUE_ACTIONS:
             raise ValueError("invalid queue action")
         for value in (chunk_id, before_id):
-            if value is not None and not (
-                isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]+", value)
-            ):
-                raise ValueError("invalid chunk ID")
+            if value is not None and not is_public_id(value):
+                raise ValueError("invalid Speechicle ID")
         if not isinstance(chunk_id, str):
             raise ValueError("invalid chunk ID")
         if action not in {"move", "move_history"} and before_id is not None:
@@ -1133,11 +1255,12 @@ def _archive_many(paths: list[Path]) -> bool:
         intent = {
             "version": 1,
             "operation": "archive_batch",
+            "order_version": 2,
             "moves": moves,
-            "previous_queue_ids": [path.stem for path in previous_queue],
-            "previous_history_ids": [path.stem for path in previous_history],
-            "queue_ids": [path.stem for path in desired_queue],
-            "history_ids": [path.stem for path in desired_history],
+            "previous_queue_ids": [public_id_for_path(path) for path in previous_queue],
+            "previous_history_ids": [public_id_for_path(path) for path in previous_history],
+            "queue_ids": [public_id_for_path(path) for path in desired_queue],
+            "history_ids": [public_id_for_path(path) for path in desired_history],
         }
         moved: list[tuple[Path, Path, Path | None]] = []
         history_order_written = False
@@ -1172,7 +1295,7 @@ def _archive_many(paths: list[Path]) -> bool:
                 try:
                     _write_saved_order(
                         QUEUE_ORDER,
-                        [path.stem for path in previous_queue],
+                        [public_id_for_path(path) for path in previous_queue],
                     )
                 except (OSError, RuntimeError) as rollback_error:
                     rollback_errors.append(str(rollback_error))
@@ -1180,7 +1303,7 @@ def _archive_many(paths: list[Path]) -> bool:
                 try:
                     _write_saved_order(
                         HISTORY_ORDER,
-                        [path.stem for path in previous_history],
+                        [public_id_for_path(path) for path in previous_history],
                     )
                 except (OSError, RuntimeError) as rollback_error:
                     rollback_errors.append(str(rollback_error))
@@ -1340,26 +1463,40 @@ def invalidate_history() -> None:
 
 def history_files_in_order() -> list[Path]:
     """Return archived files in their saved display order."""
+    ensure_identity_catalog()
     with _history_order_lock:
-        live = {path.stem: path for path in SPOKEN.glob("*.txt")}
+        live = {public_id_for_path(path): path for path in SPOKEN.glob("*.txt")}
         saved_ids = _read_saved_order(HISTORY_ORDER)
-        ordered = [live.pop(chunk_id) for chunk_id in saved_ids if chunk_id in live]
+        ordered = [
+            live.pop(speechicle_id)
+            for speechicle_id in saved_ids
+            if speechicle_id in live
+        ]
         missing = sorted(live.values(), key=history_sort_key, reverse=True)
         return [*missing, *ordered]
 
 
 def save_history_order(paths: list[Path] | None = None) -> None:
     """Atomically persist the order of archived files."""
+    ensure_identity_catalog()
     with _history_order_lock:
         ordered = paths if paths is not None else history_files_in_order()
-        live_ids = {path.stem for path in SPOKEN.glob("*.txt")}
-        ids = [path.stem for path in ordered if path.stem in live_ids]
+        live_ids = {public_id_for_path(path) for path in SPOKEN.glob("*.txt")}
+        ids = [
+            public_id_for_path(path)
+            for path in ordered
+            if public_id_for_path(path) in live_ids
+        ]
         missing = sorted(
-            (path for path in SPOKEN.glob("*.txt") if path.stem not in ids),
+            (
+                path
+                for path in SPOKEN.glob("*.txt")
+                if public_id_for_path(path) not in ids
+            ),
             key=history_sort_key,
             reverse=True,
         )
-        ids.extend(path.stem for path in missing)
+        ids.extend(public_id_for_path(path) for path in missing)
         _write_saved_order(HISTORY_ORDER, ids)
 
 
@@ -1374,7 +1511,9 @@ def _recover_timeline_intent() -> bool:
         raise RuntimeError("invalid pending timeline transaction")
 
     operation = intent.get("operation")
-    if operation == "archive":
+    if operation == "identity_migration":
+        _apply_identity_migration_intent(intent)
+    elif operation == "archive":
         name = intent.get("name")
         previous = intent.get("previous_history_ids")
         desired = intent.get("desired_history_ids")
@@ -1387,11 +1526,16 @@ def _recover_timeline_intent() -> bool:
             and all(isinstance(item, str) for item in desired)
         ):
             raise RuntimeError("invalid pending archive transaction")
+        order_version = 2 if intent.get("order_version") == 2 else 1
         if (QUEUE / name).exists():
-            _write_saved_order(HISTORY_ORDER, previous)
+            _write_order_payload(HISTORY_ORDER, previous, order_version)
         elif (SPOKEN / name).exists():
-            _write_saved_order(HISTORY_ORDER, desired)
-            save_queue_order()
+            _write_order_payload(HISTORY_ORDER, desired, order_version)
+            if order_version == 1:
+                queue_ids = [path.stem for path in sorted(QUEUE.glob("*.txt"), key=chunk_sort_key)]
+                _write_order_payload(QUEUE_ORDER, queue_ids, 1)
+            else:
+                save_queue_order()
         else:
             raise RuntimeError(f"pending archive row is missing: {name}")
     elif operation == "archive_batch":
@@ -1434,8 +1578,9 @@ def _recover_timeline_intent() -> bool:
                 )
             if backup is not None:
                 backup.unlink(missing_ok=True)
-        _write_saved_order(QUEUE_ORDER, queue_ids)
-        _write_saved_order(HISTORY_ORDER, history_ids)
+        order_version = 2 if intent.get("order_version") == 2 else 1
+        _write_order_payload(QUEUE_ORDER, queue_ids, order_version)
+        _write_order_payload(HISTORY_ORDER, history_ids, order_version)
     elif operation == "promote":
         moves = intent.get("moves")
         queue_ids = intent.get("queue_ids")
@@ -1488,8 +1633,9 @@ def _recover_timeline_intent() -> bool:
                 )
             if backup is not None:
                 backup.unlink(missing_ok=True)
-        _write_saved_order(QUEUE_ORDER, queue_ids)
-        _write_saved_order(HISTORY_ORDER, history_ids)
+        order_version = 2 if intent.get("order_version") == 2 else 1
+        _write_order_payload(QUEUE_ORDER, queue_ids, order_version)
+        _write_order_payload(HISTORY_ORDER, history_ids, order_version)
     else:
         raise RuntimeError("unknown pending timeline transaction")
 
@@ -1502,72 +1648,9 @@ def _recover_timeline_intent() -> bool:
 def repair_interrupted_timeline_transition() -> None:
     """Repair incomplete or legacy file layouts before publishing the timeline."""
     with timeline_mutation_lock(), _history_order_lock, _queue_order_lock:
-        recovered_intent = _recover_timeline_intent()
-        _read_saved_order(QUEUE_ORDER)
-        saved_history = _read_saved_order(HISTORY_ORDER)
-        queue_live = {path.stem: path for path in QUEUE.glob("*.txt")}
-        history_live = {path.stem for path in SPOKEN.glob("*.txt")}
-        promoted = []
-        for chunk_id in saved_history:
-            if chunk_id in history_live:
-                break
-            candidate = queue_live.get(chunk_id)
-            if candidate is None:
-                sequence = chunk_sequence(Path(chunk_id))
-                variants = [
-                    path
-                    for path in queue_live.values()
-                    if chunk_sequence(path) == sequence
-                ]
-                candidate = variants[0] if sequence is not None and len(variants) == 1 else None
-            if candidate is None:
-                break
-            promoted.append(candidate)
-        if promoted:
-            promoted_names = {path.name for path in promoted}
-            previous_queue = [
-                path for path in queue_files_in_order() if path.name not in promoted_names
-            ]
-            save_queue_order([*reversed(promoted), *previous_queue])
-            save_history_order(history_files_in_order())
-            log(f"recovered interrupted History selection of {len(promoted)} item(s)")
-
-        legacy_source = next(
-            (
-                SPOKEN / path.name
-                for path in queue_files_in_order()
-                if (SPOKEN / path.name).exists()
-                and (SPOKEN / path.name).read_bytes() == path.read_bytes()
-            ),
-            None,
-        )
-        if legacy_source is not None:
-            _promote_history_selection_unlocked(legacy_source)
-            log(f"migrated legacy History replay {legacy_source.name}")
-
-        queue_names = {path.name for path in QUEUE.glob("*.txt")}
-        duplicates = [
-            path for path in SPOKEN.glob("*.txt") if path.name in queue_names
-        ]
-        for duplicate in duplicates:
-            active = QUEUE / duplicate.name
-            if duplicate.read_bytes() == active.read_bytes():
-                duplicate.unlink()
-                continue
-            ordered_history = history_files_in_order()
-            position = ordered_history.index(duplicate)
-            sequence = _next_chunk_number()
-            renamed = duplicate.with_name(
-                f"{sequence:03d}-{duplicate.name.split('-', 1)[1]}"
-            )
-            os.replace(duplicate, renamed)
-            ordered_history[position] = renamed
-            save_history_order(ordered_history)
-        if duplicates:
-            save_history_order()
-            log(f"reconciled {len(duplicates)} legacy active/History duplicate(s)")
-        if recovered_intent or promoted or legacy_source is not None or duplicates:
-            invalidate_history()
+        _recover_timeline_intent()
+        _ensure_identity_catalog_unlocked()
+        invalidate_history()
 
 
 def history_snapshot() -> tuple[int, list[dict[str, object]]]:
@@ -1580,15 +1663,15 @@ def history_snapshot() -> tuple[int, list[dict[str, object]]]:
             read_failed = False
             previous = {str(item["id"]): item for item in _history_items}
             for path in history_files[:HISTORY_LIMIT]:
+                speechicle_id = public_id_for_path(path)
                 try:
                     text = path.read_text(encoding="utf-8").strip()
                 except OSError:
                     read_failed = True
-                    text = str(previous.get(path.stem, {}).get("text", ""))
+                    text = str(previous.get(speechicle_id, {}).get("text", ""))
                 items.append(
                     {
-                        "id": path.stem,
-                        "filename": path.name,
+                        "id": speechicle_id,
                         "text": text,
                         "voice": voice_from_name(path.name),
                     }
@@ -1686,8 +1769,7 @@ def publish_status(
             text = ""
         queue_items.append(
             {
-                "id": path.stem,
-                "filename": path.name,
+                "id": public_id_for_path(path),
                 "text": text,
                 "voice": voice_from_name(path.name),
             }
@@ -1707,8 +1789,7 @@ def publish_status(
             current_piece_start = None
             current_piece_end = None
         current = {
-            "id": current_path.stem,
-            "filename": current_path.name,
+            "id": public_id_for_path(current_path),
             "text": current_text or "",
             "voice": current_voice or voice_from_name(current_path.name),
             "piece": current_piece,
@@ -1782,7 +1863,7 @@ def publish_status(
 
 
 def _find_chunk(directory: Path, chunk_id: str) -> Path | None:
-    return next((path for path in directory.glob("*.txt") if path.stem == chunk_id), None)
+    return _path_for_public_id(directory, chunk_id)
 
 
 def _voice_variant_path(source: Path, voice: str) -> Path:
@@ -1895,9 +1976,13 @@ def _promote_history_selection_unlocked(
                         for archived, target, backup in planned_moves
                     ],
                     "queue_ids": [
-                        path.stem for path in [*playback_order, *remaining_queue]
+                        public_id_for_path(path)
+                        for path in [*playback_order, *remaining_queue]
                     ],
-                    "history_ids": [path.stem for path in remaining_history],
+                    "history_ids": [
+                        public_id_for_path(path) for path in remaining_history
+                    ],
+                    "order_version": 2,
                 }
             )
             for archived, queued, duplicate_backup in planned_moves:
@@ -2007,7 +2092,7 @@ def _reset_waiting_buffer(buf: "queue.Queue", st: State) -> int:
             st.claimed.add(st.playing)
             if current_generation is not None:
                 st.claim_generations[st.playing] = current_generation
-        if st.selection_name and _find_chunk(QUEUE, Path(st.selection_name).stem) is None:
+        if st.selection_name and not (QUEUE / st.selection_name).exists():
             st.selection_name = None
         return discarded
 
@@ -2038,6 +2123,7 @@ def process_play_request(buf: "queue.Queue", st: State) -> str | None:
 
 def _process_play_request_locked(buf: "queue.Queue", st: State) -> str | None:
     """Resolve one selected ID while holding the reentrant State lock."""
+    ensure_identity_catalog()
     request = take_play_request()
     if request is None:
         return None
@@ -2068,7 +2154,7 @@ def _process_play_request_locked(buf: "queue.Queue", st: State) -> str | None:
         playing = st.playing
     if (
         playing
-        and Path(playing).stem == chunk_id
+        and public_id_for_path(QUEUE / playing) == chunk_id
         and (requested_voice is None or requested_voice == voice_from_name(playing))
     ):
         PAUSE.unlink(missing_ok=True)
@@ -2174,7 +2260,7 @@ def _process_play_request_locked(buf: "queue.Queue", st: State) -> str | None:
         st.skip_name = None
         st.saw_stop = False
     publish_status("playing", st, force=True)
-    acknowledge(result_id=target.stem)
+    acknowledge(result_id=public_id_for_path(target))
     if replayed_from is None:
         log(
             f"PLAY selected {target.name}; archived {len(archived)} older chunk(s); "
@@ -2246,9 +2332,12 @@ def apply_queue_command(
     before_id: str | None,
 ) -> None:
     """Apply one queue or History mutation without changing current playback."""
+    ensure_identity_catalog()
     if action == "delete":
         with st.lock:
-            playing_id = Path(st.playing).stem if st.playing else None
+            playing_id = (
+                public_id_for_path(QUEUE / st.playing) if st.playing else None
+            )
         if _find_chunk(QUEUE, chunk_id) is not None or playing_id == chunk_id:
             raise ValueError(f"history chunk is active: {chunk_id}")
         with _history_order_lock:
@@ -2274,7 +2363,14 @@ def apply_queue_command(
     if action == "move_history":
         with _history_order_lock:
             ordered_history = history_files_in_order()
-            source = next((path for path in ordered_history if path.stem == chunk_id), None)
+            source = next(
+                (
+                    path
+                    for path in ordered_history
+                    if public_id_for_path(path) == chunk_id
+                ),
+                None,
+            )
             if source is None:
                 raise ValueError(f"history chunk not found: {chunk_id}")
             if before_id == chunk_id:
@@ -2284,7 +2380,11 @@ def apply_queue_command(
                 ordered_history.insert(min(HISTORY_LIMIT - 1, len(ordered_history)), source)
             else:
                 destination = next(
-                    (path for path in ordered_history if path.stem == before_id),
+                    (
+                        path
+                        for path in ordered_history
+                        if public_id_for_path(path) == before_id
+                    ),
                     None,
                 )
                 if destination is None:
@@ -2296,7 +2396,10 @@ def apply_queue_command(
         return
 
     ordered = queue_files_in_order()
-    source = next((path for path in ordered if path.stem == chunk_id), None)
+    source = next(
+        (path for path in ordered if public_id_for_path(path) == chunk_id),
+        None,
+    )
     with st.lock:
         playing = st.playing
         selected = st.selection_name
@@ -2321,7 +2424,11 @@ def apply_queue_command(
         ordered.append(source)
     else:
         destination = next(
-            (path for path in ordered if path.stem == before_id and path.name != playing),
+            (
+                path
+                for path in ordered
+                if public_id_for_path(path) == before_id and path.name != playing
+            ),
             None,
         )
         if destination is None:
@@ -2672,7 +2779,7 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
         finished_callback=playback.mark_done,
     )
     stream.start()
-    record_started(st, path.stem)
+    record_started(st, public_id_for_path(path))
     publish_status(
         "paused" if PAUSE.exists() else "playing",
         st,
@@ -3087,17 +3194,38 @@ def resume() -> None:
     PAUSE.unlink(missing_ok=True)
 
 
+def _contains_private_status_field(value: object) -> bool:
+    if isinstance(value, dict):
+        return "filename" in value or any(
+            _contains_private_status_field(item) for item in value.values()
+        )
+    if isinstance(value, list):
+        return any(_contains_private_status_field(item) for item in value)
+    return False
+
+
 def print_status() -> None:
     status_error: OSError | None = None
     for _ in range(5):
         try:
-            print(STATUS.read_text(encoding="utf-8"))
-            return
+            stored_status = json.loads(STATUS.read_text(encoding="utf-8"))
         except OSError as error:
             status_error = error
             time.sleep(0.02)
+        except json.JSONDecodeError:
+            break
+        else:
+            if (
+                isinstance(stored_status, dict)
+                and stored_status.get("version") == STATUS_VERSION
+                and not _contains_private_status_field(stored_status)
+            ):
+                print(json.dumps(stored_status, ensure_ascii=False))
+                return
+            break
     if STATUS.exists() and status_error is not None:
         raise RuntimeError(f"could not read engine status: {status_error}")
+    ensure_identity_catalog()
     queue_items = []
     for path in queue_files_in_order():
         try:
@@ -3106,8 +3234,7 @@ def print_status() -> None:
             text = ""
         queue_items.append(
             {
-                "id": path.stem,
-                "filename": path.name,
+                "id": public_id_for_path(path),
                 "text": text,
                 "voice": voice_from_name(path.name),
             }
@@ -3200,7 +3327,7 @@ def cli(argv: list[str] | None = None) -> int:
                 sys.stderr.write(
                     "speech remains queued; playback will begin when the engine is ready\n"
                 )
-            print(queued)
+            print(public_id_for_path(queued))
         elif args.command == "setup":
             install_models(args.model_dir)
         elif args.command == "status":
