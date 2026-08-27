@@ -1272,11 +1272,14 @@ def warmup(kokoro) -> None:
 
 
 @dataclass(frozen=True)
-class PieceProgress:
+class ActivePiece:
     piece: int
-    piece_count: int
-    piece_start: int | None
-    piece_end: int | None
+    start: int
+    end: int
+
+    def __post_init__(self) -> None:
+        if self.piece <= 0 or self.start < 0 or self.end < self.start:
+            raise ValueError("invalid active piece progress")
 
 
 @dataclass(frozen=True)
@@ -1284,8 +1287,15 @@ class CurrentProjection:
     filename: str
     text: str
     voice: str
-    progress: PieceProgress
+    piece_count: int
+    active_piece: ActivePiece | None = None
     skip_initial_gap: bool = False
+
+    def __post_init__(self) -> None:
+        if self.piece_count < 0:
+            raise ValueError("piece count cannot be negative")
+        if self.active_piece is not None and self.active_piece.piece > self.piece_count:
+            raise ValueError("active piece exceeds piece count")
 
 
 class State:
@@ -1310,8 +1320,8 @@ class State:
         self.timeline_fingerprint = timeline_fingerprint
 
 
-def _initial_piece_progress(text: str) -> PieceProgress:
-    return PieceProgress(0, len(split_text(text, SPLIT_CHARS)), None, None)
+def _piece_count(text: str) -> int:
+    return len(split_text(text, SPLIT_CHARS))
 
 
 def replace_current_projection(
@@ -1328,8 +1338,8 @@ def replace_current_projection(
             filename,
             text,
             voice,
-            _initial_piece_progress(text),
-            skip_initial_gap,
+            _piece_count(text),
+            skip_initial_gap=skip_initial_gap,
         )
 
 
@@ -1347,8 +1357,10 @@ def start_current_playback(
             filename,
             text,
             voice,
-            _initial_piece_progress(text),
-            st.current.skip_initial_gap if st.current is not None else False,
+            _piece_count(text),
+            skip_initial_gap=(
+                st.current.skip_initial_gap if st.current is not None else False
+            ),
         )
         return True
 
@@ -1357,9 +1369,8 @@ def update_current_piece(
     st: State,
     expected_filename: str,
     piece: int,
-    piece_count: int,
-    piece_start: int | None,
-    piece_end: int | None,
+    piece_start: int,
+    piece_end: int,
 ) -> bool:
     """Advance progress only while the buffered piece still owns Current."""
     with st.lock:
@@ -1370,7 +1381,8 @@ def update_current_piece(
             current.filename,
             current.text,
             current.voice,
-            PieceProgress(piece, piece_count, piece_start, piece_end),
+            current.piece_count,
+            ActivePiece(piece, piece_start, piece_end),
             current.skip_initial_gap,
         )
         return True
@@ -1390,7 +1402,8 @@ def consume_initial_gap_skip(st: State, expected_filename: str) -> bool:
             current.filename,
             current.text,
             current.voice,
-            current.progress,
+            current.piece_count,
+            current.active_piece,
             False,
         )
         return True
@@ -1852,19 +1865,21 @@ def publish_status(
             except OSError:
                 current_text = ""
             current_voice = voice_from_name(current_path.name)
-            progress = _initial_piece_progress(current_text)
+            piece_count = _piece_count(current_text)
+            active_piece = None
         else:
             current_text = current_projection.text
             current_voice = current_projection.voice
-            progress = current_projection.progress
+            piece_count = current_projection.piece_count
+            active_piece = current_projection.active_piece
         current = {
             "id": public_id_for_path(current_path),
             "text": current_text or "",
             "voice": current_voice or voice_from_name(current_path.name),
-            "piece": progress.piece,
-            "piece_count": progress.piece_count,
-            "piece_start": progress.piece_start,
-            "piece_end": progress.piece_end,
+            "piece": active_piece.piece if active_piece is not None else 0,
+            "piece_count": piece_count,
+            "piece_start": active_piece.start if active_piece is not None else None,
+            "piece_end": active_piece.end if active_piece is not None else None,
             "elapsed_seconds": (
                 playback.position / sample_rate
                 if is_playing_path and playback is not None and sample_rate
@@ -2361,73 +2376,78 @@ def do_clear(buf: "queue.Queue", st: State) -> bool:
     return True
 
 
-def apply_queue_command(
-    buf: "queue.Queue",
-    st: State,
-    action: str,
-    chunk_id: str,
-    before_id: str | None,
-) -> None:
-    """Apply one queue or History mutation without changing current playback."""
+def apply_delete_mutation(request: DeleteMutation) -> None:
+    """Delete one History row without disturbing the active queue."""
     ensure_identity_catalog()
-    if action == "delete":
-        if _find_chunk(QUEUE, chunk_id) is not None:
-            raise ValueError(f"history chunk is active: {chunk_id}")
-        with _history_order_lock:
-            history_item = _find_chunk(SPOKEN, chunk_id)
-            if history_item is None:
-                log(f"QUEUE delete {chunk_id}; already absent")
-                return
-            try:
-                history_item.unlink()
-            except OSError as error:
-                raise RuntimeError(f"could not delete history chunk: {chunk_id}") from error
-            try:
-                save_history_order()
-            except (OSError, RuntimeError) as order_error:
-                log(
-                    f"history order update error after deleting {history_item.name}: "
-                    f"{order_error}"
-                )
-        invalidate_history()
-        log(f"QUEUE delete {history_item.name}")
-        return
+    if _find_chunk(QUEUE, request.id) is not None:
+        raise ValueError(f"history chunk is active: {request.id}")
+    with _history_order_lock:
+        history_item = _find_chunk(SPOKEN, request.id)
+        if history_item is None:
+            log(f"QUEUE delete {request.id}; already absent")
+            return
+        try:
+            history_item.unlink()
+        except OSError as error:
+            raise RuntimeError(
+                f"could not delete history chunk: {request.id}"
+            ) from error
+        try:
+            save_history_order()
+        except (OSError, RuntimeError) as order_error:
+            log(
+                f"history order update error after deleting {history_item.name}: "
+                f"{order_error}"
+            )
+    invalidate_history()
+    log(f"QUEUE delete {history_item.name}")
 
-    if action == "move_history":
-        with _history_order_lock:
-            ordered_history = history_files_in_order()
-            source = next(
+
+def apply_history_move_mutation(request: MoveMutation) -> None:
+    """Move one History row within the saved visible order."""
+    ensure_identity_catalog()
+    with _history_order_lock:
+        ordered_history = history_files_in_order()
+        source = next(
+            (
+                path
+                for path in ordered_history
+                if public_id_for_path(path) == request.id
+            ),
+            None,
+        )
+        if source is None:
+            raise ValueError(f"history chunk not found: {request.id}")
+        if request.before_id == request.id:
+            return
+        ordered_history.remove(source)
+        if request.before_id is None:
+            ordered_history.insert(
+                min(HISTORY_LIMIT - 1, len(ordered_history)), source
+            )
+        else:
+            destination = next(
                 (
                     path
                     for path in ordered_history
-                    if public_id_for_path(path) == chunk_id
+                    if public_id_for_path(path) == request.before_id
                 ),
                 None,
             )
-            if source is None:
-                raise ValueError(f"history chunk not found: {chunk_id}")
-            if before_id == chunk_id:
-                return
-            ordered_history.remove(source)
-            if before_id is None:
-                ordered_history.insert(min(HISTORY_LIMIT - 1, len(ordered_history)), source)
-            else:
-                destination = next(
-                    (
-                        path
-                        for path in ordered_history
-                        if public_id_for_path(path) == before_id
-                    ),
-                    None,
+            if destination is None:
+                raise ValueError(
+                    f"history destination not found: {request.before_id}"
                 )
-                if destination is None:
-                    raise ValueError(f"history destination not found: {before_id}")
-                ordered_history.insert(ordered_history.index(destination), source)
-            save_history_order(ordered_history)
-        invalidate_history()
-        log(f"QUEUE move History {source.name} before {before_id or 'visible end'}")
-        return
+            ordered_history.insert(ordered_history.index(destination), source)
+        save_history_order(ordered_history)
+    invalidate_history()
+    log(
+        f"QUEUE move History {source.name} before "
+        f"{request.before_id or 'visible end'}"
+    )
 
+
+def _waiting_mutation_source(chunk_id: str) -> tuple[list[Path], Path]:
     ordered = queue_files_in_order()
     source = next(
         (path for path in ordered if public_id_for_path(path) == chunk_id),
@@ -2436,37 +2456,56 @@ def apply_queue_command(
     current_path = ordered[0] if ordered else None
     if source is None or source == current_path:
         raise ValueError(f"waiting chunk not found: {chunk_id}")
+    return ordered, source
 
-    if action == "archive":
-        if not archive(source):
-            raise RuntimeError(f"could not archive waiting chunk: {chunk_id}")
-        discarded = _reset_waiting_buffer(buf, st)
-        log(f"QUEUE archive {source.name}; discarded {discarded} banked piece(s)")
-        return
 
-    if action != "move":
-        raise ValueError("invalid queue action")
-    if before_id == chunk_id:
+def apply_archive_mutation(
+    buf: "queue.Queue",
+    st: State,
+    request: ArchiveMutation,
+) -> None:
+    """Move one Waiting row to History without changing Current."""
+    ensure_identity_catalog()
+    _, source = _waiting_mutation_source(request.id)
+    if not archive(source):
+        raise RuntimeError(f"could not archive waiting chunk: {request.id}")
+    discarded = _reset_waiting_buffer(buf, st)
+    log(f"QUEUE archive {source.name}; discarded {discarded} banked piece(s)")
+
+
+def apply_waiting_move_mutation(
+    buf: "queue.Queue",
+    st: State,
+    request: MoveMutation,
+) -> None:
+    """Move one Waiting row without changing Current."""
+    ensure_identity_catalog()
+    ordered, source = _waiting_mutation_source(request.id)
+    if request.before_id == request.id:
         return
+    current_path = ordered[0]
     ordered.remove(source)
-    if before_id is None:
+    if request.before_id is None:
         ordered.append(source)
     else:
         destination = next(
             (
                 path
                 for path in ordered
-                if public_id_for_path(path) == before_id and path != current_path
+                if public_id_for_path(path) == request.before_id
+                and path != current_path
             ),
             None,
         )
         if destination is None:
-            raise ValueError(f"waiting destination not found: {before_id}")
+            raise ValueError(
+                f"waiting destination not found: {request.before_id}"
+            )
         ordered.insert(ordered.index(destination), source)
     save_queue_order(ordered)
     discarded = _reset_waiting_buffer(buf, st)
     log(
-        f"QUEUE move {source.name} before {before_id or 'end'}; "
+        f"QUEUE move {source.name} before {request.before_id or 'end'}; "
         f"discarded {discarded} banked piece(s)"
     )
 
@@ -2574,23 +2613,18 @@ def process_mutation_requests(
                 effect = "clear"
                 invalidate_held_chunk = True
             elif isinstance(request, MoveMutation):
-                action = "move_history" if request.section == "history" else "move"
-                apply_queue_command(
-                    buf,
-                    st,
-                    action,
-                    request.id,
-                    request.before_id,
-                )
-                if request.section == "waiting":
+                if request.section == "history":
+                    apply_history_move_mutation(request)
+                else:
+                    apply_waiting_move_mutation(buf, st, request)
                     if effect is None:
                         effect = "queue_changed"
             elif isinstance(request, ArchiveMutation):
-                apply_queue_command(buf, st, "archive", request.id, None)
+                apply_archive_mutation(buf, st, request)
                 if effect is None:
                     effect = "queue_changed"
             elif isinstance(request, DeleteMutation):
-                apply_queue_command(buf, st, "delete", request.id, None)
+                apply_delete_mutation(request)
             else:
                 assert_never(request)
         except MutationOutcomeUnconfirmed as error:
@@ -3135,7 +3169,7 @@ def run_engine_loop(
                     first,
                     last,
                     piece,
-                    piece_count,
+                    _buffered_piece_count,
                     text,
                     voice,
                     piece_start,
@@ -3207,7 +3241,6 @@ def run_engine_loop(
                 st,
                 path.name,
                 piece,
-                piece_count,
                 piece_start,
                 piece_end,
             ):

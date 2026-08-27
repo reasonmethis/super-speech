@@ -77,21 +77,26 @@ def set_current(
     piece_end: int | None = None,
 ) -> None:
     current_text = path.read_text(encoding="utf-8") if text is None else text
-    engine.replace_current_projection(
-        state,
+    current_piece_count = (
+        len(engine.split_text(current_text, engine.SPLIT_CHARS))
+        if piece_count is None
+        else piece_count
+    )
+    active_piece = (
+        None
+        if piece == 0
+        else engine.ActivePiece(
+            piece,
+            0 if piece_start is None else piece_start,
+            len(current_text) if piece_end is None else piece_end,
+        )
+    )
+    state.current = engine.CurrentProjection(
         path.name,
         current_text,
         voice or engine.voice_from_name(path.name),
-    )
-    current = state.current
-    assert current is not None
-    assert engine.update_current_piece(
-        state,
-        path.name,
-        piece,
-        current.progress.piece_count if piece_count is None else piece_count,
-        piece_start,
-        piece_end,
+        current_piece_count,
+        active_piece,
     )
 
 
@@ -104,6 +109,10 @@ def request_mutation(engine, mutation_type: str, **fields: object) -> str:
     return engine.request_mutation(
         engine.build_mutation_request(mutation_type, **fields)
     )
+
+
+def build_mutation(engine, mutation_type: str, **fields: object):
+    return engine.build_mutation_request(mutation_type, **fields)
 
 
 def committed_result(engine, request_id: str) -> dict[str, object]:
@@ -134,6 +143,34 @@ def test_split_text_pieces_retains_source_ranges_with_unicode_and_spacing() -> N
         "Second sentence?",
         "Third sentence.",
     ]
+
+
+@pytest.mark.parametrize(
+    ("piece", "start", "end"),
+    [(0, 0, 1), (1, -1, 1), (1, 2, 1)],
+)
+def test_active_piece_rejects_impossible_progress(
+    piece: int, start: int, end: int
+) -> None:
+    engine = load_engine(f"super_speech_engine_invalid_piece_{piece}_{start}_{end}")
+
+    with pytest.raises(ValueError, match="invalid active piece progress"):
+        engine.ActivePiece(piece, start, end)
+
+
+def test_current_projection_rejects_progress_beyond_its_piece_count() -> None:
+    engine = load_engine("super_speech_engine_invalid_current_progress")
+
+    with pytest.raises(ValueError, match="piece count cannot be negative"):
+        engine.CurrentProjection("speech.txt", "Speech", "af_heart", -1)
+    with pytest.raises(ValueError, match="active piece exceeds piece count"):
+        engine.CurrentProjection(
+            "speech.txt",
+            "Speech",
+            "af_heart",
+            1,
+            engine.ActivePiece(2, 0, len("Speech")),
+        )
 
 
 def test_pause_keeps_the_next_sample_position() -> None:
@@ -200,6 +237,10 @@ def test_status_exposes_pause_current_chunk_and_queue(tmp_path: Path) -> None:
     assert status["state"] == "paused"
     assert status["current"]["text"] == "Current words"
     assert status["current"]["voice"] == "af_heart"
+    assert status["current"]["piece"] == 1
+    assert status["current"]["piece_count"] == 2
+    assert status["current"]["piece_start"] == 0
+    assert status["current"]["piece_end"] == len("Current words")
     assert status["timeline_revision"] == 0
     assert status["queue_count"] == 5
     assert len(status["queue"]) == 5
@@ -373,6 +414,8 @@ def test_status_stays_playing_while_queued_audio_is_being_prepared(
     assert status["state"] == "playing"
     assert status["current"]["id"] == speechicle_id(engine, queued)
     assert status["current"]["piece"] == 0
+    assert status["current"]["piece_start"] is None
+    assert status["current"]["piece_end"] is None
     assert status["queue"] == []
 
     queued.unlink()
@@ -426,7 +469,7 @@ def test_activation_replaces_progress_that_is_not_for_queue_first(tmp_path: Path
 
     assert state.current is not None
     assert state.current.filename == first.name
-    assert state.current.progress.piece == 0
+    assert state.current.active_piece is None
     assert not hasattr(state, "selection_name")
 
 
@@ -575,8 +618,7 @@ def test_backward_wall_clock_cannot_throttle_or_regress_status(
     assert engine.update_current_piece(
         state,
         current.name,
-        2,
-        2,
+        1,
         4,
         len("Current progress"),
     )
@@ -585,7 +627,7 @@ def test_backward_wall_clock_cannot_throttle_or_regress_status(
     progress = engine.publish_status("playing", state)
 
     assert progress is not None
-    assert progress["current"]["piece"] == 2
+    assert progress["current"]["piece"] == 1
     assert initial["updated_at"] == 100.0
     assert progress["updated_at"] > initial["updated_at"]
 
@@ -725,12 +767,16 @@ def test_moving_a_waiting_chunk_resets_banked_audio_but_keeps_current(
     for path in (current, second, third):
         _, generations[path.name] = engine._record_claim(state, path)
 
-    engine.apply_queue_command(
+    engine.apply_waiting_move_mutation(
         buffered,
         state,
-        "move",
-        speechicle_id(engine, third),
-        speechicle_id(engine, second),
+        build_mutation(
+            engine,
+            "move",
+            section="waiting",
+            id=speechicle_id(engine, third),
+            before_id=speechicle_id(engine, second),
+        ),
     )
 
     assert [path.stem for path in engine.queue_files_in_order()] == [
@@ -811,7 +857,9 @@ def test_waiting_mutation_preserves_mid_speechicle_piece_stream(
     assert held_piece == (current, "piece 3")
     assert [buffered.get_nowait(), buffered.get_nowait()] == remaining_pieces
     assert buffered.empty()
-    assert state.current is not None and state.current.progress.piece == 2
+    assert state.current is not None
+    assert state.current.active_piece is not None
+    assert state.current.active_piece.piece == 2
     assert state.claims == {current.name: current_generation}
     assert not engine.buffered_piece_is_stale(
         state, current.name, current_generation
@@ -837,8 +885,10 @@ def test_archiving_one_waiting_chunk_preserves_current_and_remaining_queue(
     for path in (current, archived, remaining):
         engine._record_claim(state, path)
 
-    engine.apply_queue_command(
-        buffered, state, "archive", speechicle_id(engine, archived), None
+    engine.apply_archive_mutation(
+        buffered,
+        state,
+        build_mutation(engine, "archive", id=speechicle_id(engine, archived)),
     )
 
     assert not archived.exists()
@@ -861,8 +911,10 @@ def test_waiting_mutation_rejects_queue_first_without_a_projection(tmp_path: Pat
     state = engine.State()
 
     with pytest.raises(ValueError, match="waiting chunk not found"):
-        engine.apply_queue_command(
-            queue.Queue(), state, "archive", speechicle_id(engine, current), None
+        engine.apply_archive_mutation(
+            queue.Queue(),
+            state,
+            build_mutation(engine, "archive", id=speechicle_id(engine, current)),
         )
 
     assert engine.queue_files_in_order() == [current, waiting]
@@ -877,8 +929,8 @@ def test_deleting_one_history_chunk_preserves_waiting_queue(tmp_path: Path) -> N
     history.write_text("History", encoding="utf-8")
     assert engine.history_snapshot()[0] == 1
 
-    engine.apply_queue_command(
-        queue.Queue(), engine.State(), "delete", speechicle_id(engine, history), None
+    engine.apply_delete_mutation(
+        build_mutation(engine, "delete", id=speechicle_id(engine, history))
     )
 
     assert waiting.read_text(encoding="utf-8") == "Waiting"
@@ -890,12 +942,8 @@ def test_deleting_an_already_absent_history_chunk_is_idempotent(tmp_path: Path) 
     engine = load_engine("super_speech_engine_history_delete_absent")
     configure_runtime(engine, tmp_path)
 
-    engine.apply_queue_command(
-        queue.Queue(),
-        engine.State(),
-        "delete",
-        f"sp_{'1' * 32}",
-        None,
+    engine.apply_delete_mutation(
+        build_mutation(engine, "delete", id=f"sp_{'1' * 32}")
     )
 
     assert engine.history_snapshot() == (0, [])
@@ -912,12 +960,8 @@ def test_history_delete_is_rejected_while_the_same_item_is_active(
     history.write_text("Active replay", encoding="utf-8")
 
     with pytest.raises(ValueError, match="history chunk is active"):
-        engine.apply_queue_command(
-            queue.Queue(),
-            engine.State(),
-            "delete",
-            speechicle_id(engine, queued),
-            None,
+        engine.apply_delete_mutation(
+            build_mutation(engine, "delete", id=speechicle_id(engine, queued))
         )
 
     assert queued.exists()
@@ -938,8 +982,8 @@ def test_history_delete_succeeds_when_the_order_sidecar_cannot_update(
 
     monkeypatch.setattr(engine, "save_history_order", fail_order_update)
 
-    engine.apply_queue_command(
-        queue.Queue(), engine.State(), "delete", speechicle_id(engine, history), None
+    engine.apply_delete_mutation(
+        build_mutation(engine, "delete", id=speechicle_id(engine, history))
     )
 
     assert not history.exists()
@@ -2701,7 +2745,7 @@ def test_piece_transition_for_another_filename_is_ignored(tmp_path: Path) -> Non
     set_current(engine, state, current)
     original = state.current
 
-    assert not engine.update_current_piece(state, other.name, 1, 1, 0, 5)
+    assert not engine.update_current_piece(state, other.name, 1, 0, 5)
     assert state.current is original
 
 
@@ -3697,12 +3741,14 @@ def test_history_reordering_is_persisted_within_the_recent_window(tmp_path: Path
     for path in (first, second, third):
         path.write_text(path.stem, encoding="utf-8")
 
-    engine.apply_queue_command(
-        queue.Queue(),
-        engine.State(),
-        "move_history",
-        speechicle_id(engine, third),
-        None,
+    engine.apply_history_move_mutation(
+        build_mutation(
+            engine,
+            "move",
+            section="history",
+            id=speechicle_id(engine, third),
+            before_id=None,
+        )
     )
 
     assert engine.history_files_in_order() == [second, third, first]
@@ -3753,8 +3799,16 @@ def test_new_archive_and_history_reorder_commit_in_one_serial_order(
     first_id = speechicle_id(engine, first)
     reorder = threading.Thread(
         name="history-reorder",
-        target=engine.apply_queue_command,
-        args=(queue.Queue(), engine.State(), "move_history", second_id, first_id),
+        target=engine.apply_history_move_mutation,
+        args=(
+            build_mutation(
+                engine,
+                "move",
+                section="history",
+                id=second_id,
+                before_id=first_id,
+            ),
+        ),
     )
     archive = threading.Thread(target=engine.archive, args=(newest,))
     reorder.start()
@@ -4146,8 +4200,8 @@ def test_deleted_identity_and_sequence_are_never_reused(
     first_id = speechicle_id(engine, first)
     first_sequence = engine.strict_sequence(first.name)
     assert engine.archive(first)
-    engine.apply_queue_command(
-        queue.Queue(), engine.State(), "delete", first_id, None
+    engine.apply_delete_mutation(
+        build_mutation(engine, "delete", id=first_id)
     )
 
     second = engine.enqueue_text("Second", "af_heart")
@@ -4424,14 +4478,12 @@ def test_timeline_revision_changes_only_with_the_timeline_and_survives_restart(
     assert initial["timeline_revision"] == 0
 
     assert state.current is not None
-    progress = state.current.progress
     assert engine.update_current_piece(
         state,
         state.current.filename,
-        2,
-        progress.piece_count,
-        progress.piece_start,
-        progress.piece_end,
+        1,
+        0,
+        len(state.current.text),
     )
     engine.PAUSE.touch()
     progress = engine.publish_status("paused", state, force=True)
