@@ -71,13 +71,16 @@ runtime sizes.
 
 ## Playback protocol
 
-`super-speech-engine status` publishes a version 9 snapshot with the current
+`super-speech-engine status` publishes a version 10 snapshot with the current
 speech item, the complete upcoming queue, and up to 50 recent archived items in
 their saved display order. A
 speech item is one `speak` invocation, one timeline row, and one replay target.
-Sentence pieces are an internal synthesis and buffering detail, not separate
+Sentence-aligned pieces are an internal synthesis and buffering detail, not separate
 history entries. The current item remains active while the engine waits for its
-next rendered piece. Every entry has an opaque `id`. The total `history_count`
+next rendered piece. While a piece is active, `piece_start` and `piece_end`
+identify its zero-based, end-exclusive Unicode code-point range in the complete
+Current text. Before the first piece starts, both ranges are null. Every entry
+has an opaque `id`. The total `history_count`
 can exceed the bounded
 `history` array.
 `queue_count` always matches the complete `queue` array. Queued work always has
@@ -88,6 +91,9 @@ Current row is invalid. A bounded
 began from an archived replay that failed before its first audio piece.
 The archive currently includes completed, skipped, and cleared items, so the
 UI calls it History rather than claiming every entry played to completion.
+If status publication fails continuously, the engine writes `status.failed`
+before stopping. Electron treats that marker as an explicit invalidation and
+does not reuse an older timeline snapshot as though it were current.
 
 `super-speech-engine play <id> [--voice <voice>]` is the one selection command.
 The optional voice changes the same row in place while preserving its text, gap,
@@ -112,6 +118,9 @@ second queue, or renderer playback state machine is needed.
 Immediate control files carry the lock owner's process ID. A delayed Stop,
 Interrupt, Skip, or Clear command is discarded if a successor engine has taken
 ownership, so a command cannot cross an engine restart boundary.
+If Play or Clear and Stop are pending together, their file publication times
+decide which command wins. A newer Play or Clear cancels the older graceful
+Stop; a newer Stop prevents the older command from starting.
 
 Queue order is stored separately from the opaque chunk filenames. The engine
 filters that saved order against live queue files and appends new arrivals, so
@@ -127,6 +136,20 @@ invalidates buffered waiting audio after queue-order mutations while preserving
 every rendered piece of the current item. If a queue file cannot be archived,
 the engine stops and leaves that durable file visible for the next engine process
 to retry instead of retaining an unreleasable live claim.
+
+`clear` archives Current and every Waiting row as one recoverable batch. The
+engine records the intended final Queue and History orders before moving any
+row, so startup can finish an interrupted operation without exposing a partial
+timeline. A known in-process failure restores the complete prior layout. An
+unconfirmed rollback leaves the intent for startup recovery and stops the
+engine rather than continuing from ambiguous storage.
+
+Moving the playback boundary into History uses the same complete-on-restart
+principle. Its promotion intent records every History-to-Queue move, the final
+orders, and any temporary backup of a legacy duplicate. Recovery completes the
+boundary change and removes those backups before deleting the intent.
+The engine never overwrites a retained transaction intent. It completes that
+intent first or rejects the new mutation until recovery can finish.
 
 The engine status keeps waiting items in playback order, oldest first. The
 desktop timeline displays that list in reverse so new arrivals enter at the top,

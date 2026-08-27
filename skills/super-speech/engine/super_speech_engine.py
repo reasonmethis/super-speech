@@ -24,8 +24,7 @@ behavior. Signal files in BASE are the engine's private process protocol:
   INTERRUPT  - stop playback immediately and exit
   SKIP       - stop current chunk (all its remaining pieces), archive it,
                continue with next
-  CLEAR      - drop the buffer and every non-playing queued chunk (-> spoken/);
-               never truncates the currently playing chunk
+  CLEAR      - stop and move Current plus every Waiting row to History
   CONTINUE   - cancel a graceful stop because new speech was queued
   PLAY.*.json - select a queued or recent chunk by ID; selecting waiting speech
                 archives the current item and older waiting items first
@@ -38,10 +37,10 @@ Env:
   SUPER_SPEECH_SILENT      - opt-in: play silence of identical duration instead
                              of audio (timing is preserved). For measuring gap
                              behavior without making sound; default off.
-  SUPER_SPEECH_SPLIT_CHARS - sentence-piece target size; 0 disables splitting
+  SUPER_SPEECH_SPLIT_CHARS - internal synthesis-piece target size; 0 disables splitting
 """
 import argparse
-import glob
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -54,7 +53,7 @@ import threading
 import time
 import urllib.request
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, NamedTuple
 
 from pauseable_audio import PauseableAudio
 
@@ -84,7 +83,10 @@ HISTORY_ORDER = BASE / "history-order.json"
 WARMUP = BASE / "WARMUP"
 HEARTBEAT = BASE / "engine.alive"
 STATUS = BASE / "status.json"
+STATUS_FAILURE = BASE / "status.failed"
 INSTANCE_LOCK = BASE / "engine.lock"
+TIMELINE_LOCK = BASE / "timeline.lock"
+TIMELINE_INTENT = BASE / "timeline-intent.json"
 
 
 def default_model_directory() -> Path:
@@ -118,8 +120,8 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
-ENGINE_VERSION = "0.4.9"
-STATUS_VERSION = 9
+ENGINE_VERSION = "0.4.10"
+STATUS_VERSION = 10
 QUEUE_ACTIONS = frozenset({"move", "move_history", "archive", "delete"})
 
 
@@ -127,15 +129,16 @@ class MutationOutcomeUnconfirmed(RuntimeError):
     """A durable mutation may have committed after its rollback failed."""
 
 
-class EngineInstanceLock:
-    """Hold the one-byte process lock that makes the engine single-instance."""
+class InterprocessFileLock:
+    """Hold one cross-platform, one-byte advisory file lock."""
 
-    def __init__(self) -> None:
+    def __init__(self, path: Path) -> None:
+        self._path = path
         self._file: BinaryIO | None = None
 
     def acquire(self) -> bool:
         BASE.mkdir(parents=True, exist_ok=True)
-        lock_file = INSTANCE_LOCK.open("a+b")
+        lock_file = self._path.open("a+b")
         if lock_file.seek(0, os.SEEK_END) == 0:
             lock_file.write(b"0")
             lock_file.flush()
@@ -171,6 +174,28 @@ class EngineInstanceLock:
         finally:
             self._file.close()
             self._file = None
+
+
+class EngineInstanceLock(InterprocessFileLock):
+    """Hold the process lock that makes the engine single-instance."""
+
+    def __init__(self) -> None:
+        super().__init__(INSTANCE_LOCK)
+
+
+@contextmanager
+def timeline_mutation_lock(timeout: float = 10.0):
+    """Serialize cross-process operations that move or allocate timeline rows."""
+    lock = InterprocessFileLock(TIMELINE_LOCK)
+    deadline = time.monotonic() + timeout
+    try:
+        while not lock.acquire():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("timed out waiting for the speech timeline lock")
+            time.sleep(0.01)
+        yield
+    finally:
+        lock.release()
 
 
 def engine_is_running() -> bool:
@@ -362,7 +387,7 @@ def chunk_sequence(path: Path) -> int | None:
 def _next_chunk_number() -> int:
     QUEUE.mkdir(parents=True, exist_ok=True)
     SPOKEN.mkdir(parents=True, exist_ok=True)
-    existing = [*QUEUE.glob("*.txt"), *SPOKEN.glob("*.txt")]
+    existing = [*QUEUE.glob("*.txt"), *SPOKEN.glob("*.txt"), *FAILED.glob("*.txt")]
     numbers = [
         sequence
         for path in existing
@@ -374,7 +399,7 @@ def _next_chunk_number() -> int:
     return max(numbers, default=0) + 1
 
 
-def _reserve_queue_file(filename_tail: str, text: str) -> Path:
+def _reserve_queue_file_unlocked(filename_tail: str, text: str) -> Path:
     number = _next_chunk_number()
     for candidate in range(number, number + 100):
         reservation = QUEUE / f"{candidate:03d}.reserve"
@@ -398,6 +423,11 @@ def _reserve_queue_file(filename_tail: str, text: str) -> Path:
             temporary.unlink(missing_ok=True)
             reservation.unlink(missing_ok=True)
     raise RuntimeError("could not reserve a speech queue number")
+
+
+def _reserve_queue_file(filename_tail: str, text: str) -> Path:
+    with timeline_mutation_lock():
+        return _reserve_queue_file_unlocked(filename_tail, text)
 
 
 def enqueue_text(text: str, voice: str, gap_ms: int | None = None) -> Path:
@@ -425,27 +455,90 @@ def history_sort_key(path: Path) -> tuple[bool, int, str]:
 
 
 _queue_order_lock = threading.RLock()
+_order_cache: dict[Path, list[str]] = {}
+
+
+def _read_saved_order(path: Path) -> list[str]:
+    for attempt in range(3):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            ids = (
+                payload.get("ids", [])
+                if isinstance(payload, dict) and payload.get("version") == 1
+                else []
+            )
+            result = (
+                ids
+                if isinstance(ids, list) and all(isinstance(item, str) for item in ids)
+                else []
+            )
+            _order_cache[path] = result
+            return result
+        except FileNotFoundError:
+            _order_cache[path] = []
+            return []
+        except OSError:
+            if path in _order_cache:
+                return list(_order_cache[path])
+            if attempt < 2:
+                time.sleep(0.01)
+                continue
+            raise RuntimeError(f"could not read speech order: {path.name}")
+        except (ValueError, json.JSONDecodeError):
+            _order_cache[path] = []
+            return []
+    raise AssertionError("unreachable")
+
+
+def _write_saved_order(path: Path, ids: list[str]) -> None:
+    if not ids:
+        path.unlink(missing_ok=True)
+        _order_cache[path] = []
+        return
+    temporary = path.with_name(
+        f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    try:
+        temporary.write_text(
+            json.dumps({"version": 1, "ids": ids}), encoding="utf-8"
+        )
+        os.replace(temporary, path)
+        _order_cache[path] = ids
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _write_timeline_intent(payload: dict[str, object]) -> None:
+    if TIMELINE_INTENT.exists():
+        raise RuntimeError("a timeline transaction is already pending recovery")
+    temporary = TIMELINE_INTENT.with_name(
+        f"{TIMELINE_INTENT.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    try:
+        temporary.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(temporary, TIMELINE_INTENT)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def queue_files_in_order() -> list[Path]:
     """Return live queue files in explicit order, then append new arrivals."""
     with _queue_order_lock:
         live = {path.stem: path for path in QUEUE.glob("*.txt")}
-        try:
-            payload = json.loads(QUEUE_ORDER.read_text(encoding="utf-8"))
-            saved_ids = (
-                payload.get("ids", [])
-                if isinstance(payload, dict) and payload.get("version") == 1
-                else []
-            )
-            if not isinstance(saved_ids, list) or not all(
-                isinstance(chunk_id, str) for chunk_id in saved_ids
-            ):
-                saved_ids = []
-        except (OSError, ValueError, json.JSONDecodeError):
-            saved_ids = []
-
-        ordered = [live.pop(chunk_id) for chunk_id in saved_ids if chunk_id in live]
+        ordered = []
+        for chunk_id in _read_saved_order(QUEUE_ORDER):
+            matched = live.pop(chunk_id, None)
+            if matched is None:
+                saved_sequence = chunk_sequence(Path(chunk_id))
+                variants = [
+                    path
+                    for path in live.values()
+                    if chunk_sequence(path) == saved_sequence
+                ]
+                if saved_sequence is not None and len(variants) == 1:
+                    matched = live.pop(variants[0].stem)
+            if matched is not None:
+                ordered.append(matched)
         ordered.extend(sorted(live.values(), key=chunk_sort_key))
         return ordered
 
@@ -461,19 +554,7 @@ def save_queue_order(paths: list[Path] | None = None) -> None:
             key=chunk_sort_key,
         )
         ids.extend(path.stem for path in missing)
-        if not ids:
-            QUEUE_ORDER.unlink(missing_ok=True)
-            return
-        temp_path = QUEUE_ORDER.with_name(
-            f"{QUEUE_ORDER.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-        )
-        try:
-            temp_path.write_text(
-                json.dumps({"version": 1, "ids": ids}), encoding="utf-8"
-            )
-            os.replace(temp_path, QUEUE_ORDER)
-        finally:
-            temp_path.unlink(missing_ok=True)
+        _write_saved_order(QUEUE_ORDER, ids)
 
 
 def log(msg: str) -> None:
@@ -534,26 +615,64 @@ _SENT_RE = re.compile(r"(?<=[.!?…])\s+")
 FIRST_PIECE_CHARS = 120  # small first piece: its synth is the only wait at a cold start
 
 
-def split_text(text: str, target: int) -> list[str]:
-    """Pack whole sentences into pieces of at most `target` chars (a single
-    longer sentence stays intact). The first piece is capped tighter so a
-    chunk starts playing fast even with no banked cushion. target<=0
-    disables splitting."""
+class SpeechPiece(NamedTuple):
+    text: str
+    start: int
+    end: int
+
+
+def split_text_pieces(text: str, target: int) -> list[SpeechPiece]:
+    """Pack sentences while retaining each piece's range in the source text."""
     if target <= 0:
-        return [text]
-    sents = [s for s in _SENT_RE.split(text) if s.strip()]
-    pieces: list[str] = []
-    cur = ""
-    for s in sents:
+        return [SpeechPiece(text, 0, len(text))]
+
+    sentences: list[SpeechPiece] = []
+    cursor = 0
+    for separator in [*_SENT_RE.finditer(text), None]:
+        boundary = separator.start() if separator is not None else len(text)
+        raw = text[cursor:boundary]
+        leading = len(raw) - len(raw.lstrip())
+        trailing = len(raw.rstrip())
+        if trailing > leading:
+            start = cursor + leading
+            end = cursor + trailing
+            sentences.append(SpeechPiece(text[start:end], start, end))
+        cursor = separator.end() if separator is not None else len(text)
+    if not sentences:
+        return [SpeechPiece(text, 0, len(text))]
+
+    pieces: list[SpeechPiece] = []
+    current: list[SpeechPiece] = []
+    current_length = 0
+    for sentence in sentences:
         cap = min(FIRST_PIECE_CHARS, target) if not pieces else target
-        if cur and len(cur) + 1 + len(s) > cap:
-            pieces.append(cur)
-            cur = s
+        joined_length = current_length + (1 if current else 0) + len(sentence.text)
+        if current and joined_length > cap:
+            pieces.append(
+                SpeechPiece(
+                    " ".join(item.text for item in current),
+                    current[0].start,
+                    current[-1].end,
+                )
+            )
+            current = [sentence]
+            current_length = len(sentence.text)
         else:
-            cur = f"{cur} {s}" if cur else s
-    if cur:
-        pieces.append(cur)
-    return pieces or [text]
+            current.append(sentence)
+            current_length = joined_length
+    pieces.append(
+        SpeechPiece(
+            " ".join(item.text for item in current),
+            current[0].start,
+            current[-1].end,
+        )
+    )
+    return pieces
+
+
+def split_text(text: str, target: int) -> list[str]:
+    """Return the exact strings synthesized for each internal speech piece."""
+    return [piece.text for piece in split_text_pieces(text, target)]
 
 
 def consume(signal: Path) -> bool:
@@ -967,46 +1086,150 @@ def prune_queue_acknowledgements(max_age: float = 300.0) -> None:
             log(f"could not prune queue acknowledgement {acknowledgement.name}: {error}")
 
 
-def archive(path: Path) -> bool:
-    with _history_order_lock:
-        destination = SPOKEN / path.name
-        history_item_exists = destination.exists()
+def _archive_many(paths: list[Path]) -> bool:
+    """Move one ordered timeline block to History as one recoverable mutation."""
+    unique = list(dict.fromkeys(paths))
+    if not unique:
+        return True
+
+    with timeline_mutation_lock(), _history_order_lock, _queue_order_lock:
+        _recover_timeline_intent()
+        previous_queue = queue_files_in_order()
+        previous_history = history_files_in_order()
+        archived_names = {path.name for path in unique}
+        desired_queue = [
+            path for path in previous_queue if path.name not in archived_names
+        ]
+        retained_history = [
+            path for path in previous_history if path.name not in archived_names
+        ]
+        desired_history = [
+            *(SPOKEN / path.name for path in reversed(unique)),
+            *retained_history,
+        ]
+        planned_moves = [
+            (
+                path,
+                SPOKEN / path.name,
+                (SPOKEN / path.name).with_name(
+                    f".{path.name}.{os.getpid()}.{time.time_ns()}.duplicate"
+                )
+                if (SPOKEN / path.name).exists()
+                else None,
+            )
+            for path in unique
+        ]
+        moves = [
+            {
+                "source": source.name,
+                "target": destination.name,
+                "backup": backup.name if backup is not None else None,
+            }
+            for source, destination, backup in planned_moves
+        ]
+        intent = {
+            "version": 1,
+            "operation": "archive_batch",
+            "moves": moves,
+            "previous_queue_ids": [path.stem for path in previous_queue],
+            "previous_history_ids": [path.stem for path in previous_history],
+            "queue_ids": [path.stem for path in desired_queue],
+            "history_ids": [path.stem for path in desired_history],
+        }
+        moved: list[tuple[Path, Path, Path | None]] = []
+        history_order_written = False
+        queue_order_written = False
         try:
+            _write_timeline_intent(intent)
             SPOKEN.mkdir(parents=True, exist_ok=True)
-            os.replace(str(path), str(destination))
-            try:
-                save_queue_order()
-            except OSError as order_error:
-                # The live queue is authoritative if its optional order file cannot update
-                log(f"queue order update error after archiving {path.name}: {order_error}")
-            try:
-                if history_item_exists:
-                    save_history_order()
-                else:
-                    previous = [item for item in history_files_in_order() if item != destination]
-                    save_history_order([destination, *previous])
-            except OSError as order_error:
-                log(f"history order update error after archiving {path.name}: {order_error}")
+            _write_saved_order(HISTORY_ORDER, intent["history_ids"])
+            history_order_written = True
+            _write_saved_order(QUEUE_ORDER, intent["queue_ids"])
+            queue_order_written = True
+            for source, destination, backup in planned_moves:
+                if not source.exists():
+                    if destination.exists():
+                        continue
+                    raise FileNotFoundError(source)
+                if backup is not None:
+                    os.replace(destination, backup)
+                moved.append((source, destination, backup))
+                os.replace(source, destination)
+        except (OSError, RuntimeError) as error:
+            rollback_errors: list[str] = []
+            for source, destination, backup in reversed(moved):
+                try:
+                    if not source.exists():
+                        os.replace(destination, source)
+                    if backup is not None and backup.exists():
+                        os.replace(backup, destination)
+                except OSError as rollback_error:
+                    rollback_errors.append(str(rollback_error))
+            if queue_order_written:
+                try:
+                    _write_saved_order(
+                        QUEUE_ORDER,
+                        [path.stem for path in previous_queue],
+                    )
+                except (OSError, RuntimeError) as rollback_error:
+                    rollback_errors.append(str(rollback_error))
+            if history_order_written:
+                try:
+                    _write_saved_order(
+                        HISTORY_ORDER,
+                        [path.stem for path in previous_history],
+                    )
+                except (OSError, RuntimeError) as rollback_error:
+                    rollback_errors.append(str(rollback_error))
             invalidate_history()
-            return True
-        except FileNotFoundError as error:
-            if not path.exists() and destination.exists():
-                invalidate_history()
-                return True
-            log(f"archive error {path.name}: {error}")
-        except OSError as error:
-            log(f"archive error {path.name}: {error}")
-    return False
+            if rollback_errors:
+                raise MutationOutcomeUnconfirmed(
+                    "archive rollback failed: " + "; ".join(rollback_errors)
+                ) from error
+            try:
+                TIMELINE_INTENT.unlink(missing_ok=True)
+            except OSError as rollback_error:
+                raise MutationOutcomeUnconfirmed(
+                    f"archive rollback cleanup failed: {rollback_error}"
+                ) from error
+            log(f"archive error: {error}")
+            return False
+
+        cleanup_complete = True
+        for _, _, backup in moved:
+            if backup is None:
+                continue
+            try:
+                backup.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                cleanup_complete = False
+                log(f"archive duplicate cleanup deferred until restart: {cleanup_error}")
+        if cleanup_complete:
+            try:
+                TIMELINE_INTENT.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                log(f"archive intent cleanup deferred until restart: {cleanup_error}")
+        invalidate_history()
+        return True
+
+
+def archive(path: Path) -> bool:
+    return _archive_many([path])
 
 
 def archive_failed(path: Path) -> bool:
     """Move a chunk that couldn't be synthesized into failed/ so the queue doesn't loop on it."""
     try:
-        FAILED.mkdir(parents=True, exist_ok=True)
-        os.replace(str(path), str(FAILED / path.name))
-        return True
-    except OSError as e:
-        log(f"archive_failed error {path.name}: {e}")
+        with timeline_mutation_lock():
+            FAILED.mkdir(parents=True, exist_ok=True)
+            os.replace(str(path), str(FAILED / path.name))
+            try:
+                save_queue_order()
+            except (OSError, RuntimeError) as order_error:
+                log(f"queue order update error after failure {path.name}: {order_error}")
+            return True
+    except (OSError, RuntimeError) as error:
+        log(f"archive_failed error {path.name}: {error}")
         return False
 
 
@@ -1025,7 +1248,7 @@ def warmup(kokoro) -> None:
 class State:
     """Shared coordination between the main (consumer) and worker (producer)."""
     def __init__(self):
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.claimed: set[str] = set()  # filenames in the buffer or being synthesized
         # Active playback-boundary item, including synthesis and inter-item gaps
         self.playing: str | None = None
@@ -1033,12 +1256,53 @@ class State:
         self.current_voice: str | None = None
         self.current_piece = 0
         self.current_piece_count = 0
+        self.current_piece_start: int | None = None
+        self.current_piece_end: int | None = None
+        self.read_failures: dict[str, float] = {}
         self.recent_starts: list[tuple[str, float]] = []
         self.skip_name: str | None = None  # skipped chunk whose banked pieces must be dropped
         # Selected chunk stays prioritized until its first piece reaches playback
         self.selection_name: str | None = None
         self.stop = threading.Event()    # tell the worker to exit
-        self.saw_stop = False            # latched STOP — finish current chunk, then exit
+        self.saw_stop = False            # latched STOP - finish current chunk, then exit
+
+
+def command_cancels_graceful_stop(command: Path, st: State) -> bool:
+    """Return whether command is newer than any graceful Stop request."""
+    if not control_requested(STOP):
+        return not st.saw_stop
+    try:
+        command_time = command.stat().st_mtime_ns
+        stop_time = STOP.stat().st_mtime_ns
+    except OSError:
+        return False
+    if stop_time > command_time:
+        return False
+    try:
+        if STOP.stat().st_mtime_ns <= command_time:
+            STOP.unlink(missing_ok=True)
+    except OSError:
+        pass
+    st.saw_stop = False
+    return True
+
+
+def consume_ordered_control(signal: Path, st: State) -> bool:
+    """Consume a control signal and let a newer graceful Stop win."""
+    if not control_requested(signal):
+        return False
+    accepted = command_cancels_graceful_stop(signal, st)
+    signal.unlink(missing_ok=True)
+    return accepted
+
+
+def consume_continue(st: State) -> bool:
+    """Consume new-work notice and cancel only an older graceful Stop."""
+    if not CONTINUE.exists():
+        return False
+    accepted = command_cancels_graceful_stop(CONTINUE, st)
+    CONTINUE.unlink(missing_ok=True)
+    return accepted
 
 
 def record_started(st: State, chunk_id: str, started_at: float | None = None) -> float:
@@ -1056,6 +1320,7 @@ def record_started(st: State, chunk_id: str, started_at: float | None = None) ->
 
 
 _last_status_write = 0.0
+_status_failure_started: float | None = None
 _history_dirty = True
 _history_count = 0
 _history_items: list[dict[str, object]] = []
@@ -1072,22 +1337,10 @@ def history_files_in_order() -> list[Path]:
     """Return archived files in their saved display order."""
     with _history_order_lock:
         live = {path.stem: path for path in SPOKEN.glob("*.txt")}
-        try:
-            payload = json.loads(HISTORY_ORDER.read_text(encoding="utf-8"))
-            saved_ids = (
-                payload.get("ids", [])
-                if isinstance(payload, dict) and payload.get("version") == 1
-                else []
-            )
-            if not isinstance(saved_ids, list) or not all(
-                isinstance(chunk_id, str) for chunk_id in saved_ids
-            ):
-                saved_ids = []
-        except (OSError, ValueError, json.JSONDecodeError):
-            saved_ids = []
+        saved_ids = _read_saved_order(HISTORY_ORDER)
         ordered = [live.pop(chunk_id) for chunk_id in saved_ids if chunk_id in live]
-        ordered.extend(sorted(live.values(), key=history_sort_key, reverse=True))
-        return ordered
+        missing = sorted(live.values(), key=history_sort_key, reverse=True)
+        return [*missing, *ordered]
 
 
 def save_history_order(paths: list[Path] | None = None) -> None:
@@ -1102,33 +1355,231 @@ def save_history_order(paths: list[Path] | None = None) -> None:
             reverse=True,
         )
         ids.extend(path.stem for path in missing)
-        if not ids:
-            HISTORY_ORDER.unlink(missing_ok=True)
-            return
-        temp_path = HISTORY_ORDER.with_name(
-            f"{HISTORY_ORDER.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-        )
-        try:
-            temp_path.write_text(
-                json.dumps({"version": 1, "ids": ids}), encoding="utf-8"
+        _write_saved_order(HISTORY_ORDER, ids)
+
+
+def _recover_timeline_intent() -> bool:
+    if not TIMELINE_INTENT.exists():
+        return False
+    try:
+        intent = json.loads(TIMELINE_INTENT.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError("could not read the pending timeline transaction") from error
+    if not isinstance(intent, dict) or intent.get("version") != 1:
+        raise RuntimeError("invalid pending timeline transaction")
+
+    operation = intent.get("operation")
+    if operation == "archive":
+        name = intent.get("name")
+        previous = intent.get("previous_history_ids")
+        desired = intent.get("desired_history_ids")
+        if not (
+            isinstance(name, str)
+            and Path(name).name == name
+            and isinstance(previous, list)
+            and all(isinstance(item, str) for item in previous)
+            and isinstance(desired, list)
+            and all(isinstance(item, str) for item in desired)
+        ):
+            raise RuntimeError("invalid pending archive transaction")
+        if (QUEUE / name).exists():
+            _write_saved_order(HISTORY_ORDER, previous)
+        elif (SPOKEN / name).exists():
+            _write_saved_order(HISTORY_ORDER, desired)
+            save_queue_order()
+        else:
+            raise RuntimeError(f"pending archive row is missing: {name}")
+    elif operation == "archive_batch":
+        moves = intent.get("moves")
+        queue_ids = intent.get("queue_ids")
+        history_ids = intent.get("history_ids")
+        if not (
+            isinstance(moves, list)
+            and all(
+                isinstance(move, dict)
+                and isinstance(move.get("source"), str)
+                and Path(str(move["source"])).name == move["source"]
+                and isinstance(move.get("target"), str)
+                and Path(str(move["target"])).name == move["target"]
+                and (
+                    move.get("backup") is None
+                    or (
+                        isinstance(move.get("backup"), str)
+                        and Path(str(move["backup"])).name == move["backup"]
+                    )
+                )
+                for move in moves
             )
-            os.replace(temp_path, HISTORY_ORDER)
-        finally:
-            temp_path.unlink(missing_ok=True)
+            and isinstance(queue_ids, list)
+            and all(isinstance(item, str) for item in queue_ids)
+            and isinstance(history_ids, list)
+            and all(isinstance(item, str) for item in history_ids)
+        ):
+            raise RuntimeError("invalid pending archive transaction")
+        for move in moves:
+            source = QUEUE / str(move["source"])
+            destination = SPOKEN / str(move["target"])
+            backup_name = move.get("backup")
+            backup = SPOKEN / str(backup_name) if backup_name is not None else None
+            if source.exists():
+                os.replace(source, destination)
+            elif not destination.exists():
+                raise RuntimeError(
+                    f"pending archive row is missing: {move['source']}"
+                )
+            if backup is not None:
+                backup.unlink(missing_ok=True)
+        _write_saved_order(QUEUE_ORDER, queue_ids)
+        _write_saved_order(HISTORY_ORDER, history_ids)
+    elif operation == "promote":
+        moves = intent.get("moves")
+        queue_ids = intent.get("queue_ids")
+        history_ids = intent.get("history_ids")
+        if not (
+            isinstance(moves, list)
+            and all(
+                isinstance(move, dict)
+                and isinstance(move.get("source"), str)
+                and Path(str(move["source"])).name == move["source"]
+                and isinstance(move.get("target"), str)
+                and Path(str(move["target"])).name == move["target"]
+                and (
+                    move.get("backup") is None
+                    or (
+                        isinstance(move.get("backup"), str)
+                        and Path(str(move["backup"])).name == move["backup"]
+                    )
+                )
+                for move in moves
+            )
+            and isinstance(queue_ids, list)
+            and all(isinstance(item, str) for item in queue_ids)
+            and isinstance(history_ids, list)
+            and all(isinstance(item, str) for item in history_ids)
+        ):
+            raise RuntimeError("invalid pending History promotion transaction")
+        for move in moves:
+            source_name = str(move["source"])
+            target_name = str(move["target"])
+            source = SPOKEN / source_name
+            target = QUEUE / target_name
+            backup_name = move.get("backup")
+            backup = SPOKEN / str(backup_name) if backup_name is not None else None
+            if target.exists():
+                source.unlink(missing_ok=True)
+                if backup is not None:
+                    backup.unlink(missing_ok=True)
+                continue
+            renamed_source = QUEUE / source_name
+            if source.exists():
+                os.replace(source, target)
+            elif backup is not None and backup.exists():
+                os.replace(backup, target)
+            elif renamed_source.exists():
+                os.replace(renamed_source, target)
+            else:
+                raise RuntimeError(
+                    f"pending History promotion row is missing: {source_name}"
+                )
+            if backup is not None:
+                backup.unlink(missing_ok=True)
+        _write_saved_order(QUEUE_ORDER, queue_ids)
+        _write_saved_order(HISTORY_ORDER, history_ids)
+    else:
+        raise RuntimeError("unknown pending timeline transaction")
+
+    TIMELINE_INTENT.unlink()
+    invalidate_history()
+    log(f"recovered pending timeline {operation} transaction")
+    return True
+
+
+def repair_interrupted_timeline_transition() -> None:
+    """Repair incomplete or legacy file layouts before publishing the timeline."""
+    with timeline_mutation_lock(), _history_order_lock, _queue_order_lock:
+        recovered_intent = _recover_timeline_intent()
+        _read_saved_order(QUEUE_ORDER)
+        saved_history = _read_saved_order(HISTORY_ORDER)
+        queue_live = {path.stem: path for path in QUEUE.glob("*.txt")}
+        history_live = {path.stem for path in SPOKEN.glob("*.txt")}
+        promoted = []
+        for chunk_id in saved_history:
+            if chunk_id in history_live:
+                break
+            candidate = queue_live.get(chunk_id)
+            if candidate is None:
+                sequence = chunk_sequence(Path(chunk_id))
+                variants = [
+                    path
+                    for path in queue_live.values()
+                    if chunk_sequence(path) == sequence
+                ]
+                candidate = variants[0] if sequence is not None and len(variants) == 1 else None
+            if candidate is None:
+                break
+            promoted.append(candidate)
+        if promoted:
+            promoted_names = {path.name for path in promoted}
+            previous_queue = [
+                path for path in queue_files_in_order() if path.name not in promoted_names
+            ]
+            save_queue_order([*reversed(promoted), *previous_queue])
+            save_history_order(history_files_in_order())
+            log(f"recovered interrupted History selection of {len(promoted)} item(s)")
+
+        legacy_source = next(
+            (
+                SPOKEN / path.name
+                for path in queue_files_in_order()
+                if (SPOKEN / path.name).exists()
+                and (SPOKEN / path.name).read_bytes() == path.read_bytes()
+            ),
+            None,
+        )
+        if legacy_source is not None:
+            _promote_history_selection_unlocked(legacy_source)
+            log(f"migrated legacy History replay {legacy_source.name}")
+
+        queue_names = {path.name for path in QUEUE.glob("*.txt")}
+        duplicates = [
+            path for path in SPOKEN.glob("*.txt") if path.name in queue_names
+        ]
+        for duplicate in duplicates:
+            active = QUEUE / duplicate.name
+            if duplicate.read_bytes() == active.read_bytes():
+                duplicate.unlink()
+                continue
+            ordered_history = history_files_in_order()
+            position = ordered_history.index(duplicate)
+            sequence = _next_chunk_number()
+            renamed = duplicate.with_name(
+                f"{sequence:03d}-{duplicate.name.split('-', 1)[1]}"
+            )
+            os.replace(duplicate, renamed)
+            ordered_history[position] = renamed
+            save_history_order(ordered_history)
+        if duplicates:
+            save_history_order()
+            log(f"reconciled {len(duplicates)} legacy active/History duplicate(s)")
+        if recovered_intent or promoted or legacy_source is not None or duplicates:
+            invalidate_history()
 
 
 def history_snapshot() -> tuple[int, list[dict[str, object]]]:
-    """Return the cached bounded archive view, refreshing only after an archive move."""
+    """Return the cached bounded archive view, refreshing when invalidated."""
     global _history_dirty, _history_count, _history_items
     with _history_order_lock:
         if _history_dirty:
             history_files = history_files_in_order()
             items: list[dict[str, object]] = []
+            read_failed = False
+            previous = {str(item["id"]): item for item in _history_items}
             for path in history_files[:HISTORY_LIMIT]:
                 try:
                     text = path.read_text(encoding="utf-8").strip()
                 except OSError:
-                    continue
+                    read_failed = True
+                    text = str(previous.get(path.stem, {}).get("text", ""))
                 items.append(
                     {
                         "id": path.stem,
@@ -1139,7 +1590,7 @@ def history_snapshot() -> tuple[int, list[dict[str, object]]]:
                 )
             _history_count = len(history_files)
             _history_items = items
-            _history_dirty = False
+            _history_dirty = read_failed
         return _history_count, _history_items
 
 
@@ -1148,7 +1599,11 @@ def activate_next_chunk(st: State) -> bool:
     with st.lock:
         if st.playing or st.saw_stop or st.stop.is_set():
             return False
-        ordered = queue_files_in_order()
+        try:
+            ordered = queue_files_in_order()
+        except RuntimeError as error:
+            log(str(error))
+            return False
         if st.selection_name:
             selected = next(
                 (path for path in ordered if path.name == st.selection_name),
@@ -1162,14 +1617,16 @@ def activate_next_chunk(st: State) -> bool:
         if not ordered:
             return False
         current = ordered[0]
+        st.playing = current.name
+        st.current_voice = voice_from_name(current.name)
+        st.current_piece = 0
+        st.current_piece_start = None
+        st.current_piece_end = None
         try:
             text = current.read_text(encoding="utf-8").strip()
         except OSError:
-            return False
-        st.playing = current.name
+            text = ""
         st.current_text = text
-        st.current_voice = voice_from_name(current.name)
-        st.current_piece = 0
         st.current_piece_count = len(split_text(text, SPLIT_CHARS))
         return True
 
@@ -1183,7 +1640,7 @@ def publish_status(
     force: bool = False,
 ) -> None:
     """Publish an atomic runtime snapshot for the desktop controller."""
-    global _last_status_write
+    global _last_status_write, _status_failure_started
     now = time.time()
     if not force and now - _last_status_write < 0.25:
         return
@@ -1196,9 +1653,15 @@ def publish_status(
         current_voice = st.current_voice
         current_piece = st.current_piece
         current_piece_count = st.current_piece_count
+        current_piece_start = st.current_piece_start
+        current_piece_end = st.current_piece_end
         recent_starts = list(st.recent_starts)
 
-    ordered_queue = queue_files_in_order()
+    try:
+        ordered_queue = queue_files_in_order()
+    except RuntimeError as error:
+        log(str(error))
+        return
     current_path = next(
         (
             path
@@ -1215,7 +1678,7 @@ def publish_status(
         try:
             text = path.read_text(encoding="utf-8").strip()
         except OSError:
-            continue
+            text = ""
         queue_items.append(
             {
                 "id": path.stem,
@@ -1236,6 +1699,8 @@ def publish_status(
             current_voice = voice_from_name(current_path.name)
             current_piece = 0
             current_piece_count = len(split_text(current_text, SPLIT_CHARS))
+            current_piece_start = None
+            current_piece_end = None
         current = {
             "id": current_path.stem,
             "filename": current_path.name,
@@ -1243,6 +1708,8 @@ def publish_status(
             "voice": current_voice or voice_from_name(current_path.name),
             "piece": current_piece,
             "piece_count": current_piece_count,
+            "piece_start": current_piece_start,
+            "piece_end": current_piece_end,
             "elapsed_seconds": (
                 playback.position / sample_rate
                 if is_playing_path and playback is not None and sample_rate
@@ -1257,7 +1724,11 @@ def publish_status(
             else "playing" if has_work
             else "idle"
         )
-    history_count, history_items = history_snapshot()
+    try:
+        history_count, history_items = history_snapshot()
+    except RuntimeError as error:
+        log(str(error))
+        return
 
     payload = {
         "version": STATUS_VERSION,
@@ -1278,8 +1749,19 @@ def publish_status(
     try:
         temp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         os.replace(temp_path, STATUS)
+        STATUS_FAILURE.unlink(missing_ok=True)
         _last_status_write = now
+        _status_failure_started = None
     except OSError:
+        if _status_failure_started is None:
+            _status_failure_started = now
+        elif now - _status_failure_started >= 5.0:
+            try:
+                STATUS_FAILURE.touch()
+            except OSError as marker_error:
+                log(f"could not publish status failure marker: {marker_error}")
+            st.stop.set()
+            log("stopping after status publication failed for 5 seconds")
         try:
             temp_path.unlink()
         except OSError:
@@ -1304,7 +1786,7 @@ def _voice_variant_path(source: Path, voice: str) -> Path:
     return source.with_name(f"{match.group(1)}-{voice}{match.group(2)}.txt")
 
 
-def _replace_queue_voice(source: Path, voice: str) -> Path:
+def _replace_queue_voice_unlocked(source: Path, voice: str) -> Path:
     """Rename one queued row in place so its chronology does not change."""
     target = _voice_variant_path(source, voice)
     if target == source:
@@ -1335,12 +1817,18 @@ def _replace_queue_voice(source: Path, voice: str) -> Path:
     return target
 
 
-def promote_history_selection(
+def _replace_queue_voice(source: Path, voice: str) -> Path:
+    with timeline_mutation_lock():
+        return _replace_queue_voice_unlocked(source, voice)
+
+
+def _promote_history_selection_unlocked(
     source: Path,
     voice: str | None = None,
 ) -> tuple[Path, int]:
     """Move the playback boundary to one History item without changing display order."""
     with _history_order_lock, _queue_order_lock:
+        _recover_timeline_intent()
         history = history_files_in_order()
         try:
             selected_index = history.index(source)
@@ -1350,52 +1838,84 @@ def promote_history_selection(
         promoted = history[: selected_index + 1]
         remaining_history = history[selected_index + 1 :]
         previous_queue = queue_files_in_order()
+        selected_source = promoted[-1]
+        selected_target = QUEUE / selected_source.name
+        if voice and voice != voice_from_name(selected_source.name):
+            selected_target = _voice_variant_path(selected_target, voice)
+            if selected_target.exists():
+                raise RuntimeError(
+                    f"voice target already exists: {selected_target.stem}"
+                )
+        targets = [
+            selected_target if archived == selected_source else QUEUE / archived.name
+            for archived in promoted
+        ]
+        playback_order = list(reversed(targets))
+        target_names = {path.name for path in targets}
+        remaining_queue = [
+            path for path in previous_queue if path.name not in target_names
+        ]
+        planned_moves = [
+            (
+                archived,
+                queued,
+                archived.with_name(
+                    f".{archived.name}.{os.getpid()}.{time.time_ns()}.duplicate"
+                )
+                if queued.exists()
+                else None,
+            )
+            for archived, queued in zip(promoted, targets)
+        ]
         moved: list[tuple[Path, Path, Path | None]] = []
-        renamed: tuple[Path, Path] | None = None
         try:
-            for archived in promoted:
-                queued = QUEUE / archived.name
-                duplicate_backup = None
-                if queued.exists():
-                    duplicate_backup = archived.with_name(
-                        f".{archived.name}.{os.getpid()}.{time.time_ns()}.duplicate"
-                    )
+            _write_timeline_intent(
+                {
+                    "version": 1,
+                    "operation": "promote",
+                    "moves": [
+                        {
+                            "source": archived.name,
+                            "target": target.name,
+                            "backup": backup.name if backup is not None else None,
+                        }
+                        for archived, target, backup in planned_moves
+                    ],
+                    "queue_ids": [
+                        path.stem for path in [*playback_order, *remaining_queue]
+                    ],
+                    "history_ids": [path.stem for path in remaining_history],
+                }
+            )
+            for archived, queued, duplicate_backup in planned_moves:
+                if duplicate_backup is not None:
                     os.replace(archived, duplicate_backup)
                 else:
                     os.replace(archived, queued)
                 moved.append((archived, queued, duplicate_backup))
-            playback_order = [queued for _, queued, _ in reversed(moved)]
-            promoted_paths = set(playback_order)
-            remaining_queue = [
-                path for path in previous_queue if path not in promoted_paths
-            ]
-            selected = playback_order[0]
-            if voice and voice != voice_from_name(selected.name):
-                variant = _voice_variant_path(selected, voice)
-                if variant.exists():
-                    raise RuntimeError(f"voice target already exists: {variant.stem}")
-                os.replace(selected, variant)
-                renamed = (selected, variant)
-                playback_order[0] = variant
             save_queue_order([*playback_order, *remaining_queue])
             save_history_order(remaining_history)
+            cleanup_complete = True
             for _, _, duplicate_backup in moved:
                 if duplicate_backup is not None:
                     try:
                         duplicate_backup.unlink(missing_ok=True)
                     except OSError as cleanup_error:
+                        cleanup_complete = False
                         log(
                             f"could not remove legacy History duplicate "
                             f"{duplicate_backup.name}: {cleanup_error}"
                         )
+            if cleanup_complete:
+                try:
+                    TIMELINE_INTENT.unlink(missing_ok=True)
+                except OSError as cleanup_error:
+                    log(
+                        "History promotion intent cleanup deferred until restart: "
+                        f"{cleanup_error}"
+                    )
         except (OSError, RuntimeError, ValueError) as error:
             recovery_errors = []
-            if renamed is not None:
-                original, variant = renamed
-                try:
-                    os.replace(variant, original)
-                except OSError as recovery_error:
-                    recovery_errors.append(str(recovery_error))
             for archived, queued, duplicate_backup in reversed(moved):
                 try:
                     os.replace(
@@ -1407,53 +1927,31 @@ def promote_history_selection(
             try:
                 save_queue_order(previous_queue)
                 save_history_order(history)
-            except OSError as recovery_error:
+            except (OSError, RuntimeError) as recovery_error:
                 recovery_errors.append(str(recovery_error))
             if recovery_errors:
                 raise MutationOutcomeUnconfirmed(
                     "History boundary rollback failed: "
                     + "; ".join(recovery_errors)
                 ) from error
+            try:
+                TIMELINE_INTENT.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                raise MutationOutcomeUnconfirmed(
+                    f"History rollback cleanup failed: {cleanup_error}"
+                ) from error
             raise RuntimeError("could not move History playback boundary") from error
         finally:
             invalidate_history()
-    return renamed[1] if renamed is not None else QUEUE / source.name, len(promoted)
+    return selected_target, len(promoted)
 
 
-def _copy_history_item(source: Path, target: Path) -> None:
-    """Restore a queue file while retaining its preexisting History copy."""
-    temporary = target.with_name(
-        f".{target.name}.{os.getpid()}.{time.time_ns()}.tmp"
-    )
-    try:
-        temporary.write_bytes(source.read_bytes())
-        os.replace(temporary, target)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _restore_archived_queue_items(
-    moved: list[tuple[Path, bool]], ordered: list[Path]
-) -> list[str]:
-    """Restore a partially archived queue batch and return recovery errors."""
-    errors = []
-    with _history_order_lock:
-        for original, keep_history in reversed(moved):
-            history_item = SPOKEN / original.name
-            try:
-                if keep_history:
-                    _copy_history_item(history_item, original)
-                else:
-                    os.replace(history_item, original)
-            except OSError as error:
-                errors.append(str(error))
-        try:
-            save_queue_order(ordered)
-            save_history_order()
-        except OSError as error:
-            errors.append(str(error))
-        invalidate_history()
-    return errors
+def promote_history_selection(
+    source: Path,
+    voice: str | None = None,
+) -> tuple[Path, int]:
+    with timeline_mutation_lock():
+        return _promote_history_selection_unlocked(source, voice)
 
 
 def _discard_buffer(buf: "queue.Queue") -> int:
@@ -1469,6 +1967,7 @@ def _discard_buffer(buf: "queue.Queue") -> int:
 def _reset_waiting_buffer(buf: "queue.Queue", st: State) -> int:
     """Drop rendered waiting audio while preserving every current-chunk piece."""
     with st.lock:
+        current_was_claimed = bool(st.playing and st.playing in st.claimed)
         kept = []
         discarded = 0
         while True:
@@ -1483,7 +1982,7 @@ def _reset_waiting_buffer(buf: "queue.Queue", st: State) -> int:
         for entry in kept:
             buf.put_nowait(entry)
         st.claimed = {entry[0].name for entry in kept}
-        if st.playing:
+        if current_was_claimed and st.playing:
             st.claimed.add(st.playing)
         if st.selection_name and _find_chunk(QUEUE, Path(st.selection_name).stem) is None:
             st.selection_name = None
@@ -1503,24 +2002,19 @@ def _archive_older_queue_items(target: Path, playing: str | None) -> list[Path]:
         playing_path = next((path for path in ordered if path.name == playing), None)
         if playing_path is not None and playing_path not in archived:
             archived.append(playing_path)
-    moved: list[tuple[Path, bool]] = []
-    with _history_order_lock:
-        for path in archived:
-            history_existed = (SPOKEN / path.name).exists()
-            if not archive(path):
-                rollback_errors = _restore_archived_queue_items(moved, ordered)
-                if rollback_errors:
-                    raise MutationOutcomeUnconfirmed(
-                        f"could not archive older waiting chunk {path.stem}; "
-                        f"rollback failed: {'; '.join(rollback_errors)}"
-                    )
-                raise RuntimeError(f"could not archive older waiting chunk: {path.stem}")
-            moved.append((path, history_existed))
+    if not _archive_many(archived):
+        raise RuntimeError("could not archive older waiting chunks")
     return archived
 
 
 def process_play_request(buf: "queue.Queue", st: State) -> str | None:
-    """Resolve one selected ID and return ``select`` when playback must yield."""
+    """Apply one selection while excluding worker claims from its transaction."""
+    with st.lock:
+        return _process_play_request_locked(buf, st)
+
+
+def _process_play_request_locked(buf: "queue.Queue", st: State) -> str | None:
+    """Resolve one selected ID while holding the reentrant State lock."""
     request = take_play_request()
     if request is None:
         return None
@@ -1542,6 +2036,10 @@ def process_play_request(buf: "queue.Queue", st: State) -> str | None:
             ),
         )
 
+    if not command_cancels_graceful_stop(claim, st):
+        acknowledge(error="engine stopped before play command was applied")
+        return None
+
     # Discard audio rendered for the old order but keep source files queued for a clean restart
     with st.lock:
         playing = st.playing
@@ -1550,13 +2048,9 @@ def process_play_request(buf: "queue.Queue", st: State) -> str | None:
         and Path(playing).stem == chunk_id
         and (requested_voice is None or requested_voice == voice_from_name(playing))
     ):
-        STOP.unlink(missing_ok=True)
         PAUSE.unlink(missing_ok=True)
-        with st.lock:
-            st.saw_stop = False
-        applied_at = record_started(st, chunk_id)
         publish_status("playing", st, force=True)
-        acknowledge(result_id=chunk_id, accepted_at=applied_at)
+        acknowledge(result_id=chunk_id)
         log(f"PLAY current {chunk_id}; resumed")
         return None
 
@@ -1573,6 +2067,7 @@ def process_play_request(buf: "queue.Queue", st: State) -> str | None:
                 )
             except MutationOutcomeUnconfirmed as error:
                 log(f"History selection outcome is unconfirmed for {chunk_id}: {error}")
+                st.stop.set()
                 publish_status("playing", st, force=True)
                 acknowledge(error="play command result was unconfirmed")
                 return None
@@ -1597,6 +2092,7 @@ def process_play_request(buf: "queue.Queue", st: State) -> str | None:
             target = _replace_queue_voice(original, requested_voice)
         except MutationOutcomeUnconfirmed as error:
             log(f"voice change outcome is unconfirmed for {chunk_id}: {error}")
+            st.stop.set()
             publish_status("playing", st, force=True)
             acknowledge(error="play command result was unconfirmed")
             return None
@@ -1622,6 +2118,7 @@ def process_play_request(buf: "queue.Queue", st: State) -> str | None:
                     outcome_unconfirmed = True
             if outcome_unconfirmed:
                 log(f"selection outcome is unconfirmed for {chunk_id}: {error}")
+                st.stop.set()
                 publish_status("playing", st, force=True)
                 acknowledge(error="play command result was unconfirmed")
                 return None
@@ -1629,11 +2126,26 @@ def process_play_request(buf: "queue.Queue", st: State) -> str | None:
             acknowledge(error=f"could not select {chunk_id}")
             return None
 
-    STOP.unlink(missing_ok=True)
     PAUSE.unlink(missing_ok=True)
+    try:
+        selected_text = target.read_text(encoding="utf-8").strip()
+    except OSError:
+        selected_text = ""
+    if not target.exists():
+        st.stop.set()
+        publish_status("playing", st, force=True)
+        acknowledge(error="play command result was unconfirmed")
+        return None
     with st.lock:
         discarded = _discard_buffer(buf)
         st.claimed.clear()
+        st.playing = target.name
+        st.current_text = selected_text
+        st.current_voice = voice_from_name(target.name)
+        st.current_piece = 0
+        st.current_piece_count = len(split_text(selected_text, SPLIT_CHARS))
+        st.current_piece_start = None
+        st.current_piece_end = None
         st.selection_name = target.name
         st.skip_name = None
         st.saw_stop = False
@@ -1653,49 +2165,48 @@ def process_play_request(buf: "queue.Queue", st: State) -> str | None:
     return "select"
 
 
-def drop_to_spoken(path: Path) -> bool:
-    return archive(path) or archive_failed(path)
-
-
-def do_clear(buf: "queue.Queue", st: State) -> None:
-    """Drop the rendered buffer and every non-playing queued chunk into spoken/.
-    Banked pieces of the currently playing chunk are kept — CLEAR never
-    truncates mid-chunk."""
+def do_clear(buf: "queue.Queue", st: State) -> bool:
+    """Stop and archive Current plus every Waiting row as one transaction."""
     with st.lock:
-        keep = []
-        waiting: dict[str, Path] = {}
-        blocked: set[str] = set()
-        n = 0
-        while True:
-            try:
-                entry = buf.get_nowait()
-            except queue.Empty:
-                break
-            if st.playing and entry[0].name == st.playing:
-                keep.append(entry)
-            else:
-                waiting[entry[0].name] = entry[0]
-        for entry in keep:
-            buf.put_nowait(entry)
-        for f in glob.glob(str(QUEUE / "*.txt")):
-            if os.path.basename(f) == st.playing:
-                continue
-            path = Path(f)
-            waiting[path.name] = path
-        for path in waiting.values():
-            if drop_to_spoken(path):
-                n += 1
-            else:
-                blocked.add(path.name)
-        st.claimed = blocked | ({st.playing} if st.playing else set())
-        st.selection_name = None
-        if blocked:
+        if st.stop.is_set():
+            return False
+        discarded = _discard_buffer(buf)
+        try:
+            ordered = queue_files_in_order()
+        except RuntimeError as error:
+            st.claimed.clear()
             st.stop.set()
-            log(
-                "CLEAR could not archive "
-                f"{len(blocked)} chunk(s); stopping so they can be retried"
-            )
-    log(f"CLEAR; dropped {n} buffered/queued chunk(s)")
+            log(f"CLEAR stopped because the saved queue order is unavailable: {error}")
+            return False
+        try:
+            archived = _archive_many(ordered)
+        except MutationOutcomeUnconfirmed as error:
+            st.claimed.clear()
+            st.stop.set()
+            log(f"CLEAR result is unconfirmed; stopping: {error}")
+            return False
+        except (OSError, RuntimeError) as error:
+            st.claimed.clear()
+            st.stop.set()
+            log(f"CLEAR could not recover the timeline; stopping: {error}")
+            return False
+        if not archived:
+            st.claimed.clear()
+            st.stop.set()
+            log("CLEAR could not archive the timeline; stopping")
+            return False
+        st.claimed = set()
+        st.selection_name = None
+        st.skip_name = None
+        st.saw_stop = False
+        clear_current_playback(st)
+        try:
+            PAUSE.unlink(missing_ok=True)
+            STOP.unlink(missing_ok=True)
+        except OSError as error:
+            log(f"could not clear a playback marker after CLEAR: {error}")
+    log(f"CLEAR; archived {len(ordered)} row(s), dropped {discarded} piece(s)")
+    return True
 
 
 def apply_queue_command(
@@ -1722,7 +2233,7 @@ def apply_queue_command(
                 raise RuntimeError(f"could not delete history chunk: {chunk_id}") from error
             try:
                 save_history_order()
-            except OSError as order_error:
+            except (OSError, RuntimeError) as order_error:
                 log(
                     f"history order update error after deleting {history_item.name}: "
                     f"{order_error}"
@@ -1805,13 +2316,34 @@ def process_queue_requests(buf: "queue.Queue", st: State) -> bool:
         return False
     prune_queue_acknowledgements()
     changed = False
-    for claimed in claimed_requests:
+    for index, claimed in enumerate(claimed_requests):
         request = read_queue_claim(claimed)
         if request is None:
             continue
         action, chunk_id, before_id, request_id = request
         try:
             apply_queue_command(buf, st, action, chunk_id, before_id)
+        except MutationOutcomeUnconfirmed as error:
+            st.stop.set()
+            log(f"QUEUE {action} outcome is unconfirmed for {chunk_id}: {error}")
+            acknowledged = publish_queue_ack(
+                request_id,
+                error="queue command result was unconfirmed",
+            )
+            retire_claim(claimed, acknowledged)
+            for pending_claim in claimed_requests[index + 1 :]:
+                pending = read_queue_claim(pending_claim)
+                if pending is None:
+                    continue
+                _, _, _, pending_request_id = pending
+                retire_claim(
+                    pending_claim,
+                    publish_queue_ack(
+                        pending_request_id,
+                        error="engine stopped after an unconfirmed queue command",
+                    ),
+                )
+            break
         except (OSError, RuntimeError, ValueError) as error:
             log(f"QUEUE {action} rejected for {chunk_id}: {error}")
             acknowledged = publish_queue_ack(request_id, error=str(error))
@@ -1859,9 +2391,20 @@ def release_preplay_chunk(st: State, name: str) -> None:
 
 def claim_next_queued_chunk(st: State) -> Path | None:
     with st.lock:
-        if st.saw_stop:
+        try:
+            candidates = queue_files_in_order()
+        except RuntimeError as error:
+            log(str(error))
             return None
-        candidates = queue_files_in_order()
+        if st.saw_stop:
+            active = next(
+                (path for path in candidates if path.name == st.playing),
+                None,
+            )
+            if active is not None and active.name not in st.claimed:
+                st.claimed.add(active.name)
+                return active
+            return None
         if st.selection_name:
             selected = next(
                 (path for path in candidates if path.name == st.selection_name),
@@ -1892,7 +2435,7 @@ def claim_next_queued_chunk(st: State) -> Path | None:
 
 
 def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
-    """Producer: claim the next queued chunk, split it into sentence pieces,
+    """Producer: claim the next queued chunk, split it into sentence-aligned pieces,
     synthesize each, and bank playback entries in buf (blocking when the buffer
     is full - natural backpressure). Abandons a chunk's
     remaining pieces when CLEAR/SKIP unclaims it."""
@@ -1908,8 +2451,19 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
             text = nxt.read_text(encoding="utf-8").strip()
         except Exception as e:
             log(f"read error {nxt.name}: {e}")
-            release_preplay_chunk(st, nxt.name)
+            with st.lock:
+                st.claimed.discard(nxt.name)
+                started = st.read_failures.setdefault(nxt.name, time.monotonic())
+                deadline = 0.5 if st.saw_stop else 5.0
+                if time.monotonic() - started >= deadline:
+                    if st.playing == nxt.name:
+                        clear_current_playback(st)
+                    st.stop.set()
+                    log(f"stopping after a persistent read failure for {nxt.name}")
+            time.sleep(0.05)
             continue
+        with st.lock:
+            st.read_failures.pop(nxt.name, None)
         if not text:
             log(f"empty {nxt.name}, archiving")
             if archive(nxt):
@@ -1918,7 +2472,7 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
                 st.stop.set()
             continue
         voice = voice_from_name(nxt.name)
-        pieces = split_text(text, SPLIT_CHARS)
+        pieces = split_text_pieces(text, SPLIT_CHARS)
         delivered = 0
         for idx, piece in enumerate(pieces):
             if st.stop.is_set() or not _claimed(st, nxt.name):
@@ -1926,14 +2480,23 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
             heartbeat(force=True)
             t0 = time.time()
             try:
-                audio, sr = kokoro.create(piece, voice=voice, speed=1.0, lang="en-us")
+                audio, sr = kokoro.create(
+                    piece.text, voice=voice, speed=1.0, lang="en-us"
+                )
             except Exception as e:
+                if not _claimed(st, nxt.name):
+                    log(f"ignored stale synth error {nxt.name}[{idx}]: {e}")
+                    break
                 log(f"synth error {nxt.name}[{idx}] (voice={voice}): {e}")
                 if delivered == 0:
-                    if archive_failed(nxt):
-                        release_preplay_chunk(st, nxt.name)
-                    else:
-                        st.stop.set()
+                    with st.lock:
+                        if nxt.name not in st.claimed or st.stop.is_set():
+                            log(f"ignored stale synth error {nxt.name}[{idx}]")
+                            break
+                        if archive_failed(nxt):
+                            release_preplay_chunk(st, nxt.name)
+                        else:
+                            st.stop.set()
                     break
                 # Mid-chunk failure: deliver an empty terminal piece so the
                 # consumer still archives and releases the chunk.
@@ -1941,7 +2504,7 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
             else:
                 log(
                     f"synth {nxt.name}[{idx+1}/{len(pieces)}] voice={voice} "
-                    f"chars={len(piece)} synth={time.time()-t0:.1f}s audio={len(audio)/sr:.1f}s"
+                    f"chars={len(piece.text)} synth={time.time()-t0:.1f}s audio={len(audio)/sr:.1f}s"
                 )
             entry = (
                 nxt,
@@ -1953,6 +2516,8 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
                 len(pieces),
                 text,
                 voice,
+                piece.start,
+                piece.end,
             )
             while not st.stop.is_set():
                 with st.lock:
@@ -1979,24 +2544,23 @@ def gap_wait(seconds: float, buf: "queue.Queue", st: State) -> str | None:
     while remaining > 0:
         if st.stop.is_set():
             return "fatal"
-        if consume(CONTINUE):
-            STOP.unlink(missing_ok=True)
-            st.saw_stop = False
+        consume_continue(st)
         if consume_control(INTERRUPT):
             reject_pending_requests("engine interrupted before command was applied")
             return "interrupt"
+        if process_play_request(buf, st) == "select":
+            return "select"
+        if consume_ordered_control(CLEAR, st):
+            return "clear" if do_clear(buf, st) else "fatal"
         if consume_control(STOP):
             reject_pending_requests("engine stopped before command was applied")
             return "stop"
-        if process_play_request(buf, st) == "select":
-            return "select"
         if process_queue_requests(buf, st):
             return "queue_changed"
+        if st.stop.is_set():
+            return "fatal"
         if consume_control(SKIP):
             return "skip"
-        if consume_control(CLEAR):
-            do_clear(buf, st)
-            return "clear"
         now = time.monotonic()
         if PAUSE.exists():
             publish_status("paused", st)
@@ -2064,23 +2628,25 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
                 reject_pending_requests("engine interrupted before command was applied")
                 stream.abort()
                 return "interrupt"
-            if consume(CONTINUE):
-                STOP.unlink(missing_ok=True)
-                st.saw_stop = False
+            consume_continue(st)
+            if process_play_request(buf, st) == "select":
+                stream.abort()
+                return "select"
+            if consume_ordered_control(CLEAR, st):
+                stream.abort()
+                return "clear" if do_clear(buf, st) else "fatal"
             if not st.saw_stop and control_requested(STOP):
                 st.saw_stop = True
             if st.saw_stop:
                 reject_pending_requests("engine is stopping")
             else:
-                if process_play_request(buf, st) == "select":
-                    stream.abort()
-                    return "select"
                 process_queue_requests(buf, st)
+                if st.stop.is_set():
+                    stream.abort()
+                    return "fatal"
             if consume_control(SKIP):
                 stream.abort()
                 return "skip"
-            if consume_control(CLEAR):
-                do_clear(buf, st)
 
             position = playback.position
             now = time.monotonic()
@@ -2121,9 +2687,7 @@ def finish_chunk_playback(path: Path, outcome: str, last: bool, st: State) -> bo
     """Release a completed or interrupted chunk and report whether state changed."""
     if outcome == "done" and not last:
         return False
-    released = outcome in {"select", "fatal"} or archive(path)
-    if not released:
-        released = archive_failed(path)
+    released = outcome in {"select", "clear", "fatal"} or archive(path)
     with st.lock:
         if released:
             st.claimed.discard(path.name)
@@ -2132,7 +2696,8 @@ def finish_chunk_playback(path: Path, outcome: str, last: bool, st: State) -> bo
             log(
                 f"could not archive {path.name}; stopping so it can be retried"
             )
-        clear_current_playback(st)
+        if st.playing == path.name:
+            clear_current_playback(st)
         if outcome == "skip":
             st.skip_name = path.name
     return True
@@ -2145,11 +2710,14 @@ def clear_current_playback(st: State) -> None:
     st.current_voice = None
     st.current_piece = 0
     st.current_piece_count = 0
+    st.current_piece_start = None
+    st.current_piece_end = None
 
 
 def run_engine_loop() -> None:
     QUEUE.mkdir(parents=True, exist_ok=True)
     SPOKEN.mkdir(parents=True, exist_ok=True)
+    repair_interrupted_timeline_transition()
     st = State()
     publish_status("loading", st, force=True)
     if not MODEL_PATH.exists() or not VOICES_PATH.exists():
@@ -2206,12 +2774,17 @@ def run_engine_loop() -> None:
             if st.stop.is_set():
                 log("engine stopping after a storage failure")
                 return
-            if consume(CONTINUE):
-                STOP.unlink(missing_ok=True)
-                st.saw_stop = False
+            consume_continue(st)
             if consume_control(INTERRUPT):
                 reject_pending_requests("engine interrupted before command was applied")
                 log("INTERRUPT (idle); exiting")
+                return
+            process_play_request(buf, st)
+            if st.stop.is_set():
+                log("engine stopping after a storage failure")
+                return
+            if consume_ordered_control(CLEAR, st) and not do_clear(buf, st):
+                log("engine stopping after CLEAR could not finish")
                 return
             with st.lock:
                 playing = st.playing
@@ -2224,12 +2797,20 @@ def run_engine_loop() -> None:
             if st.saw_stop:
                 reject_pending_requests("engine is stopping")
             else:
-                process_play_request(buf, st)
                 process_queue_requests(buf, st)
-            if consume_control(CLEAR):
-                do_clear(buf, st)
+            if st.stop.is_set():
+                log("engine stopping after a storage failure")
+                return
             if consume_control(SKIP):
-                log("SKIP ignored (idle)")
+                with st.lock:
+                    current_name = st.playing
+                current_path = QUEUE / current_name if current_name else None
+                if current_path is not None and current_path.exists():
+                    finish_chunk_playback(current_path, "skip", True, st)
+                    publish_status("idle", st, force=True)
+                    log(f"SKIP before playback {current_path.name}")
+                    continue
+                log("SKIP ignored (no Current)")
 
             try:
                 (
@@ -2242,6 +2823,8 @@ def run_engine_loop() -> None:
                     piece_count,
                     text,
                     voice,
+                    piece_start,
+                    piece_end,
                 ) = buf.get(timeout=POLL_INTERVAL)
             except queue.Empty:
                 heartbeat()
@@ -2308,6 +2891,8 @@ def run_engine_loop() -> None:
             with st.lock:
                 st.current_piece = piece
                 st.current_piece_count = piece_count
+                st.current_piece_start = piece_start
+                st.current_piece_end = piece_end
             if first:
                 log(f"play {path.name}")
             publish_status("playing", st, force=True)
@@ -2325,9 +2910,7 @@ def run_engine_loop() -> None:
                 log("exiting on interrupt")
                 return
             if st.saw_stop and (last or outcome == "skip"):
-                if consume(CONTINUE):
-                    STOP.unlink(missing_ok=True)
-                    st.saw_stop = False
+                if consume_continue(st):
                     log("STOP canceled by newly queued speech")
                 else:
                     consume_control(STOP)
@@ -2443,7 +3026,7 @@ def print_status() -> None:
         try:
             text = path.read_text(encoding="utf-8").strip()
         except OSError:
-            continue
+            text = ""
         queue_items.append(
             {
                 "id": path.stem,
@@ -2459,6 +3042,8 @@ def print_status() -> None:
             **boundary,
             "piece": 0,
             "piece_count": len(split_text(str(boundary["text"]), SPLIT_CHARS)),
+            "piece_start": None,
+            "piece_end": None,
             "elapsed_seconds": 0.0,
         }
     print(
@@ -2522,7 +3107,7 @@ def cli(argv: list[str] | None = None) -> int:
     )
     delete_command.add_argument("chunk_id", help="History chunk ID from status output")
     commands.add_parser("skip", help="skip the current chunk")
-    commands.add_parser("clear", help="clear queued chunks after the current chunk")
+    commands.add_parser("clear", help="move Current and Waiting speech to History")
     commands.add_parser("stop", help="finish the current chunk and stop")
     commands.add_parser("interrupt", help="stop playback and the engine immediately")
 
@@ -2568,6 +3153,8 @@ def cli(argv: list[str] | None = None) -> int:
                 "stop": STOP,
                 "interrupt": INTERRUPT,
             }[args.command]
+            if args.command == "clear":
+                start_engine()
             send_control(signal)
     except (RuntimeError, ValueError) as error:
         parser.error(str(error))

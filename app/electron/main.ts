@@ -184,7 +184,8 @@ function getStatus(): RuntimeStatus {
   const base = runtimeDir();
   const installed = modelsInstalled(modelDirectory());
   const ownedEngineRunning = ownedEngine !== null && ownedEngine.exitCode === null;
-  const storedSnapshot = readStatusSnapshot(base);
+  const statusUnavailable = existsSync(path.join(base, "status.failed"));
+  const storedSnapshot = statusUnavailable ? {} : readStatusSnapshot(base);
   const storedEngine = statusAfterTransientRead(storedSnapshot, lastEngineStatus);
   if (storedSnapshot !== null && storedEngine) {
     lastEngineStatus = storedEngine;
@@ -206,6 +207,9 @@ function getStatus(): RuntimeStatus {
     engineRunning,
     engine?.state,
   );
+  const timeline = statusUnavailable
+    ? null
+    : engine ?? (ownedEngineRunning ? lastEngineStatus : null);
 
   const status: RuntimeStatus = {
     version: ENGINE_STATUS_VERSION,
@@ -214,12 +218,12 @@ function getStatus(): RuntimeStatus {
     engine_pid: engineRunning ? (engine?.engine_pid ?? ownedEngine?.pid ?? null) : null,
     engine_running: engineRunning,
     installed,
-    current: engine?.current ?? null,
-    recent_starts: engine?.recent_starts ?? [],
-    queue_count: engine?.queue_count ?? 0,
-    queue: engine?.queue ?? [],
-    history_count: engine?.history_count ?? 0,
-    history: engine?.history ?? [],
+    current: timeline?.current ?? null,
+    recent_starts: timeline?.recent_starts ?? [],
+    queue_count: timeline?.queue_count ?? 0,
+    queue: timeline?.queue ?? [],
+    history_count: timeline?.history_count ?? 0,
+    history: timeline?.history ?? [],
   };
   return statusAfterPauseCommand(status, existsSync(path.join(base, "PAUSE")));
 }
@@ -522,6 +526,7 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      backgroundThrottling: false,
     },
   });
 
@@ -564,13 +569,13 @@ function refreshTrayMenu(status = getStatus()): void {
     return;
   }
   const paused = status.state === "paused";
-  const hasWork = status.current !== null || status.queue_count > 0;
+  const canPause = status.state === "playing" || status.state === "paused";
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: "Open Super Speech", click: showWindow },
       {
         label: paused ? "Resume Speech" : "Pause Speech",
-        enabled: hasWork,
+        enabled: canPause,
         click: () => void setPaused(!paused),
       },
       { label: "Open runtime folder", click: () => void shell.openPath(runtimeDir()) },

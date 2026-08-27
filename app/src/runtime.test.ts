@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   ENGINE_STATUS_VERSION,
+  activeTimelineIds,
   compatibleEngineIsRunning,
+  currentPieceSegments,
   engineProcessIsLive,
   moveQueueItemBefore,
   pendingPlaybackState,
@@ -16,6 +18,7 @@ import {
   statusForEngineProcess,
   statusAfterPauseCommand,
   timelineItems,
+  timelineItemsAtBoundary,
   type EngineStatus,
 } from "./runtime.ts";
 
@@ -116,6 +119,8 @@ test("rejects playback states that contradict the boundary", () => {
     voice: "af_heart",
     piece: 0,
     piece_count: 1,
+    piece_start: null,
+    piece_end: null,
     elapsed_seconds: 0,
   };
   assert.equal(parseEngineStatus({ ...status, state: "playing" }), null);
@@ -131,6 +136,8 @@ test("rejects duplicate active rows", () => {
     voice: "af_heart",
     piece: 0,
     piece_count: 1,
+    piece_start: null,
+    piece_end: null,
     elapsed_seconds: 0,
   };
   assert.equal(
@@ -143,6 +150,108 @@ test("rejects duplicate active rows", () => {
     }),
     null,
   );
+});
+
+test("rejects duplicate IDs across active speech and History", () => {
+  const current = {
+    id: "001-af_heart-say",
+    filename: "001-af_heart-say.txt",
+    text: "Current",
+    voice: "af_heart",
+    piece: 0,
+    piece_count: 1,
+    piece_start: null,
+    piece_end: null,
+    elapsed_seconds: 0,
+  };
+  const waiting = {
+    id: "002-af_heart-say",
+    filename: "002-af_heart-say.txt",
+    text: "Waiting",
+    voice: "af_heart",
+  };
+  for (const duplicate of [current, waiting]) {
+    assert.equal(
+      parseEngineStatus({
+        ...status,
+        state: "playing",
+        current,
+        queue_count: 1,
+        queue: [waiting],
+        history_count: 1,
+        history: [duplicate],
+      }),
+      null,
+    );
+  }
+});
+
+test("rejects impossible piece ranges and History totals", () => {
+  const current = {
+    id: "001-af_heart-say",
+    filename: "001-af_heart-say.txt",
+    text: "Hello world",
+    voice: "af_heart",
+    piece: 1,
+    piece_count: 1,
+    piece_start: 0,
+    piece_end: 5,
+    elapsed_seconds: 0,
+  };
+  const valid = { ...status, state: "playing", current };
+  assert.notEqual(parseEngineStatus(valid), null);
+  assert.equal(
+    parseEngineStatus({ ...valid, current: { ...current, piece_start: null } }),
+    null,
+  );
+  assert.equal(
+    parseEngineStatus({ ...valid, current: { ...current, piece_end: 99 } }),
+    null,
+  );
+  assert.equal(parseEngineStatus({ ...status, history_count: -1 }), null);
+  assert.equal(parseEngineStatus({ ...status, history_count: 0.5 }), null);
+  const history = [{ id: "h", filename: "h.txt", text: "Earlier", voice: "af_heart" }];
+  assert.equal(parseEngineStatus({ ...status, history_count: 0, history }), null);
+  assert.equal(
+    parseEngineStatus({ ...status, history_count: 2, history: [history[0], history[0]] }),
+    null,
+  );
+});
+
+test("extracts the current Unicode piece with code-point offsets", () => {
+  const item = {
+    id: "001-af_heart-say",
+    filename: "001-af_heart-say.txt",
+    text: "😀 First. Second.",
+    voice: "af_heart",
+    piece: 2,
+    piece_count: 2,
+    piece_start: 9,
+    piece_end: 16,
+    elapsed_seconds: 0,
+  };
+  assert.deepEqual(currentPieceSegments(item), {
+    before: "😀 First. ",
+    current: "Second.",
+    after: "",
+  });
+});
+
+test("active timeline IDs include Current and Waiting", () => {
+  const waiting = { id: "w", filename: "w.txt", text: "Wait", voice: "af_heart" };
+  const current = {
+    id: "c",
+    filename: "c.txt",
+    text: "Current",
+    voice: "af_heart",
+    piece: 0,
+    piece_count: 1,
+    piece_start: null,
+    piece_end: null,
+    elapsed_seconds: 0,
+  };
+  assert.deepEqual([...activeTimelineIds({ current, queue: [waiting] })], ["c", "w"]);
+  assert.deepEqual([...activeTimelineIds({ current: null, queue: [] })], []);
 });
 
 test("normalizes an engine play acknowledgement", () => {
@@ -169,7 +278,14 @@ test("does not mistake an existing History row for started playback", () => {
     ),
     "pending",
   );
-  const preparing = { ...archived, piece: 0, piece_count: 1, elapsed_seconds: 0 };
+  const preparing = {
+    ...archived,
+    piece: 0,
+    piece_count: 1,
+    piece_start: null,
+    piece_end: null,
+    elapsed_seconds: 0,
+  };
   assert.equal(
     playAcceptanceState(
       { ...status, state: "stopped", updated_at: 13, current: preparing },
@@ -179,7 +295,7 @@ test("does not mistake an existing History row for started playback", () => {
   );
   assert.equal(
     playAcceptanceState(
-      { ...status, state: "playing", updated_at: 13, current: { ...archived, piece: 1, piece_count: 1, elapsed_seconds: 0 }, history_count: 1, history: [archived] },
+      { ...status, state: "playing", updated_at: 13, current: { ...archived, piece: 1, piece_count: 1, piece_start: 0, piece_end: archived.text.length, elapsed_seconds: 0 }, history_count: 1, history: [archived] },
       acceptance,
     ),
     "pending",
@@ -259,6 +375,8 @@ test("reflects pause commands immediately without creating an empty paused state
       text: "Current",
       piece: 0,
       piece_count: 1,
+      piece_start: null,
+      piece_end: null,
       elapsed_seconds: 0,
     },
     queue_count: 1,
@@ -348,6 +466,8 @@ test("keeps newest waiting speech above current speech and history", () => {
     voice: "af_heart",
     piece: 1,
     piece_count: 1,
+    piece_start: 0,
+    piece_end: 3,
     elapsed_seconds: 0,
   };
   const next = { ...current, id: "003-af_heart-say", text: "Next" };
@@ -393,25 +513,6 @@ test("keeps newest waiting speech above current speech and history", () => {
   );
 });
 
-test("shows an archived replay only in its active timeline position", () => {
-  const replay = {
-    id: "007-bm_fable-say",
-    filename: "007-bm_fable-say.txt",
-    text: "Replay me",
-    voice: "bm_fable",
-    piece: 1,
-    piece_count: 1,
-    elapsed_seconds: 0,
-  };
-
-  assert.deepEqual(
-    timelineItems({ current: replay, queue: [], history: [replay] }).map(
-      ({ id, kind }) => ({ id, kind }),
-    ),
-    [{ id: replay.id, kind: "current" }],
-  );
-});
-
 test("keeps row order stable when current speech enters history", () => {
   const current = {
     id: "002-af_heart-say",
@@ -420,6 +521,8 @@ test("keeps row order stable when current speech enters history", () => {
     voice: "af_heart",
     piece: 1,
     piece_count: 1,
+    piece_start: 0,
+    piece_end: 3,
     elapsed_seconds: 0,
   };
   const next = { ...current, id: "003-af_heart-say", text: "Next" };
@@ -436,6 +539,71 @@ test("keeps row order stable when current speech enters history", () => {
     before.map(({ id }) => id),
     after.map(({ id }) => id),
   );
+});
+
+test("projects a selected History row as the boundary without moving any card", () => {
+  const history = ["005", "004", "003", "002", "001"].map((id) => ({
+    id: `${id}-af_heart-say`,
+    filename: `${id}-af_heart-say.txt`,
+    text: id,
+    voice: "af_heart",
+  }));
+
+  for (const selectedIndex of history.keys()) {
+    const projected = timelineItemsAtBoundary(
+      { current: null, queue: [], history },
+      history[selectedIndex],
+    );
+    assert.deepEqual(
+      projected.map(({ id }) => id),
+      history.map(({ id }) => id),
+    );
+    assert.deepEqual(
+      projected.map(({ kind }) => kind),
+      history.map((_, index) =>
+        index < selectedIndex
+          ? "upcoming"
+          : index === selectedIndex
+            ? "current"
+            : "history"
+      ),
+    );
+  }
+});
+
+test("keeps a voice-changed selection in the source card's position", () => {
+  const original = {
+    id: "003-af_heart-say",
+    filename: "003-af_heart-say.txt",
+    text: "Same words",
+    voice: "af_heart",
+  };
+  const changed = {
+    ...original,
+    id: "003-bm_fable-say",
+    filename: "003-bm_fable-say.txt",
+    voice: "bm_fable",
+  };
+  const projected = timelineItemsAtBoundary(
+    {
+      current: null,
+      queue: [],
+      history: [
+        { ...original, id: "004-af_heart-say", filename: "004-af_heart-say.txt" },
+        original,
+        { ...original, id: "002-af_heart-say", filename: "002-af_heart-say.txt" },
+      ],
+    },
+    changed,
+    original.id,
+  );
+
+  assert.deepEqual(projected.map(({ id }) => id), [
+    "004-af_heart-say",
+    changed.id,
+    "002-af_heart-say",
+  ]);
+  assert.equal(projected[1].kind, "current");
 });
 
 test("moves a queue item before a stable ID or to the end", () => {

@@ -3,11 +3,14 @@ import {
   ENGINE_STATUS_VERSION,
   INITIAL_STATUS,
   VOICE_OPTIONS,
+  activeTimelineIds,
+  currentPieceSegments,
   moveQueueItemBefore,
   pendingPlaybackState,
   playAcceptanceState,
   playbackPresentation,
   timelineItems,
+  timelineItemsAtBoundary,
   type PlayAcceptance,
   type PlaybackPresentation,
   type RuntimeStatus,
@@ -36,6 +39,8 @@ const demoStatus: RuntimeStatus = {
     voice: "af_heart",
     piece: 1,
     piece_count: 2,
+    piece_start: 0,
+    piece_end: 42,
     elapsed_seconds: 4.2,
   },
   recent_starts: [{ id: "014-af_heart-say", started_at: Date.now() / 1000 }],
@@ -75,6 +80,7 @@ const playbackButton = requiredElement<HTMLButtonElement>("playback-button");
 const playbackIcon = requiredElement<HTMLSpanElement>("playback-icon");
 const statusDot = requiredElement<HTMLSpanElement>("status-dot");
 const statusLabel = requiredElement<HTMLSpanElement>("status-label");
+const playbackCard = requiredElement<HTMLElement>("playback-card");
 const playbackCopy = requiredElement<HTMLDivElement>("playback-copy");
 const playbackTitle = requiredElement<HTMLHeadingElement>("playback-title");
 const currentText = requiredElement<HTMLParagraphElement>("current-text");
@@ -87,6 +93,9 @@ const queueActionMenu = requiredElement<HTMLDivElement>("queue-action-menu");
 const commandStatus = requiredElement<HTMLDivElement>("command-status");
 const versionLabel = requiredElement<HTMLSpanElement>("version-label");
 const ambientRings = [...document.querySelectorAll<HTMLElement>(".ring")];
+const playbackBackground = [
+  ...document.querySelectorAll<HTMLElement>(".queue-section, footer"),
+];
 const desktopApi = window.superSpeech;
 const themeButtons = [...document.querySelectorAll<HTMLButtonElement>("[data-theme-choice]")];
 
@@ -115,6 +124,7 @@ for (const button of themeButtons) {
 
 interface PendingSelection {
   selectedItem: TimelineItem;
+  sourceItemId: string;
   state: "playing" | "paused";
   acceptance: PlayAcceptance | null;
   timeoutId: number;
@@ -165,20 +175,21 @@ let pendingChunkExpansion: PendingChunkExpansion | null = null;
 let openMenuItemId: string | null = null;
 let revealedCurrentItemId: string | null = null;
 let ringSettlingAnimations: Animation[] = [];
+let playbackExpanded = false;
+let lastFollowedPieceKey: string | null = null;
 
 const POINTER_GESTURE_THRESHOLD = 5;
 const QUEUE_REORDER_ANIMATION_MS = 140;
 const QUEUE_STATUS_CONFIRMATION_MS = 1_500;
 const CHUNK_DOUBLE_CLICK_MS = 400;
 
-function selectionBlocksTimelineMutation(itemId?: string): boolean {
-  return pendingSelection !== null &&
-    (pendingSelection.acceptance === null || pendingSelection.selectedItem.id === itemId);
+function selectionBlocksTimelineMutation(): boolean {
+  return pendingSelection !== null;
 }
 
-function timelineMutationBlocked(itemId?: string): boolean {
+function timelineMutationBlocked(): boolean {
   return commandPending || clearPending || pendingQueueMutation !== null ||
-    selectionBlocksTimelineMutation(itemId);
+    selectionBlocksTimelineMutation();
 }
 
 function requiredElement<T extends HTMLElement>(id: string): T {
@@ -210,7 +221,24 @@ function timelineAction(item: TimelineItem, pending: boolean, failed: boolean): 
   if (item.kind !== "current") {
     return "";
   }
-  return currentStatus.state === "paused" ? "Paused" : "Speaking";
+  const labels: Partial<Record<RuntimeStatus["state"], string>> = {
+    loading: "Preparing",
+    playing: "Speaking",
+    paused: "Paused",
+    setup_required: "Setup needed",
+    stopped: "Stopped",
+  };
+  return labels[currentStatus.state] ?? "";
+}
+
+function visibleTimelineItems(status = currentStatus): TimelineItem[] {
+  return pendingSelection
+    ? timelineItemsAtBoundary(
+      status,
+      pendingSelection.selectedItem,
+      pendingSelection.sourceItemId,
+    )
+    : timelineItems(status);
 }
 
 function itemReference(item: TimelineItem): string {
@@ -248,10 +276,9 @@ function reconcileCommands(status: RuntimeStatus): void {
     pendingSelection = null;
     commandStatus.textContent = "Could not start selected speech. Try again.";
   }
-  const clearWasApplied =
-    (clearBaselineIds.size > 0 &&
-      [...clearBaselineIds].every((id) => !status.queue.some((item) => item.id === id))) ||
-    (clearPending && status.queue_count === 0);
+  const activeIds = activeTimelineIds(status);
+  const clearWasApplied = clearBaselineIds.size > 0 &&
+    [...clearBaselineIds].every((id) => !activeIds.has(id));
   if (clearWasApplied) {
     const restoreFocus = document.activeElement === clearQueueButton;
     if (clearTimeoutId !== null) {
@@ -317,6 +344,51 @@ function statusCopy(presentation: PlaybackPresentation): {
     title: "Ready when you are",
     body: "Your next voice reply will appear here as soon as it starts.",
   };
+}
+
+function setPlaybackExpanded(expanded: boolean): void {
+  playbackExpanded = expanded && playbackCopy.dataset.expandable === "true";
+  if (!playbackExpanded) {
+    lastFollowedPieceKey = null;
+  }
+  playbackCard.classList.toggle("is-expanded", playbackExpanded);
+  document.body.classList.toggle("playback-expanded", playbackExpanded);
+  for (const element of playbackBackground) {
+    element.inert = playbackExpanded;
+  }
+  if (playbackCopy.dataset.expandable === "true") {
+    playbackCopy.setAttribute("aria-expanded", String(playbackExpanded));
+  } else {
+    playbackCopy.removeAttribute("aria-expanded");
+  }
+}
+
+function renderCurrentSpeechText(
+  fallback: string,
+  current: RuntimeStatus["current"],
+): void {
+  const segments = current ? currentPieceSegments(current) : null;
+  currentText.replaceChildren();
+  if (!playbackExpanded) {
+    currentText.textContent = segments?.current ?? fallback;
+    return;
+  }
+  if (!current || !segments) {
+    currentText.textContent = fallback;
+    return;
+  }
+  currentText.append(document.createTextNode(segments.before));
+  const active = document.createElement("mark");
+  active.className = "current-piece";
+  active.textContent = segments.current;
+  currentText.append(active, document.createTextNode(segments.after));
+  const pieceKey = `${current.id}:${current.piece}`;
+  if (pieceKey !== lastFollowedPieceKey) {
+    lastFollowedPieceKey = pieceKey;
+    requestAnimationFrame(() => {
+      active.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+  }
 }
 
 type PlaybackAction = "pause" | "resume" | "setup" | "inactive";
@@ -393,7 +465,34 @@ function render(status: RuntimeStatus): void {
   statusLabel.textContent = copy.label;
   playbackCopy.classList.toggle("is-hidden", !showPlaybackCopy);
   playbackTitle.textContent = copy.title ?? "";
-  currentText.textContent = copy.body ?? "";
+  const followedCurrent = status.current?.id === presentation.item?.id
+    ? status.current
+    : null;
+  const canExpand = followedCurrent !== null;
+  playbackCopy.dataset.expandable = String(canExpand);
+  playbackCopy.classList.toggle("is-expandable", canExpand);
+  if (!canExpand && playbackExpanded) {
+    const restoreFocus = playbackCopy.contains(document.activeElement);
+    setPlaybackExpanded(false);
+    if (restoreFocus) {
+      queueList.focus({ preventScroll: true });
+    }
+  }
+  if (canExpand) {
+    playbackCopy.tabIndex = 0;
+    playbackCopy.setAttribute("role", "button");
+    playbackCopy.setAttribute("aria-expanded", String(playbackExpanded));
+    playbackCopy.setAttribute(
+      "aria-label",
+      playbackExpanded ? "Collapse current speech text" : "Expand current speech text",
+    );
+  } else {
+    playbackCopy.removeAttribute("tabindex");
+    playbackCopy.removeAttribute("role");
+    playbackCopy.removeAttribute("aria-expanded");
+    playbackCopy.removeAttribute("aria-label");
+  }
+  renderCurrentSpeechText(copy.body ?? "", followedCurrent);
 
   const actionLabels: Record<PlaybackAction, string> = {
     pause: "Pause speech",
@@ -421,7 +520,8 @@ function render(status: RuntimeStatus): void {
     voicePill.classList.add("is-hidden");
   }
 
-  clearQueueButton.classList.toggle("is-hidden", status.queue_count === 0);
+  const activeCount = activeTimelineIds(status).size;
+  clearQueueButton.classList.toggle("is-hidden", activeCount === 0);
   clearQueueButton.disabled = commandPending || clearPending || pendingQueueMutation !== null ||
     pendingSelection !== null;
   clearQueueButton.setAttribute("aria-disabled", String(clearQueueButton.disabled));
@@ -429,17 +529,21 @@ function render(status: RuntimeStatus): void {
   clearQueueButton.setAttribute(
     "aria-label",
     clearPending
-      ? "Clearing waiting speech"
+      ? "Clearing speech"
       : clearFailed
-        ? "Retry clearing waiting speech"
-        : `Clear ${status.queue_count} waiting speech ${status.queue_count === 1 ? "item" : "items"}; current speech and playback state will not change`,
+        ? "Retry clearing speech"
+        : `Move ${activeCount} active speech ${activeCount === 1 ? "item" : "items"} to History`,
   );
   clearQueueButton.textContent = clearPending
     ? "Clearing..."
     : clearFailed
       ? "Retry clear all"
       : "Clear all";
-  renderTimeline(timelineItems(status), status.history_count);
+  const visibleItems = visibleTimelineItems(status);
+  const hiddenHistoryCount = Math.max(0, status.history_count - status.history.length);
+  const projectedHistoryTotal = hiddenHistoryCount +
+    visibleItems.filter(({ kind }) => kind === "history").length;
+  renderTimeline(visibleItems, projectedHistoryTotal);
 }
 
 function clearHistoryDropIndicator(): void {
@@ -458,7 +562,7 @@ function beginQueuePointerDrag(
   if (
     event.button !== 0 ||
     !event.isPrimary ||
-    timelineMutationBlocked(id)
+    timelineMutationBlocked()
   ) {
     return;
   }
@@ -879,7 +983,7 @@ function cancelQueuePointerDrag(): void {
 function handleQueueReorderKey(event: KeyboardEvent, id: string): void {
   const ids = currentStatus.queue.map((item) => item.id);
   const index = ids.indexOf(id);
-  if (index < 0 || timelineMutationBlocked(id)) {
+  if (index < 0 || timelineMutationBlocked()) {
     return;
   }
   let beforeId: string | null | undefined;
@@ -901,7 +1005,7 @@ function handleQueueReorderKey(event: KeyboardEvent, id: string): void {
 function handleHistoryReorderKey(event: KeyboardEvent, id: string): void {
   const ids = currentStatus.history.map((item) => item.id);
   const index = ids.indexOf(id);
-  if (index < 0 || timelineMutationBlocked(id)) {
+  if (index < 0 || timelineMutationBlocked()) {
     return;
   }
   let beforeId: string | null | undefined;
@@ -984,7 +1088,7 @@ function reconcileTimelineNodes(items: TimelineItem[]): boolean {
 function setOpenActionMenu(itemId: string | null): void {
   const shouldFocus = itemId !== null && itemId !== openMenuItemId;
   const item = itemId
-    ? timelineItems(currentStatus).find(({ id }) => id === itemId)
+    ? visibleTimelineItems().find(({ id }) => id === itemId)
     : null;
   const target = item
     ? queueList.querySelector<HTMLElement>(`[data-item-id="${item.id}"]`)
@@ -1016,13 +1120,13 @@ function setOpenActionMenu(itemId: string | null): void {
   }
 
   const actions: HTMLElement[] = [];
-  if (item.kind === "current") {
+  if (item.kind === "current" && ["playing", "paused"].includes(currentStatus.state)) {
     actions.push(createMenuAction(
       currentStatus.state === "paused" ? "Resume" : "Pause",
       () => void runPlaybackAction(),
       "is-playback",
     ));
-  } else {
+  } else if (item.kind !== "current" || currentStatus.state === "stopped") {
     actions.push(createMenuAction(
       "Play",
       () => void playTimelineItem(item),
@@ -1143,9 +1247,21 @@ function createVoiceSelect(item: TimelineItem): HTMLSelectElement {
 function updateTimelineDividers(items: TimelineItem[], historyTotal: number): void {
   const waitingCount = items.filter(({ kind }) => kind === "upcoming").length;
   const historyCount = items.filter(({ kind }) => kind === "history").length;
+  const currentLabel = pendingSelection
+    ? pendingSelection.acceptance
+      ? pendingSelection.state === "paused" ? "Paused" : "Playing"
+      : "Starting"
+    : ({
+      loading: "Preparing",
+      playing: "Playing",
+      paused: "Paused",
+      setup_required: "Setup needed",
+      stopped: "Stopped",
+      idle: "Idle",
+    } satisfies Record<RuntimeStatus["state"], string>)[currentStatus.state];
   const labels: Record<TimelineSection, [string, string]> = {
     upcoming: ["Waiting", waitingCount.toLocaleString()],
-    current: ["Current", currentStatus.state === "paused" ? "Paused" : "Playing"],
+    current: ["Current", currentLabel],
     history: [
       "History",
       historyCount < historyTotal
@@ -1394,7 +1510,7 @@ function updateTimelineRows(items: TimelineItem[]): void {
     const dragHandle = row.querySelector<HTMLButtonElement>(".queue-drag-handle");
     if (dragHandle) {
       dragHandle.disabled = queueCommandInFlight || clearPending ||
-        selectionBlocksTimelineMutation(item.id);
+        selectionBlocksTimelineMutation();
       dragHandle.setAttribute(
         "aria-label",
         `Reorder ${reference}. Drag, or use the arrow keys`,
@@ -1432,7 +1548,7 @@ function updateTimelineRows(items: TimelineItem[]): void {
   )) {
     action.disabled = queueCommandInFlight || clearPending ||
       (action.classList.contains("is-delete") &&
-        selectionBlocksTimelineMutation(openMenuItemId ?? undefined));
+        selectionBlocksTimelineMutation());
   }
   const voiceSelect = queueActionMenu.querySelector<HTMLSelectElement>(".queue-menu-voice");
   if (voiceSelect) {
@@ -1442,7 +1558,7 @@ function updateTimelineRows(items: TimelineItem[]): void {
 
 function setExpandedItem(id: string | null): void {
   expandedItemId = id;
-  const itemById = new Map(timelineItems(currentStatus).map((item) => [item.id, item]));
+  const itemById = new Map(visibleTimelineItems().map((item) => [item.id, item]));
   for (const row of queueList.querySelectorAll<HTMLElement>(".queue-item")) {
     const expanded = row.dataset.itemId === id;
     row.classList.toggle("is-expanded", expanded);
@@ -1461,7 +1577,7 @@ function setExpandedItem(id: string | null): void {
 
 async function playTimelineItem(item: TimelineItem, voice?: string): Promise<void> {
   if (
-    (item.kind === "current" && !voice) ||
+    (item.kind === "current" && !voice && currentStatus.state !== "stopped") ||
     commandPending ||
     clearPending ||
     pendingQueueMutation !== null ||
@@ -1472,6 +1588,7 @@ async function playTimelineItem(item: TimelineItem, voice?: string): Promise<voi
   failedChunkId = null;
   const selection: PendingSelection = {
     selectedItem: voice ? { ...item, voice } : item,
+    sourceItemId: item.id,
     state: "playing",
     acceptance: null,
     timeoutId: 0,
@@ -1588,7 +1705,7 @@ async function reconcileFailedTimelineMutation(
 }
 
 async function moveWaitingItem(id: string, beforeId: string | null): Promise<void> {
-  if (timelineMutationBlocked(id)) {
+  if (timelineMutationBlocked()) {
     return;
   }
   const reordered = moveQueueItemBefore(currentStatus.queue, id, beforeId);
@@ -1636,7 +1753,7 @@ async function moveWaitingItem(id: string, beforeId: string | null): Promise<voi
 }
 
 async function moveHistoryItem(id: string, beforeId: string | null): Promise<void> {
-  if (timelineMutationBlocked(id)) {
+  if (timelineMutationBlocked()) {
     return;
   }
   const reordered = moveQueueItemBefore(currentStatus.history, id, beforeId);
@@ -1683,7 +1800,7 @@ async function moveHistoryItem(id: string, beforeId: string | null): Promise<voi
 }
 
 async function archiveWaitingItem(id: string): Promise<void> {
-  if (timelineMutationBlocked(id)) {
+  if (timelineMutationBlocked()) {
     return;
   }
   const item = currentStatus.queue.find((queued) => queued.id === id);
@@ -1737,7 +1854,7 @@ async function archiveWaitingItem(id: string): Promise<void> {
 }
 
 async function deleteHistoryItem(id: string): Promise<void> {
-  if (timelineMutationBlocked(id)) {
+  if (timelineMutationBlocked()) {
     return;
   }
   if (!currentStatus.history.some((item) => item.id === id)) {
@@ -1855,25 +1972,38 @@ async function runPlaybackAction(): Promise<void> {
 
 playbackButton.addEventListener("click", () => void runPlaybackAction());
 
+playbackCopy.addEventListener("click", () => {
+  if (playbackCopy.dataset.expandable === "true") {
+    setPlaybackExpanded(!playbackExpanded);
+    render(currentStatus);
+  }
+});
+playbackCopy.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    playbackCopy.click();
+  }
+});
+
 clearQueueButton.addEventListener("click", async () => {
   if (
     commandPending ||
     clearPending ||
     pendingQueueMutation ||
     pendingSelection ||
-    currentStatus.queue_count === 0
+    activeTimelineIds(currentStatus).size === 0
   ) {
     return;
   }
   clearPending = true;
   clearFailed = false;
-  clearBaselineIds = new Set(currentStatus.queue.map(({ id }) => id));
+  clearBaselineIds = activeTimelineIds(currentStatus);
   commandStatus.textContent = "";
   clearTimeoutId = window.setTimeout(() => {
     clearTimeoutId = null;
     clearPending = false;
     clearFailed = true;
-    commandStatus.textContent = "Could not clear waiting speech. Try again.";
+    commandStatus.textContent = "Could not clear speech. Try again.";
     render(currentStatus);
   }, 10_000);
   render(currentStatus);
@@ -1897,7 +2027,7 @@ clearQueueButton.addEventListener("click", async () => {
     clearTimeoutId = null;
     clearPending = false;
     clearFailed = true;
-    commandStatus.textContent = "Could not clear waiting speech. Try again.";
+    commandStatus.textContent = "Could not clear speech. Try again.";
     render(currentStatus);
   }
 });
@@ -1932,6 +2062,7 @@ document.addEventListener("visibilitychange", () => {
     void refreshStatus();
   }
 });
+window.addEventListener("focus", () => void refreshStatus());
 
 queueList.addEventListener("pointerdown", (event) => {
   const target = event.target;
@@ -1982,6 +2113,11 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     cancelQueuePointerDrag();
     closeActionMenu(true);
+    if (playbackExpanded) {
+      setPlaybackExpanded(false);
+      playbackCopy.focus({ preventScroll: true });
+      render(currentStatus);
+    }
   }
 });
 document.addEventListener("pointerdown", (event) => {

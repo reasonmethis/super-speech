@@ -6,7 +6,7 @@ export type RuntimeState =
   | "setup_required"
   | "stopped";
 
-export const ENGINE_STATUS_VERSION = 9 as const;
+export const ENGINE_STATUS_VERSION = 10 as const;
 
 // Labels for the SHA-pinned Kokoro v1.0 voice archive bundled by prepare_resources
 export const VOICE_OPTIONS = [
@@ -50,7 +50,29 @@ export interface QueueItem {
 export interface CurrentItem extends QueueItem {
   piece: number;
   piece_count: number;
+  piece_start: number | null;
+  piece_end: number | null;
   elapsed_seconds: number;
+}
+
+export interface CurrentPieceSegments {
+  before: string;
+  current: string;
+  after: string;
+}
+
+export function currentPieceSegments(
+  item: CurrentItem,
+): CurrentPieceSegments | null {
+  if (item.piece_start === null || item.piece_end === null) {
+    return null;
+  }
+  const characters = Array.from(item.text);
+  return {
+    before: characters.slice(0, item.piece_start).join(""),
+    current: characters.slice(item.piece_start, item.piece_end).join(""),
+    after: characters.slice(item.piece_end).join(""),
+  };
 }
 
 export interface StartedItem {
@@ -265,11 +287,31 @@ function isCurrentItem(value: unknown): value is CurrentItem {
     return false;
   }
   const item = value as Partial<CurrentItem>;
-  return (
-    typeof item.piece === "number" &&
-    typeof item.piece_count === "number" &&
-    typeof item.elapsed_seconds === "number"
-  );
+  if (
+    !Number.isInteger(item.piece) ||
+    !Number.isInteger(item.piece_count) ||
+    item.piece_count === undefined ||
+    item.piece_count < 1 ||
+    item.piece === undefined ||
+    item.piece < 0 ||
+    item.piece > item.piece_count ||
+    typeof item.elapsed_seconds !== "number"
+  ) {
+    return false;
+  }
+  if (item.piece === 0) {
+    return item.piece_start === null && item.piece_end === null;
+  }
+  const start = item.piece_start;
+  const end = item.piece_end;
+  const length = Array.from(item.text ?? "").length;
+  return Number.isInteger(start) &&
+    Number.isInteger(end) &&
+    start !== null && start !== undefined &&
+    end !== null && end !== undefined &&
+    start >= 0 &&
+    end > start &&
+    end <= length;
 }
 
 function isStartedItem(value: unknown): value is StartedItem {
@@ -306,7 +348,7 @@ function hasStatusCore(value: Record<string, unknown>): boolean {
     current !== undefined &&
     Array.isArray(value.recent_starts) &&
     value.recent_starts.every(isStartedItem) &&
-    typeof value.queue_count === "number" &&
+    Number.isInteger(value.queue_count) &&
     queue !== null &&
     (current !== null || queue.length === 0) &&
     (current === null || !queue.some(({ id }) => id === current.id)) &&
@@ -319,13 +361,24 @@ function hasStatusCore(value: Record<string, unknown>): boolean {
 function isEngineStatusCurrent(
   value: Record<string, unknown>,
 ): value is Record<string, unknown> & EngineStatus {
-  return (
+  if (!(
     value.version === ENGINE_STATUS_VERSION &&
     hasStatusCore(value) &&
-    typeof value.history_count === "number" &&
     Array.isArray(value.history) &&
-    value.history.every(isQueueItem)
-  );
+    value.history.every(isQueueItem) &&
+    new Set(value.history.map(({ id }) => id)).size === value.history.length &&
+    Number.isInteger(value.history_count) &&
+    (value.history_count as number) >= value.history.length
+  )) {
+    return false;
+  }
+  const current = value.current as CurrentItem | null;
+  const queue = value.queue as QueueItem[];
+  const activeIds = new Set([
+    ...(current ? [current.id] : []),
+    ...queue.map(({ id }) => id),
+  ]);
+  return (value.history as QueueItem[]).every(({ id }) => !activeIds.has(id));
 }
 
 export function parseEngineStatus(value: unknown): EngineStatus | null {
@@ -378,20 +431,46 @@ function timelineItem(
 export function timelineItems(
   status: Pick<EngineStatus, "current" | "queue" | "history">,
 ): TimelineItem[] {
-  const activeIds = new Set([
-    ...(status.current ? [status.current.id] : []),
-    ...status.queue.map(({ id }) => id),
-  ]);
   const upcoming = status.queue.map((item, index) =>
     timelineItem(item, "upcoming", index + 1)
   );
   return [
     ...upcoming.reverse(),
     ...(status.current ? [timelineItem(status.current, "current", null)] : []),
-    ...status.history
-      .filter(({ id }) => !activeIds.has(id))
-      .map((item) => timelineItem(item, "history", null)),
+    ...status.history.map((item) => timelineItem(item, "history", null)),
   ];
+}
+
+export function activeTimelineIds(
+  status: Pick<EngineStatus, "current" | "queue">,
+): Set<string> {
+  return new Set([
+    ...(status.current ? [status.current.id] : []),
+    ...status.queue.map(({ id }) => id),
+  ]);
+}
+
+export function timelineItemsAtBoundary(
+  status: Pick<EngineStatus, "current" | "queue" | "history">,
+  boundary: QueueItem,
+  sourceId = boundary.id,
+): TimelineItem[] {
+  const items = timelineItems(status);
+  const boundaryIndex = items.findIndex(
+    ({ id }) => id === sourceId || id === boundary.id,
+  );
+  if (boundaryIndex < 0) {
+    return items;
+  }
+  return items.map((item, index) => {
+    if (index < boundaryIndex) {
+      return { ...item, kind: "upcoming", position: boundaryIndex - index };
+    }
+    if (index === boundaryIndex) {
+      return timelineItem(boundary, "current", null);
+    }
+    return { ...item, kind: "history", position: null };
+  });
 }
 
 export function moveQueueItemBefore<T extends { id: string }>(

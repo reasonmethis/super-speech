@@ -206,7 +206,7 @@ The CLI owns playback controls. Do not create or remove runtime files directly:
 | `archive <id>` | Move one waiting item into History |
 | `delete <id>` | Permanently remove one History item |
 | `skip` | Archive the current chunk and continue |
-| `clear` | Archive every queued chunk except the one currently playing |
+| `clear` | Stop and archive Current plus every Waiting chunk |
 | `stop` | Finish the current chunk and stop the engine |
 | `interrupt` | Stop playback and the engine immediately |
 | `status` | Print the current queue and playback status as JSON |

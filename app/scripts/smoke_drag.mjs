@@ -195,6 +195,59 @@ try {
     env: environment,
   });
   const page = await electronApp.firstWindow();
+  assert.equal(
+    await electronApp.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0]?.webContents.getLastWebPreferences().backgroundThrottling
+    ),
+    false,
+    "Background polling must stay active while another app has focus",
+  );
+  await waitFor(
+    () => {
+      const current = status().current;
+      return current?.piece_start !== null && current?.piece_end !== null;
+    },
+    "The engine did not publish the current internal speech piece",
+  );
+  const followed = status().current;
+  assert(followed, "Follow-along requires Current speech");
+  const followedText = Array.from(followed.text)
+    .slice(followed.piece_start, followed.piece_end)
+    .join("");
+  await waitFor(
+    async () => await page.locator("#current-text").textContent() === followedText,
+    "The compact playback card did not follow the current speech piece",
+  );
+  await page.locator("#playback-copy").click();
+  assert(
+    await page.locator("#playback-card").evaluate((card) => card.classList.contains("is-expanded")),
+    "The playback card did not enter its expanded state",
+  );
+  assert.equal(await page.locator("#current-text mark.current-piece").textContent(), followedText);
+  assert(
+    await page.locator(".queue-section").evaluate((section) => section.inert),
+    "Expanded playback must remove the covered timeline from keyboard navigation",
+  );
+  const expandedBounds = await page.locator("#playback-card").boundingBox();
+  const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+  assert(expandedBounds && viewport);
+  assert(expandedBounds.width >= viewport.width - 40);
+  assert(expandedBounds.height >= viewport.height - 90);
+  if (process.env.SUPER_SPEECH_SCREENSHOT) {
+    const screenshot = path.parse(process.env.SUPER_SPEECH_SCREENSHOT);
+    await page.screenshot({
+      path: path.join(screenshot.dir, `${screenshot.name}-follow-along${screenshot.ext}`),
+    });
+  }
+  await page.keyboard.press("Escape");
+  assert(
+    await page.locator("#playback-card").evaluate((card) => !card.classList.contains("is-expanded")),
+    "Escape did not collapse the playback card",
+  );
+  assert(
+    await page.locator(".queue-section").evaluate((section) => !section.inert),
+    "Collapsing playback did not restore timeline navigation",
+  );
   const settingsButton = page.locator("#settings-button");
   const settingsPanel = page.locator("#settings-panel");
   await settingsButton.click();
@@ -1145,6 +1198,89 @@ try {
   assert.equal(status().current?.text, currentBeforeVoiceChange.text);
   assert.notEqual(status().current?.id, currentBeforeVoiceChange.id);
   runEngine("pause");
+
+  const clearIds = [
+    ...(status().current ? [status().current.id] : []),
+    ...status().queue.map(({ id }) => id),
+  ];
+  assert(clearIds.length > 0, "Clear all requires active speech");
+  const clearButton = page.locator("#clear-queue-button");
+  await waitFor(() => clearButton.isVisible(), "Clear all was hidden for Current speech");
+  await clearButton.click();
+  await waitFor(
+    () => status().current === null && status().queue_count === 0 && status().state === "idle",
+    "Clear all did not archive Current and Waiting speech",
+    30_000,
+  );
+  assert(clearIds.every((id) => status().history.some((item) => item.id === id)));
+  await waitFor(
+    async () => await page.locator("body").getAttribute("data-state") === "idle",
+    "The renderer did not become Ready after Clear all",
+  );
+  assert.equal(await page.locator("#playback-copy").getAttribute("role"), null);
+  assert.equal(await page.locator("#playback-copy").getAttribute("aria-label"), null);
+
+  runEngine("pause");
+  runEngine(
+    "speak",
+    "Background follow-along starts while the hidden window is idle and must update before focus returns. The second sentence is deliberately long enough to become another internal speech piece for the progression check. The final sentence keeps silent playback active until the renderer displays the new highlighted range.",
+  );
+  await waitFor(
+    () => {
+      const current = status().current;
+      return status().state === "paused" && current?.piece_count >= 2 && current.piece >= 1;
+    },
+    "The hidden renderer fixture did not reach paused multi-piece speech",
+    30_000,
+  );
+  await waitFor(
+    async () => await page.locator("body").getAttribute("data-state") === "paused",
+    "The hidden renderer retained its stale Ready state",
+  );
+  const backgroundCurrent = status().current;
+  assert(backgroundCurrent, "Background follow-along requires Current speech");
+  const backgroundPiece = backgroundCurrent.piece;
+  const backgroundText = Array.from(backgroundCurrent.text)
+    .slice(backgroundCurrent.piece_start, backgroundCurrent.piece_end)
+    .join("");
+  assert.equal(await page.locator("#current-text").textContent(), backgroundText);
+  runEngine("resume");
+  await waitFor(
+    () => status().current?.id === backgroundCurrent.id &&
+      status().current.piece > backgroundPiece,
+    "The engine did not advance to another internal speech piece",
+    30_000,
+  );
+  const advanced = status().current;
+  assert(advanced, "Follow-along progression lost Current speech");
+  const advancedText = Array.from(advanced.text)
+    .slice(advanced.piece_start, advanced.piece_end)
+    .join("");
+  await waitFor(
+    async () => await page.locator("#current-text").textContent() === advancedText,
+    "The compact playback card did not follow the next internal speech piece",
+  );
+  await page.locator("#playback-copy").click();
+  assert(
+    await page.locator("#playback-card").evaluate((card) => card.classList.contains("is-expanded")),
+    "The progressing playback card did not expand",
+  );
+  runEngine("clear");
+  await waitFor(
+    () => status().current === null && status().queue_count === 0,
+    "The background follow-along fixture did not clear",
+  );
+  await waitFor(
+    async () => await page.locator("#playback-card").evaluate(
+      (card) => !card.classList.contains("is-expanded"),
+    ),
+    "The playback card did not collapse after Current ended",
+  );
+  assert.equal(
+    await page.evaluate(() => document.activeElement?.id),
+    "queue-list",
+    "Automatic collapse did not restore keyboard focus to Speechicles",
+  );
 
   console.log("Super Speech pointer drag and cancellation smoke test passed");
 } finally {

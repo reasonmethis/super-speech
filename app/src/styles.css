@@ -287,6 +287,15 @@ button {
   box-shadow: 0 24px 60px var(--card-shadow);
 }
 
+.playback-card.is-expanded {
+  position: fixed;
+  z-index: 20;
+  inset: 60px 16px 16px;
+  min-height: 0;
+  padding: 18px 28px 24px;
+  background: var(--page-bg);
+}
+
 .status-line {
   z-index: 2;
   display: flex;
@@ -467,6 +476,53 @@ body[data-state="loading"] .playback-icon,
   margin-top: 26px;
   padding-top: 20px;
   text-align: center;
+}
+
+.playback-copy.is-expandable {
+  border-radius: 10px;
+  cursor: zoom-in;
+}
+
+.playback-copy.is-expandable:focus-visible {
+  outline: 2px solid var(--accent-bright);
+  outline-offset: 5px;
+}
+
+.playback-card.is-expanded .playback-control {
+  width: 88px;
+  height: 88px;
+  flex-basis: 88px;
+  margin-top: 16px;
+  transform: scale(0.78);
+}
+
+.playback-card.is-expanded .playback-copy {
+  min-height: 0;
+  flex: 1;
+  margin-top: 16px;
+  padding: 18px 12px 8px;
+  overflow-y: auto;
+  cursor: zoom-out;
+  text-align: left;
+  user-select: text;
+}
+
+.playback-card.is-expanded .current-text {
+  display: block;
+  min-height: 0;
+  overflow: visible;
+  color: var(--text-secondary);
+  font-size: 16px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  -webkit-line-clamp: unset;
+}
+
+.current-piece {
+  padding: 2px 3px;
+  border-radius: 5px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
 }
 
 body[data-state="idle"] .playback-copy,

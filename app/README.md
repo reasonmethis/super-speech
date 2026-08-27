@@ -17,6 +17,12 @@ scrolling under user control while status polling preserves the existing row
 nodes. The renderer stores its Dark or Light appearance choice in the app's
 local profile; speech and queue state remain engine-owned.
 
+The compact playback card renders the engine's exact active synthesis piece.
+Clicking its text expands the card over the window, shows the complete Current
+text, and highlights that same piece. The renderer applies the engine's Unicode
+code-point offsets with code-point-aware string slicing, so non-BMP characters
+do not shift the highlight. Escape collapses the card.
+
 Current is the playback boundary rather than an audio-device event. Selecting a
 History row makes it Current in place and promotes every row above it to Waiting.
 The renderer rejects a runtime snapshot that contains Waiting without Current,
@@ -70,9 +76,11 @@ playback-control geometry. It also verifies that Current is initially visible,
 the three timeline sections remain explicit, and menus stay inside the visible
 speech viewport. Waiting and History menus both use `Play`, `Change voice`, and
 `Delete`; History deletion is permanent. The test then checks cancellation when the pointer loses its
-primary button, the window loses focus, or polling replaces the timeline. The
-test runs against a temporary runtime with silent audio and verifies the result
-in both the renderer and the engine queue.
+primary button, the window loses focus, or polling replaces the timeline. It
+also verifies compact and expanded follow-along text and that Clear all moves
+Current plus Waiting into History. The test runs against a temporary runtime
+with silent audio and verifies the result in both the renderer and the engine
+queue.
 
 Runtime state has one transport authority. Engine liveness gates playback. An
 explicit Play action starts in Playing immediately, while a later Pause remains

@@ -13,6 +13,8 @@ work session without having to reconstruct the product decisions.
 - [x] Immediate pause with sample-position-preserving resume
 - [x] Persistent pause state across engine restarts
 - [x] Current voice, current text, and scrollable queue with recent history
+- [x] Compact and expanded follow-along text with active sentence highlighting
+- [x] Recoverable Clear all for Current plus Waiting
 - [x] Electron architecture following Littlebird's packaged-helper precedent
 - [x] Native Windows installer build through Electron
 - [x] Self-contained Windows installer with the frozen engine, model, and voices

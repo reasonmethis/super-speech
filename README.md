@@ -40,7 +40,7 @@ Ask your agent:
 
 The agent invokes `super-speech-engine speak`, which starts the installed engine
 when needed and queues each speech item. One item stays one timeline row and one
-replay target even though the engine renders it as smaller sentence pieces. The
+replay target even though the engine renders it as smaller sentence-aligned pieces. The
 desktop window and tray menu
 control that same engine and can pause immediately at the current audio sample,
 then resume from that exact point. The window also shows the current voice,
@@ -55,8 +55,8 @@ the current row and every older waiting row below the selection move to History,
 while newer waiting rows keep their order. Selecting a History row moves the
 playback boundary to that row without moving any cards: that row becomes Current,
 and every row above it becomes Waiting. History includes
-completed, skipped, and cleared items. `Clear all` archives every waiting item
-without changing the current item or playback state. A row's three-dot menu
+completed, skipped, and cleared items. `Clear all` stops Current immediately and
+archives it together with every Waiting row. A row's three-dot menu
 uses `Play` for waiting and History rows. `Change voice` plays the same text
 with another bundled voice in the same timeline position. `Delete` removes a waiting item from
 the active queue and keeps it in History; deleting it again from History removes
@@ -71,6 +71,11 @@ Paused while that selection is prepared.
 The title-bar Settings button switches between persisted Dark and Light themes.
 The light theme uses a flat, pale gray window background so the white Super
 Speech icon remains distinct.
+
+The compact playback card follows the exact internal synthesis piece currently being
+spoken. Click the text area to expand it over the window, where the full speech
+item remains visible and the active piece is highlighted. Escape returns to the
+compact timeline.
 
 In desktop mode, mutable state stays in `~/.super-speech/`. The installed model
 and engine are read-only application resources. A headless installation keeps
