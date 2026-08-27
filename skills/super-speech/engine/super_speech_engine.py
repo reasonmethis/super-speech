@@ -50,6 +50,7 @@ import threading
 import time
 import urllib.request
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, NamedTuple, assert_never
 
@@ -1269,6 +1270,22 @@ def warmup(kokoro) -> None:
         log(f"warmup error: {e}")
 
 
+@dataclass(frozen=True)
+class PieceProgress:
+    piece: int
+    piece_count: int
+    piece_start: int | None
+    piece_end: int | None
+
+
+@dataclass(frozen=True)
+class CurrentProjection:
+    filename: str
+    text: str
+    voice: str
+    progress: PieceProgress
+
+
 class State:
     """Shared coordination between the main (consumer) and worker (producer)."""
 
@@ -1282,13 +1299,7 @@ class State:
         self.claims: dict[str, int] = {}
         self.next_claim_generation = 0
         # Active playback-boundary item, including synthesis and inter-item gaps
-        self.playing: str | None = None
-        self.current_text: str | None = None
-        self.current_voice: str | None = None
-        self.current_piece = 0
-        self.current_piece_count = 0
-        self.current_piece_start: int | None = None
-        self.current_piece_end: int | None = None
+        self.current: CurrentProjection | None = None
         self.read_failures: dict[str, float] = {}
         self.skip_name: str | None = None  # skipped chunk whose banked pieces must be dropped
         # Selected chunk stays prioritized until its first piece reaches playback
@@ -1297,6 +1308,77 @@ class State:
         self.saw_stop = False            # latched STOP - finish current chunk, then exit
         self.timeline_revision = timeline_revision
         self.timeline_fingerprint = timeline_fingerprint
+
+
+def _initial_piece_progress(text: str) -> PieceProgress:
+    return PieceProgress(0, len(split_text(text, SPLIT_CHARS)), None, None)
+
+
+def replace_current_projection(
+    st: State,
+    filename: str,
+    text: str,
+    voice: str,
+) -> None:
+    """Replace Current after an authoritative timeline transition."""
+    with st.lock:
+        st.current = CurrentProjection(
+            filename,
+            text,
+            voice,
+            _initial_piece_progress(text),
+        )
+
+
+def start_current_playback(
+    st: State,
+    filename: str,
+    text: str,
+    voice: str,
+) -> bool:
+    """Refresh Current for its first buffered piece without replacing another row."""
+    with st.lock:
+        if st.current is not None and st.current.filename != filename:
+            return False
+        st.current = CurrentProjection(
+            filename,
+            text,
+            voice,
+            _initial_piece_progress(text),
+        )
+        return True
+
+
+def update_current_piece(
+    st: State,
+    expected_filename: str,
+    piece: int,
+    piece_count: int,
+    piece_start: int | None,
+    piece_end: int | None,
+) -> bool:
+    """Advance progress only while the buffered piece still owns Current."""
+    with st.lock:
+        current = st.current
+        if current is None or current.filename != expected_filename:
+            return False
+        st.current = CurrentProjection(
+            current.filename,
+            current.text,
+            current.voice,
+            PieceProgress(piece, piece_count, piece_start, piece_end),
+        )
+        return True
+
+
+def clear_current_playback(st: State, expected_filename: str | None) -> bool:
+    """Clear Current only if it still matches the observed filename."""
+    with st.lock:
+        current_filename = st.current.filename if st.current is not None else None
+        if current_filename != expected_filename:
+            return False
+        st.current = None
+        return True
 
 
 def command_cancels_graceful_stop(command: Path, st: State) -> bool:
@@ -1575,7 +1657,7 @@ def history_snapshot() -> tuple[int, list[dict[str, object]]]:
 def activate_next_chunk(st: State) -> bool:
     """Give queued work one current item before publishing or synthesizing it."""
     with st.lock:
-        if st.playing or st.saw_stop or st.stop.is_set():
+        if st.current or st.saw_stop or st.stop.is_set():
             return False
         try:
             ordered = queue_files_in_order()
@@ -1595,17 +1677,11 @@ def activate_next_chunk(st: State) -> bool:
         if not ordered:
             return False
         current = ordered[0]
-        st.playing = current.name
-        st.current_voice = voice_from_name(current.name)
-        st.current_piece = 0
-        st.current_piece_start = None
-        st.current_piece_end = None
         try:
             text = current.read_text(encoding="utf-8").strip()
         except OSError:
             text = ""
-        st.current_text = text
-        st.current_piece_count = len(split_text(text, SPLIT_CHARS))
+        replace_current_projection(st, current.name, text, voice_from_name(current.name))
         return True
 
 
@@ -1698,14 +1774,8 @@ def publish_status(
 
     activate_next_chunk(st)
     with st.lock:
-        playing = st.playing
+        current_projection = st.current
         selected = st.selection_name
-        current_text = st.current_text
-        current_voice = st.current_voice
-        current_piece = st.current_piece
-        current_piece_count = st.current_piece_count
-        current_piece_start = st.current_piece_start
-        current_piece_end = st.current_piece_end
 
     try:
         ordered_queue = queue_files_in_order()
@@ -1715,7 +1785,10 @@ def publish_status(
     current_path = next(
         (
             path
-            for name in (selected, playing)
+            for name in (
+                selected,
+                current_projection.filename if current_projection else None,
+            )
             if name
             for path in ordered_queue
             if path.name == name
@@ -1739,25 +1812,29 @@ def publish_status(
 
     current = None
     if current_path is not None:
-        is_playing_path = current_path.name == playing
+        is_playing_path = (
+            current_projection is not None
+            and current_path.name == current_projection.filename
+        )
         if not is_playing_path:
             try:
                 current_text = current_path.read_text(encoding="utf-8").strip()
             except OSError:
                 current_text = ""
             current_voice = voice_from_name(current_path.name)
-            current_piece = 0
-            current_piece_count = len(split_text(current_text, SPLIT_CHARS))
-            current_piece_start = None
-            current_piece_end = None
+            progress = _initial_piece_progress(current_text)
+        else:
+            current_text = current_projection.text
+            current_voice = current_projection.voice
+            progress = current_projection.progress
         current = {
             "id": public_id_for_path(current_path),
             "text": current_text or "",
             "voice": current_voice or voice_from_name(current_path.name),
-            "piece": current_piece,
-            "piece_count": current_piece_count,
-            "piece_start": current_piece_start,
-            "piece_end": current_piece_end,
+            "piece": progress.piece,
+            "piece_count": progress.piece_count,
+            "piece_start": progress.piece_start,
+            "piece_end": progress.piece_end,
             "elapsed_seconds": (
                 playback.position / sample_rate
                 if is_playing_path and playback is not None and sample_rate
@@ -2033,7 +2110,8 @@ def _discard_buffer(buf: "queue.Queue") -> int:
 def _reset_waiting_buffer(buf: "queue.Queue", st: State) -> int:
     """Drop rendered waiting audio while preserving every current-chunk piece."""
     with st.lock:
-        current_generation = st.claims.get(st.playing) if st.playing else None
+        current_name = st.current.filename if st.current is not None else None
+        current_generation = st.claims.get(current_name) if current_name else None
         kept = []
         discarded = 0
         while True:
@@ -2041,7 +2119,7 @@ def _reset_waiting_buffer(buf: "queue.Queue", st: State) -> int:
                 entry = buf.get_nowait()
             except queue.Empty:
                 break
-            if st.playing and entry[0].name == st.playing:
+            if current_name and entry[0].name == current_name:
                 kept.append(entry)
             else:
                 discarded += 1
@@ -2053,8 +2131,8 @@ def _reset_waiting_buffer(buf: "queue.Queue", st: State) -> int:
             for name, generation in st.claims.items()
             if name in kept_names
         }
-        if st.playing and current_generation is not None:
-            st.claims[st.playing] = current_generation
+        if current_name and current_generation is not None:
+            st.claims[current_name] = current_generation
         if st.selection_name and not (QUEUE / st.selection_name).exists():
             st.selection_name = None
         return discarded
@@ -2099,7 +2177,7 @@ def _apply_play_mutation_locked(
 
     # Discard audio rendered for the old order but keep source files queued for a clean restart
     with st.lock:
-        playing = st.playing
+        playing = st.current.filename if st.current is not None else None
     if (
         playing
         and public_id_for_path(QUEUE / playing) == chunk_id
@@ -2184,13 +2262,12 @@ def _apply_play_mutation_locked(
     with st.lock:
         discarded = _discard_buffer(buf)
         st.claims.clear()
-        st.playing = target.name
-        st.current_text = selected_text
-        st.current_voice = voice_from_name(target.name)
-        st.current_piece = 0
-        st.current_piece_count = len(split_text(selected_text, SPLIT_CHARS))
-        st.current_piece_start = None
-        st.current_piece_end = None
+        replace_current_projection(
+            st,
+            target.name,
+            selected_text,
+            voice_from_name(target.name),
+        )
         st.selection_name = target.name
         st.skip_name = None
         st.saw_stop = False
@@ -2245,7 +2322,8 @@ def do_clear(buf: "queue.Queue", st: State) -> bool:
         st.selection_name = None
         st.skip_name = None
         st.saw_stop = False
-        clear_current_playback(st)
+        current_name = st.current.filename if st.current is not None else None
+        clear_current_playback(st, current_name)
         try:
             PAUSE.unlink(missing_ok=True)
             STOP.unlink(missing_ok=True)
@@ -2267,7 +2345,9 @@ def apply_queue_command(
     if action == "delete":
         with st.lock:
             playing_id = (
-                public_id_for_path(QUEUE / st.playing) if st.playing else None
+                public_id_for_path(QUEUE / st.current.filename)
+                if st.current is not None
+                else None
             )
         if _find_chunk(QUEUE, chunk_id) is not None or playing_id == chunk_id:
             raise ValueError(f"history chunk is active: {chunk_id}")
@@ -2332,7 +2412,7 @@ def apply_queue_command(
         None,
     )
     with st.lock:
-        playing = st.playing
+        playing = st.current.filename if st.current is not None else None
         selected = st.selection_name
     if source is None or source.name == playing:
         raise ValueError(f"waiting chunk not found: {chunk_id}")
@@ -2594,8 +2674,7 @@ def release_preplay_chunk(st: State, name: str, generation: int) -> None:
         st.claims.pop(name)
         if st.selection_name == name:
             st.selection_name = None
-        if st.playing == name:
-            clear_current_playback(st)
+        clear_current_playback(st, name)
 
 
 def _record_claim(st: State, path: Path) -> tuple[Path, int]:
@@ -2613,8 +2692,9 @@ def claim_next_queued_chunk_with_generation(st: State) -> tuple[Path, int] | Non
             log(str(error))
             return None
         if st.saw_stop:
+            current_name = st.current.filename if st.current is not None else None
             active = next(
-                (path for path in candidates if path.name == st.playing),
+                (path for path in candidates if path.name == current_name),
                 None,
             )
             if active is not None and active.name not in st.claims:
@@ -2632,9 +2712,9 @@ def claim_next_queued_chunk_with_generation(st: State) -> tuple[Path, int] | Non
                     return _record_claim(st, selected)
             else:
                 st.selection_name = None
-        if st.playing:
+        if st.current is not None:
             active = next(
-                (path for path in candidates if path.name == st.playing),
+                (path for path in candidates if path.name == st.current.filename),
                 None,
             )
             if active is not None and active.name not in st.claims:
@@ -2677,8 +2757,7 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
                 started = st.read_failures.setdefault(nxt.name, time.monotonic())
                 deadline = 0.5 if st.saw_stop else 5.0
                 if time.monotonic() - started >= deadline:
-                    if st.playing == nxt.name:
-                        clear_current_playback(st)
+                    clear_current_playback(st, nxt.name)
                     st.stop.set()
                     log(f"stopping after a persistent read failure for {nxt.name}")
             time.sleep(0.05)
@@ -2778,7 +2857,7 @@ def gap_wait(seconds: float, buf: "queue.Queue", st: State) -> str | None:
             reject_pending_requests("engine interrupted before command was applied", st)
             return "interrupt"
         with st.lock:
-            held_chunk_name = st.playing
+            held_chunk_name = st.current.filename if st.current is not None else None
         mutation_effect = process_mutation_requests(buf, st, held_chunk_name)
         if mutation_effect in {"select", "clear"}:
             return mutation_effect
@@ -2926,22 +3005,10 @@ def finish_chunk_playback(path: Path, outcome: str, last: bool, st: State) -> bo
             log(
                 f"could not archive {path.name}; stopping so it can be retried"
             )
-        if st.playing == path.name:
-            clear_current_playback(st)
+        clear_current_playback(st, path.name)
         if outcome == "skip":
             st.skip_name = path.name
     return True
-
-
-def clear_current_playback(st: State) -> None:
-    """Clear the transient current-item projection while holding st.lock."""
-    st.playing = None
-    st.current_text = None
-    st.current_voice = None
-    st.current_piece = 0
-    st.current_piece_count = 0
-    st.current_piece_start = None
-    st.current_piece_end = None
 
 
 def settle_stale_mutation_claims(st: State) -> None:
@@ -3039,7 +3106,7 @@ def run_engine_loop(
                 log("engine stopping after a storage failure")
                 return
             with st.lock:
-                playing = st.playing
+                playing = st.current.filename if st.current is not None else None
             if not playing and (st.saw_stop or consume_control(STOP)):
                 reject_pending_requests(
                     "engine stopped before command was applied", st
@@ -3055,7 +3122,7 @@ def run_engine_loop(
                 return
             if consume_control(SKIP):
                 with st.lock:
-                    current_name = st.playing
+                    current_name = st.current.filename if st.current is not None else None
                 current_path = QUEUE / current_name if current_name else None
                 if current_path is not None and current_path.exists():
                     finish_chunk_playback(current_path, "skip", True, st)
@@ -3134,17 +3201,22 @@ def run_engine_loop(
             session_first = False
 
             if first:
+                if not start_current_playback(st, path.name, text, voice):
+                    invalidate_claim(st, path.name)
+                    continue
                 with st.lock:
-                    st.playing = path.name
-                    st.current_text = text
-                    st.current_voice = voice
-                    if selected:
+                    if selected and st.selection_name == path.name:
                         st.selection_name = None
-            with st.lock:
-                st.current_piece = piece
-                st.current_piece_count = piece_count
-                st.current_piece_start = piece_start
-                st.current_piece_end = piece_end
+            if not update_current_piece(
+                st,
+                path.name,
+                piece,
+                piece_count,
+                piece_start,
+                piece_end,
+            ):
+                invalidate_claim(st, path.name)
+                continue
             if first:
                 log(f"play {path.name}")
             publish_status("playing", st, force=True)
@@ -3174,7 +3246,8 @@ def run_engine_loop(
     finally:
         st.stop.set()
         with st.lock:
-            clear_current_playback(st)
+            current_name = st.current.filename if st.current is not None else None
+            clear_current_playback(st, current_name)
         publish_status("stopped", st, force=True)
         try:
             HEARTBEAT.unlink()

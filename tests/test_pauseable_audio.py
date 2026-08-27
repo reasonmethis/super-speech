@@ -64,6 +64,37 @@ def configure_runtime(engine, tmp_path: Path) -> None:
     engine.SPOKEN.mkdir(exist_ok=True)
 
 
+def set_current(
+    engine,
+    state,
+    path: Path,
+    *,
+    text: str | None = None,
+    voice: str | None = None,
+    piece: int = 0,
+    piece_count: int | None = None,
+    piece_start: int | None = None,
+    piece_end: int | None = None,
+) -> None:
+    current_text = path.read_text(encoding="utf-8") if text is None else text
+    engine.replace_current_projection(
+        state,
+        path.name,
+        current_text,
+        voice or engine.voice_from_name(path.name),
+    )
+    current = state.current
+    assert current is not None
+    assert engine.update_current_piece(
+        state,
+        path.name,
+        piece,
+        current.progress.piece_count if piece_count is None else piece_count,
+        piece_start,
+        piece_end,
+    )
+
+
 def speechicle_id(engine, path: Path) -> str:
     engine.ensure_identity_catalog()
     return engine.public_id_for_path(path)
@@ -155,11 +186,13 @@ def test_status_exposes_pause_current_chunk_and_queue(tmp_path: Path) -> None:
         )
 
     state = engine.State()
-    state.playing = "001-af_heart-say.txt"
-    state.current_text = "Current words"
-    state.current_voice = "af_heart"
-    state.current_piece = 1
-    state.current_piece_count = 2
+    set_current(
+        engine,
+        state,
+        engine.QUEUE / "001-af_heart-say.txt",
+        piece=1,
+        piece_count=2,
+    )
 
     engine.publish_status("playing", state, force=True)
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
@@ -185,11 +218,7 @@ def test_status_stays_playing_while_the_current_item_waits_for_its_next_piece(
     current = engine.QUEUE / "001-af_heart-say.txt"
     current.write_text("Two sentences. Still one speech item.", encoding="utf-8")
     state = engine.State()
-    state.playing = current.name
-    state.current_text = current.read_text(encoding="utf-8")
-    state.current_voice = "af_heart"
-    state.current_piece = 1
-    state.current_piece_count = 2
+    set_current(engine, state, current, piece=1, piece_count=2)
 
     engine.publish_status("idle", state, force=True)
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
@@ -206,7 +235,7 @@ def test_audio_stream_failure_propagates_before_playback(
     path = engine.QUEUE / "001-af_heart-say.txt"
     path.write_text("Speech", encoding="utf-8")
     state = engine.State()
-    state.playing = path.name
+    set_current(engine, state, path)
 
     def fail_output_stream(**_kwargs):
         raise RuntimeError("no audio device")
@@ -610,7 +639,7 @@ def test_moving_a_waiting_chunk_resets_banked_audio_but_keeps_current(
     buffered.put((second, "stale second"))
     buffered.put((third, "stale third"))
     state = engine.State()
-    state.playing = current.name
+    set_current(engine, state, current)
     generations: dict[str, int] = {}
     for path in (current, second, third):
         _, generations[path.name] = engine._record_claim(state, path)
@@ -650,7 +679,7 @@ def test_archiving_one_waiting_chunk_preserves_current_and_remaining_queue(
     buffered.put((archived, "stale archived"))
     buffered.put((remaining, "stale remaining"))
     state = engine.State()
-    state.playing = current.name
+    set_current(engine, state, current)
     for path in (current, archived, remaining):
         engine._record_claim(state, path)
 
@@ -991,7 +1020,7 @@ def test_queue_request_rejects_the_current_chunk(
     current = engine.QUEUE / "001-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     state = engine.State()
-    state.playing = current.name
+    set_current(engine, state, current)
 
     request_id = request_mutation(
         engine, "archive", id=speechicle_id(engine, current)
@@ -1372,7 +1401,7 @@ def test_playing_current_chunk_resumes_without_reordering(
     buffered: queue.Queue = queue.Queue()
     buffered.put("banked piece")
     state = engine.State()
-    state.playing = current.name
+    set_current(engine, state, current)
     engine._record_claim(state, current)
     state.saw_stop = True
 
@@ -1407,7 +1436,7 @@ def test_selecting_upcoming_chunk_archives_everything_older(
     buffered: queue.Queue = queue.Queue()
     buffered.put("banked piece")
     state = engine.State()
-    state.playing = current.name
+    set_current(engine, state, current)
     for path in (current, older, selected):
         engine._record_claim(state, path)
 
@@ -1425,7 +1454,7 @@ def test_selecting_upcoming_chunk_archives_everything_older(
     assert buffered.empty()
 
     assert engine.finish_chunk_playback(current, "select", False, state)
-    assert state.playing == selected.name
+    assert state.current is not None and state.current.filename == selected.name
     assert engine.claim_next_queued_chunk(state) == selected
     assert engine.claim_next_queued_chunk(state) == newer
     assert engine.claim_next_queued_chunk(state) is None
@@ -2107,7 +2136,7 @@ def test_changing_the_current_voice_replaces_it_without_changing_text(
     current = engine.QUEUE / "001-af_heart-g600-say.txt"
     current.write_text("Current words", encoding="utf-8")
     state = engine.State()
-    state.playing = current.name
+    set_current(engine, state, current)
     engine._record_claim(state, current)
 
     original_id = speechicle_id(engine, current)
@@ -2269,7 +2298,7 @@ def test_idle_selection_replaces_worker_claims_and_becomes_next(
     )
     assert engine.process_mutation_requests(queue.Queue(), state) == "select"
 
-    assert state.playing == selected.name
+    assert state.current is not None and state.current.filename == selected.name
     assert state.claims == {}
     assert engine.claim_next_queued_chunk(state) == selected
 
@@ -2286,7 +2315,7 @@ def test_selecting_a_prefetched_item_restarts_synthesis_at_piece_one(
     current.write_text("Current", encoding="utf-8")
     selected.write_text("First sentence. Second sentence.", encoding="utf-8")
     state = engine.State()
-    state.playing = current.name
+    set_current(engine, state, current)
     engine._record_claim(state, current)
     entered_second_piece = threading.Event()
     release_second_piece = threading.Event()
@@ -2385,7 +2414,7 @@ def test_queue_mutation_invalidates_the_piece_held_before_playback(
     for path in (current, waiting, moved):
         path.write_text(path.stem, encoding="utf-8")
     state = engine.State()
-    state.playing = current.name
+    set_current(engine, state, current)
     first_claim = engine.claim_next_queued_chunk_with_generation(state)
     assert first_claim is not None
     held_path, old_generation = first_claim
@@ -2419,7 +2448,7 @@ def test_stale_worker_release_preserves_a_replacement_current_claim(
     current = engine.QUEUE / "001-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     state = engine.State()
-    state.playing = current.name
+    set_current(engine, state, current)
     state.selection_name = current.name
     _, old_generation = engine._record_claim(state, current)
     engine.invalidate_claim(state, current.name)
@@ -2428,8 +2457,40 @@ def test_stale_worker_release_preserves_a_replacement_current_claim(
     engine.release_preplay_chunk(state, current.name, old_generation)
 
     assert state.claims == {current.name: replacement_generation}
-    assert state.playing == current.name
+    assert state.current is not None and state.current.filename == current.name
     assert state.selection_name == current.name
+
+
+def test_piece_transition_for_another_filename_is_ignored(tmp_path: Path) -> None:
+    engine = load_engine("super_speech_engine_foreign_piece_progress")
+    configure_runtime(engine, tmp_path)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    other = engine.QUEUE / "002-bm_fable-say.txt"
+    current.write_text("Current", encoding="utf-8")
+    other.write_text("Other", encoding="utf-8")
+    state = engine.State()
+    set_current(engine, state, current)
+    original = state.current
+
+    assert not engine.update_current_piece(state, other.name, 1, 1, 0, 5)
+    assert state.current is original
+
+
+def test_stale_buffered_completion_cannot_clear_replacement_current(
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_stale_current_completion")
+    configure_runtime(engine, tmp_path)
+    stale = engine.QUEUE / "001-af_heart-say.txt"
+    replacement = engine.QUEUE / "002-bm_fable-say.txt"
+    stale.write_text("Stale", encoding="utf-8")
+    replacement.write_text("Replacement", encoding="utf-8")
+    state = engine.State()
+    set_current(engine, state, replacement)
+    replacement_projection = state.current
+
+    assert engine.finish_chunk_playback(stale, "select", True, state)
+    assert state.current is replacement_projection
 
 
 def test_queue_mutation_keeps_an_active_playback_claim_without_buffered_audio(
@@ -2444,7 +2505,7 @@ def test_queue_mutation_keeps_an_active_playback_claim_without_buffered_audio(
     for path in (current, waiting, moved):
         path.write_text(path.stem, encoding="utf-8")
     state = engine.State()
-    state.playing = current.name
+    set_current(engine, state, current)
     claim = engine.claim_next_queued_chunk_with_generation(state)
     assert claim is not None
     current_path, generation = claim
@@ -2474,7 +2535,7 @@ def test_queue_mutation_invalidates_the_piece_held_during_a_gap(
     for path in (current, waiting, moved):
         path.write_text(path.stem, encoding="utf-8")
     state = engine.State()
-    state.playing = current.name
+    set_current(engine, state, current)
     first_claim = engine.claim_next_queued_chunk_with_generation(state)
     assert first_claim is not None
     held_path, old_generation = first_claim
@@ -2506,14 +2567,14 @@ def test_failed_archive_keeps_chunk_claimed_instead_of_repeating(
     current = engine.QUEUE / "001-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     state = engine.State()
-    state.playing = current.name
+    set_current(engine, state, current)
     engine._record_claim(state, current)
     monkeypatch.setattr(engine, "archive", lambda path: False)
     monkeypatch.setattr(engine, "archive_failed", lambda path: False)
 
     assert engine.finish_chunk_playback(current, outcome, True, state)
 
-    assert state.playing is None
+    assert state.current is None
     assert set(state.claims) == {current.name}
     assert state.stop.is_set()
     assert engine.claim_next_queued_chunk(state) is None
@@ -2550,7 +2611,7 @@ def test_partial_clear_failure_rolls_back_the_visible_timeline(
     ordered = [current, first_waiting, locked_waiting]
     engine.save_queue_order(ordered)
     state = engine.State()
-    state.playing = current.name
+    set_current(engine, state, current)
     real_replace = engine.os.replace
 
     def fail_second(source, destination) -> None:
@@ -2599,7 +2660,7 @@ def test_clear_preserves_the_visible_order_of_waiting_speech(tmp_path: Path) -> 
         path.write_text(path.stem, encoding="utf-8")
     engine.save_queue_order([current, first_waiting, second_waiting])
     state = engine.State()
-    state.playing = current.name
+    set_current(engine, state, current)
 
     engine.do_clear(queue.Queue(), state)
 
@@ -2619,12 +2680,12 @@ def test_clear_does_not_manufacture_a_claim_for_a_preplay_current(tmp_path: Path
     current.write_text("Current", encoding="utf-8")
     waiting.write_text("Waiting", encoding="utf-8")
     state = engine.State()
-    state.playing = current.name
+    set_current(engine, state, current)
 
     engine.do_clear(queue.Queue(), state)
 
     assert state.claims == {}
-    assert state.playing is None
+    assert state.current is None
     assert engine.claim_next_queued_chunk(state) is None
     assert not current.exists()
     assert not waiting.exists()
@@ -2721,7 +2782,7 @@ def test_invalidated_synthesis_failure_cannot_stop_the_selected_boundary(
     finish_test = threading.Event()
     calls = 0
     state = engine.State()
-    state.playing = old.name
+    set_current(engine, state, old)
 
     class FailingKokoro:
         @staticmethod
@@ -2744,7 +2805,12 @@ def test_invalidated_synthesis_failure_cannot_stop_the_selected_boundary(
     assert entered_synthesis.wait(1)
     with state.lock:
         state.claims.clear()
-        state.playing = selected.name
+        engine.replace_current_projection(
+            state,
+            selected.name,
+            selected.read_text(encoding="utf-8"),
+            engine.voice_from_name(selected.name),
+        )
         state.selection_name = selected.name
     assert engine.archive(old)
     release_synthesis.set()
@@ -2766,7 +2832,7 @@ def test_clear_wins_a_synthesis_failure_after_the_first_claim_check(
     current = engine.QUEUE / "001-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     state = engine.State()
-    state.playing = current.name
+    set_current(engine, state, current)
     entered_error_log = threading.Event()
     release_error_log = threading.Event()
     original_log = engine.log
@@ -2813,7 +2879,7 @@ def test_preplay_terminal_item_releases_the_current_boundary(
     waiting = engine.QUEUE / "001-af_heart-say.txt"
     waiting.write_text("" if failure == "empty" else "Waiting", encoding="utf-8")
     state = engine.State()
-    state.playing = waiting.name
+    set_current(engine, state, waiting)
 
     class Kokoro:
         @staticmethod
@@ -2834,7 +2900,7 @@ def test_preplay_terminal_item_releases_the_current_boundary(
     worker.join(timeout=1)
 
     assert not worker.is_alive()
-    assert state.playing is None
+    assert state.current is None
     assert state.claims == {}
 
 
@@ -2846,7 +2912,7 @@ def test_transient_current_read_failure_remains_claimable_during_stop(
     waiting = engine.QUEUE / "001-af_heart-say.txt"
     waiting.write_text("Waiting", encoding="utf-8")
     state = engine.State()
-    state.playing = waiting.name
+    set_current(engine, state, waiting)
     engine._record_claim(state, waiting)
     with state.lock:
         state.claims.pop(waiting.name, None)
@@ -2864,7 +2930,7 @@ def test_persistent_current_read_failure_cannot_hang_graceful_stop(
     waiting = engine.QUEUE / "001-af_heart-say.txt"
     waiting.write_text("Waiting", encoding="utf-8")
     state = engine.State()
-    state.playing = waiting.name
+    set_current(engine, state, waiting)
     state.saw_stop = True
     original_read_text = Path.read_text
 
@@ -2883,7 +2949,7 @@ def test_persistent_current_read_failure_cannot_hang_graceful_stop(
 
     assert not worker.is_alive()
     assert state.stop.is_set()
-    assert state.playing is None
+    assert state.current is None
     assert waiting.exists()
 
 
@@ -2927,7 +2993,7 @@ def test_clear_and_stop_follow_publication_order_during_a_gap(
     current = engine.QUEUE / "001-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     state = engine.State()
-    state.playing = current.name
+    set_current(engine, state, current)
     request_id = request_mutation(engine, "clear")
     request = next(engine.BASE.glob(f"MUTATION.*.{request_id}.json"))
     engine.STOP.touch()
@@ -2941,7 +3007,7 @@ def test_clear_and_stop_follow_publication_order_during_a_gap(
     else:
         assert not current.exists()
         assert (engine.SPOKEN / current.name).exists()
-        assert state.playing is None
+        assert state.current is None
 
 
 def test_new_speech_cancels_a_pending_graceful_stop(tmp_path: Path) -> None:
@@ -2970,7 +3036,7 @@ def test_play_and_stop_follow_publication_order(
     current = engine.QUEUE / "001-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     state = engine.State()
-    state.playing = current.name
+    set_current(engine, state, current)
     state.saw_stop = True
     request_id = request_mutation(
         engine, "play", id=speechicle_id(engine, current), voice=None
@@ -3164,7 +3230,7 @@ def test_clear_cannot_race_a_worker_refilling_a_full_buffer(tmp_path: Path) -> N
     current.write_text("Current", encoding="utf-8")
     queued.write_text("Queued", encoding="utf-8")
     state = engine.State()
-    state.playing = current.name
+    set_current(engine, state, current)
     engine._record_claim(state, current)
 
     class ObservedFullBuffer:
@@ -3779,10 +3845,7 @@ def test_clear_archives_a_paused_current_and_publishes_idle(tmp_path: Path) -> N
     current = engine.QUEUE / "001-af_heart-say.txt"
     current.write_text("Paused current", encoding="utf-8")
     state = engine.State()
-    state.playing = current.name
-    state.current_text = "Paused current"
-    state.current_voice = "af_heart"
-    state.current_piece_count = 1
+    set_current(engine, state, current, piece_count=1)
     engine.PAUSE.touch()
 
     assert engine.do_clear(queue.Queue(), state)
@@ -4053,7 +4116,7 @@ def test_later_waiting_move_does_not_hide_an_earlier_playback_selection(
     for path in (current, selected, waiting):
         path.write_text(path.stem, encoding="utf-8")
     state = engine.State()
-    state.playing = current.name
+    set_current(engine, state, current)
     request_mutation(
         engine, "play", id=speechicle_id(engine, selected), voice=None
     )
@@ -4079,7 +4142,7 @@ def test_every_mutation_outcome_contains_an_authoritative_snapshot(
     current.write_text("Current", encoding="utf-8")
     waiting.write_text("Waiting", encoding="utf-8")
     state = engine.State()
-    state.playing = current.name
+    set_current(engine, state, current)
 
     committed_request = request_mutation(
         engine,
@@ -4133,7 +4196,16 @@ def test_timeline_revision_changes_only_with_the_timeline_and_survives_restart(
     assert initial is not None
     assert initial["timeline_revision"] == 0
 
-    state.current_piece = 2
+    assert state.current is not None
+    progress = state.current.progress
+    assert engine.update_current_piece(
+        state,
+        state.current.filename,
+        2,
+        progress.piece_count,
+        progress.piece_start,
+        progress.piece_end,
+    )
     engine.PAUSE.touch()
     progress = engine.publish_status("paused", state, force=True)
     assert progress is not None
