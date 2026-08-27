@@ -2100,6 +2100,56 @@ def test_idle_selection_replaces_worker_claims_and_becomes_next(
     assert engine.claim_next_queued_chunk(state) == selected
 
 
+def test_selecting_a_prefetched_item_restarts_synthesis_at_piece_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_play_prefetched_piece")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    monkeypatch.setattr(engine, "SPLIT_CHARS", 16)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    selected = engine.QUEUE / "002-bm_fable-say.txt"
+    current.write_text("Current", encoding="utf-8")
+    selected.write_text("First sentence. Second sentence.", encoding="utf-8")
+    state = engine.State()
+    state.playing = current.name
+    state.claimed.add(current.name)
+    entered_second_piece = threading.Event()
+    release_second_piece = threading.Event()
+    synthesis_calls: list[str] = []
+
+    class BlockingKokoro:
+        @staticmethod
+        def create(text: str, **_kwargs):
+            synthesis_calls.append(text)
+            if synthesis_calls == ["First sentence.", "Second sentence."]:
+                entered_second_piece.set()
+                assert release_second_piece.wait(1)
+            return np.ones(2, dtype=np.float32), 2
+
+    buffered: queue.Queue = queue.Queue()
+    worker = threading.Thread(
+        target=engine.synth_worker,
+        args=(BlockingKokoro(), buffered, state),
+    )
+    worker.start()
+    assert entered_second_piece.wait(1)
+
+    engine.request_play(selected.stem)
+    assert engine.process_play_request(buffered, state) == "select"
+    assert buffered.empty()
+    release_second_piece.set()
+
+    restarted = buffered.get(timeout=1)
+    state.stop.set()
+    worker.join(1)
+
+    assert not worker.is_alive()
+    assert restarted[0] == selected
+    assert restarted[5] == 1
+    assert restarted[7] == "First sentence. Second sentence."
+
+
 def test_selection_interrupts_an_inter_chunk_gap(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

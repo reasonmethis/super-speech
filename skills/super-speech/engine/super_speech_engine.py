@@ -2376,7 +2376,7 @@ def reject_pending_requests(reason: str) -> None:
 
 def _claimed(st: State, name: str) -> bool:
     with st.lock:
-        return (name in st.claimed or name == st.playing) and st.skip_name != name
+        return name in st.claimed and st.skip_name != name
 
 
 def release_preplay_chunk(st: State, name: str) -> None:
@@ -2521,10 +2521,7 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
             )
             while not st.stop.is_set():
                 with st.lock:
-                    if (
-                        (nxt.name not in st.claimed and nxt.name != st.playing)
-                        or nxt.name == st.skip_name
-                    ):
+                    if nxt.name not in st.claimed or nxt.name == st.skip_name:
                         break
                     try:
                         buf.put_nowait(entry)
