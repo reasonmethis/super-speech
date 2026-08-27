@@ -195,6 +195,31 @@ try {
     env: environment,
   });
   const page = await electronApp.firstWindow();
+  const maximizeButton = page.locator("#maximize-button");
+  await maximizeButton.click();
+  await waitFor(
+    async () => await maximizeButton.getAttribute("aria-label") === "Restore",
+    "The maximize button did not enter its Restore state",
+  );
+  assert.equal(
+    await electronApp.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0]?.isMaximized()
+    ),
+    true,
+    "The maximize button must maximize the window",
+  );
+  await maximizeButton.click();
+  await waitFor(
+    async () => await maximizeButton.getAttribute("aria-label") === "Maximize",
+    "The maximize button did not return to its Maximize state",
+  );
+  assert.equal(
+    await electronApp.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0]?.isMaximized()
+    ),
+    false,
+    "The maximize button must restore the window",
+  );
   await page.locator(".queue-item.is-upcoming").first().waitFor();
   await waitFor(
     async () => await page.locator(".queue-item.is-upcoming").count() === 2,

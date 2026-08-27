@@ -407,6 +407,8 @@ export interface DesktopApi {
   clearQueue(): Promise<void>;
   openSetup(): Promise<void>;
   minimize(): Promise<void>;
+  toggleMaximize(): Promise<void>;
+  onMaximizedChange(listener: (maximized: boolean) => void): void;
   hide(): Promise<void>;
 }
 
@@ -430,6 +432,8 @@ export const IPC_CHANNELS = {
   clearQueue: "runtime:clear-queue",
   openSetup: "app:open-setup",
   minimize: "window:minimize",
+  toggleMaximize: "window:toggle-maximize",
+  maximizedChanged: "window:maximized-changed",
   hide: "window:hide",
 } as const;
 

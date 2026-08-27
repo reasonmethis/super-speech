@@ -1871,6 +1871,18 @@ requiredElement<HTMLButtonElement>("minimize-button").addEventListener("click", 
   void desktopApi?.minimize();
 });
 
+const maximizeButton = requiredElement<HTMLButtonElement>("maximize-button");
+function renderMaximizedState(maximized: boolean): void {
+  document.body.classList.toggle("is-maximized", maximized);
+  maximizeButton.classList.toggle("is-maximized", maximized);
+  maximizeButton.setAttribute("aria-label", maximized ? "Restore" : "Maximize");
+}
+
+maximizeButton.addEventListener("click", () => {
+  void desktopApi?.toggleMaximize();
+});
+desktopApi?.onMaximizedChange(renderMaximizedState);
+
 requiredElement<HTMLButtonElement>("hide-button").addEventListener("click", () => {
   void desktopApi?.hide();
 });

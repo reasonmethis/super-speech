@@ -98,6 +98,10 @@ body[data-state="stopped"] {
   pointer-events: none;
 }
 
+body.is-maximized .app-shell {
+  border-radius: 0;
+}
+
 button {
   color: inherit;
   font: inherit;
@@ -164,6 +168,15 @@ button {
   stroke: #8d8a9d;
   stroke-linecap: round;
   stroke-width: 1.3;
+}
+
+.window-button .restore-glyph,
+.window-button.is-maximized .maximize-glyph {
+  display: none;
+}
+
+.window-button.is-maximized .restore-glyph {
+  display: block;
 }
 
 .playback-card {

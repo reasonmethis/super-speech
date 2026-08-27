@@ -16,6 +16,12 @@ const api: DesktopApi = {
   clearQueue: () => ipcRenderer.invoke(IPC_CHANNELS.clearQueue),
   openSetup: () => ipcRenderer.invoke(IPC_CHANNELS.openSetup),
   minimize: () => ipcRenderer.invoke(IPC_CHANNELS.minimize),
+  toggleMaximize: () => ipcRenderer.invoke(IPC_CHANNELS.toggleMaximize),
+  onMaximizedChange: (listener) => {
+    ipcRenderer.on(IPC_CHANNELS.maximizedChanged, (_event, maximized: boolean) => {
+      listener(maximized);
+    });
+  },
   hide: () => ipcRenderer.invoke(IPC_CHANNELS.hide),
 };
 

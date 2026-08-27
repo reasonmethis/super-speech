@@ -502,7 +502,7 @@ function createWindow(): void {
     minWidth: 380,
     minHeight: 620,
     resizable: true,
-    maximizable: false,
+    maximizable: true,
     fullscreenable: false,
     frame: false,
     transparent: true,
@@ -526,6 +526,12 @@ function createWindow(): void {
   });
   mainWindow.on("closed", () => {
     mainWindow = null;
+  });
+  mainWindow.on("maximize", () => {
+    mainWindow?.webContents.send(IPC_CHANNELS.maximizedChanged, true);
+  });
+  mainWindow.on("unmaximize", () => {
+    mainWindow?.webContents.send(IPC_CHANNELS.maximizedChanged, false);
   });
   mainWindow.once("ready-to-show", () => {
     if (!startHidden) {
@@ -609,6 +615,17 @@ function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.openSetup, () => shell.openExternal(SETUP_URL));
   ipcMain.handle(IPC_CHANNELS.minimize, (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize();
+  });
+  ipcMain.handle(IPC_CHANNELS.toggleMaximize, (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window) {
+      return;
+    }
+    if (window.isMaximized()) {
+      window.unmaximize();
+      return;
+    }
+    window.maximize();
   });
   ipcMain.handle(IPC_CHANNELS.hide, (event) => {
     BrowserWindow.fromWebContents(event.sender)?.hide();
