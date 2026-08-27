@@ -96,7 +96,7 @@ function applyTheme(theme: Theme): void {
   document.body.dataset.theme = theme;
   document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute(
     "content",
-    theme === "light" ? "#eef0f5" : "#0b0d14",
+    theme === "light" ? "#f5f6f9" : "#0b0d14",
   );
   for (const button of themeButtons) {
     button.setAttribute("aria-pressed", String(button.dataset.themeChoice === theme));
@@ -1492,6 +1492,11 @@ async function playTimelineItem(item: TimelineItem, voice?: string): Promise<voi
       const acceptance = await desktopApi.playChunk(item.id, voice);
       if (pendingSelection === selection) {
         selection.acceptance = acceptance;
+        selection.selectedItem = {
+          ...selection.selectedItem,
+          id: acceptance.id,
+          filename: `${acceptance.id}.txt`,
+        };
         commandStatus.textContent = "Selected speech is up next.";
         render(currentStatus);
       }

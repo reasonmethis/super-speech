@@ -95,6 +95,56 @@ test("rejects a status whose waiting count disagrees with its queue", () => {
   assert.equal(parseEngineStatus({ ...status, queue_count: 1 }), null);
 });
 
+test("rejects waiting speech without a playback-boundary item", () => {
+  const waiting = {
+    id: "002-af_heart-say",
+    filename: "002-af_heart-say.txt",
+    text: "Waiting",
+    voice: "af_heart",
+  };
+  assert.equal(
+    parseEngineStatus({ ...status, state: "playing", queue_count: 1, queue: [waiting] }),
+    null,
+  );
+});
+
+test("rejects playback states that contradict the boundary", () => {
+  const current = {
+    id: "001-af_heart-say",
+    filename: "001-af_heart-say.txt",
+    text: "Current",
+    voice: "af_heart",
+    piece: 0,
+    piece_count: 1,
+    elapsed_seconds: 0,
+  };
+  assert.equal(parseEngineStatus({ ...status, state: "playing" }), null);
+  assert.equal(parseEngineStatus({ ...status, state: "paused" }), null);
+  assert.equal(parseEngineStatus({ ...status, state: "idle", current }), null);
+});
+
+test("rejects duplicate active rows", () => {
+  const current = {
+    id: "001-af_heart-say",
+    filename: "001-af_heart-say.txt",
+    text: "Current",
+    voice: "af_heart",
+    piece: 0,
+    piece_count: 1,
+    elapsed_seconds: 0,
+  };
+  assert.equal(
+    parseEngineStatus({
+      ...status,
+      state: "playing",
+      current,
+      queue_count: 1,
+      queue: [current],
+    }),
+    null,
+  );
+});
+
 test("normalizes an engine play acknowledgement", () => {
   assert.deepEqual(parsePlayAcceptance({ id: "008-bm_fable-say", accepted_at: 12.5 }), {
     id: "008-bm_fable-say",
@@ -119,16 +169,10 @@ test("does not mistake an existing History row for started playback", () => {
     ),
     "pending",
   );
+  const preparing = { ...archived, piece: 0, piece_count: 1, elapsed_seconds: 0 };
   assert.equal(
     playAcceptanceState(
-      { ...status, state: "playing", updated_at: 13, queue_count: 1, queue: [archived], history_count: 1, history: [archived] },
-      acceptance,
-    ),
-    "pending",
-  );
-  assert.equal(
-    playAcceptanceState(
-      { ...status, state: "stopped", updated_at: 13, queue_count: 1, queue: [archived] },
+      { ...status, state: "stopped", updated_at: 13, current: preparing },
       acceptance,
     ),
     "failed",
@@ -192,7 +236,7 @@ test("makes active playback states impossible without active speech", () => {
       queue_count: 1,
       queue: [waiting],
     }, null),
-    { state: "playing", item: waiting },
+    { state: "idle", item: null },
   );
 });
 
@@ -208,14 +252,25 @@ test("reflects pause commands immediately without creating an empty paused state
     state: "playing" as const,
     engine_running: true,
     installed: true,
+    current: {
+      ...waiting,
+      id: "001-af_heart-say",
+      filename: "001-af_heart-say.txt",
+      text: "Current",
+      piece: 0,
+      piece_count: 1,
+      elapsed_seconds: 0,
+    },
     queue_count: 1,
     queue: [waiting],
   };
 
   assert.equal(statusAfterPauseCommand(active, true).state, "paused");
-  assert.equal(statusAfterPauseCommand({ ...active, queue_count: 0, queue: [] }, true).state, "idle");
+  assert.equal(statusAfterPauseCommand({ ...active, current: null, queue_count: 0, queue: [] }, true).state, "idle");
   assert.equal(statusAfterPauseCommand({ ...active, state: "loading" }, true).state, "loading");
-  assert.equal(statusAfterPauseCommand({ ...active, engine_running: false }, true).state, "stopped");
+  const stopped = statusAfterPauseCommand({ ...active, engine_running: false }, true);
+  assert.equal(stopped.state, "stopped");
+  assert.equal(stopped.current?.id, active.current.id);
   assert.equal(
     statusAfterPauseCommand({ ...active, state: "loading", engine_running: false }, true).state,
     "stopped",
@@ -372,8 +427,8 @@ test("keeps row order stable when current speech enters history", () => {
   const earlier = { ...current, id: "001-af_heart-say", text: "Earlier" };
   const before = timelineItems({ current, queue: [next, newest], history: [earlier] });
   const after = timelineItems({
-    current: null,
-    queue: [next, newest],
+    current: next,
+    queue: [newest],
     history: [current, earlier],
   });
 

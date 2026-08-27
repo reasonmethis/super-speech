@@ -213,16 +213,14 @@ The CLI owns playback controls. Do not create or remove runtime files directly:
 
 Selecting another upcoming chunk jumps to that point: the current chunk and
 every older waiting chunk before the selection move to History, while newer
-waiting chunks keep their order. Selecting a `history` ID queues a working copy
-under the same ID, so
-the original archive remains available and replay does not add duplicate History
-rows. Selecting while paused resumes playback. Never derive an
+waiting chunks keep their order. Selecting a `history` ID moves the playback
+boundary to that row: it becomes Current, every row above it becomes Waiting,
+and the timeline order stays unchanged. Selecting while paused resumes playback. Never derive an
 ID from a path or mutate runtime files directly; use the exact opaque ID from
 `status`.
 
-Passing `--voice` keeps the exact text and requested gap, creates the required
-voice-specific queue ID, and starts that version. The original History entry
-remains available when changing the voice of archived speech.
+Passing `--voice` keeps the exact text, requested gap, and timeline position,
+changes that row to the requested voice, and starts it.
 
 The command waits for the engine to accept or reject the ID. On success it
 prints JSON containing the exact resulting queue ID and acceptance time; a

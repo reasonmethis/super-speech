@@ -17,6 +17,11 @@ scrolling under user control while status polling preserves the existing row
 nodes. The renderer stores its Dark or Light appearance choice in the app's
 local profile; speech and queue state remain engine-owned.
 
+Current is the playback boundary rather than an audio-device event. Selecting a
+History row makes it Current in place and promotes every row above it to Waiting.
+The renderer rejects a runtime snapshot that contains Waiting without Current,
+or Playing, Paused, or Idle states that contradict that boundary.
+
 ## Prerequisites
 
 Release builds require Node.js 22+ and Python 3.12. These are build-time tools

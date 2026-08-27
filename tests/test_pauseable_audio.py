@@ -297,8 +297,8 @@ def test_engine_stream_failure_leaves_current_item_visible_in_stopped_queue(
 
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
     assert status["state"] == "stopped"
-    assert status["current"] is None
-    assert [item["id"] for item in status["queue"]] == [queued.stem]
+    assert status["current"]["id"] == queued.stem
+    assert status["queue"] == []
 
 
 def test_status_stays_playing_while_queued_audio_is_being_prepared(
@@ -313,8 +313,9 @@ def test_status_stays_playing_while_queued_audio_is_being_prepared(
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
     assert status["state"] == "playing"
-    assert status["current"] is None
-    assert status["queue"][0]["id"] == queued.stem
+    assert status["current"]["id"] == queued.stem
+    assert status["current"]["piece"] == 0
+    assert status["queue"] == []
 
     queued.unlink()
     engine.publish_status("idle", engine.State(), force=True)
@@ -359,7 +360,8 @@ def test_status_count_matches_the_items_in_the_same_snapshot(
     engine.publish_status("idle", engine.State(), force=True)
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
-    assert status["queue_count"] == len(status["queue"]) == 1
+    assert status["current"]["id"] == readable.stem
+    assert status["queue_count"] == len(status["queue"]) == 0
 
 
 def test_status_command_retries_a_transient_windows_read_error(
@@ -401,8 +403,8 @@ def test_stopped_status_contains_the_same_queue_items_as_its_count(
     engine.print_status()
     status = json.loads(capsys.readouterr().out)
 
-    assert status["queue_count"] == len(status["queue"]) == 1
-    assert status["queue"][0]["id"] == waiting.stem
+    assert status["current"]["id"] == waiting.stem
+    assert status["queue_count"] == len(status["queue"]) == 0
 
 
 def test_enqueue_text_reserves_the_next_queue_number(tmp_path: Path) -> None:
@@ -1252,12 +1254,12 @@ def test_voice_selection_rolls_back_when_archiving_an_older_item_fails(
     real_archive = engine.archive
     calls = 0
 
-    def fail_third(path: Path) -> bool:
+    def fail_second(path: Path) -> bool:
         nonlocal calls
         calls += 1
-        return False if calls == 3 else real_archive(path)
+        return False if calls == 2 else real_archive(path)
 
-    monkeypatch.setattr(engine, "archive", fail_third)
+    monkeypatch.setattr(engine, "archive", fail_second)
     request_id = engine.request_play(selected.stem, "bm_fable")
     assert engine.process_play_request(queue.Queue(), engine.State()) is None
 
@@ -1281,12 +1283,81 @@ def test_replaying_history_reuses_its_id_without_duplicating_history(
     assert engine.process_play_request(queue.Queue(), state) == "select"
 
     replay = engine.QUEUE / archived.name
-    assert archived.read_text(encoding="utf-8") == "Say this again"
+    assert not archived.exists()
     assert replay.read_text(encoding="utf-8") == "Say this again"
     assert engine.claim_next_queued_chunk(state) == replay
     assert engine.wait_for_play_ack(request_id, timeout=0.1)["id"] == archived.stem
     assert engine.archive(replay)
     assert [path.name for path in engine.SPOKEN.glob("*.txt")] == [archived.name]
+
+
+@pytest.mark.parametrize("history_index", range(5))
+@pytest.mark.parametrize("include_active", [False, True])
+def test_history_selection_moves_only_the_playback_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    history_index: int,
+    include_active: bool,
+) -> None:
+    engine = load_engine(
+        f"super_speech_engine_history_boundary_{history_index}_{include_active}"
+    )
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    history = [
+        engine.SPOKEN / f"{number:03d}-af_heart-say.txt"
+        for number in range(5, 0, -1)
+    ]
+    for path in history:
+        path.write_text(path.stem, encoding="utf-8")
+    engine.save_history_order(history)
+    if include_active:
+        active = [
+            engine.QUEUE / "006-af_heart-say.txt",
+            engine.QUEUE / "007-af_heart-say.txt",
+        ]
+        for path in active:
+            path.write_text(path.stem, encoding="utf-8")
+        engine.save_queue_order(active)
+
+    def visible_ids() -> list[str]:
+        status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
+        active_ids = {
+            *[item["id"] for item in status["queue"]],
+            *([status["current"]["id"]] if status["current"] else []),
+        }
+        return [
+            *[item["id"] for item in reversed(status["queue"])],
+            *([status["current"]["id"]] if status["current"] else []),
+            *[
+                item["id"]
+                for item in status["history"]
+                if item["id"] not in active_ids
+            ],
+        ]
+
+    state = engine.State()
+    engine.publish_status("idle", state, force=True)
+    original_order = visible_ids()
+    selected = history[history_index]
+
+    request_id = engine.request_play(selected.stem)
+    assert engine.process_play_request(queue.Queue(), state) == "select"
+    assert engine.wait_for_play_ack(request_id, timeout=0.1)["id"] == selected.stem
+    selected_status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
+
+    assert selected_status["current"]["id"] == selected.stem
+    assert visible_ids() == original_order
+
+    restarted = engine.State()
+    engine.publish_status("idle", restarted, force=True)
+    assert visible_ids() == original_order
+    assert json.loads(engine.STATUS.read_text(encoding="utf-8"))["current"]["id"] == selected.stem
+
+    selected_in_queue = engine.QUEUE / selected.name
+    assert engine.finish_chunk_playback(selected_in_queue, "done", True, restarted)
+    engine.publish_status("idle", restarted, force=True)
+    assert visible_ids() == original_order
 
 
 def test_history_replay_stays_first_after_an_engine_restart(
@@ -1309,27 +1380,143 @@ def test_history_replay_stays_first_after_an_engine_restart(
     assert engine.claim_next_queued_chunk(engine.State()) == engine.QUEUE / archived.name
 
 
-def test_history_replay_publishes_its_queue_copy_after_the_copy_is_complete(
+def test_history_selection_rolls_back_if_a_boundary_item_cannot_move(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    engine = load_engine("super_speech_engine_replay_atomic")
+    engine = load_engine("super_speech_engine_history_boundary_rollback")
     configure_runtime(engine, tmp_path)
-    source = engine.SPOKEN / "001-bm_fable-say.txt"
-    source.write_text("Complete replay", encoding="utf-8")
-    target = engine.QUEUE / source.name
-    observed = []
+    history = [
+        engine.SPOKEN / "003-af_heart-say.txt",
+        engine.SPOKEN / "002-af_heart-say.txt",
+        engine.SPOKEN / "001-bm_fable-say.txt",
+    ]
+    for path in history:
+        path.write_text(path.stem, encoding="utf-8")
+    engine.save_history_order(history)
     real_replace = engine.os.replace
+    moves = 0
 
-    def replace(temporary, destination) -> None:
-        if Path(destination) == target:
-            observed.append((target.exists(), Path(temporary).read_text(encoding="utf-8")))
-        real_replace(temporary, destination)
+    def replace(source, destination) -> None:
+        nonlocal moves
+        if Path(source).parent == engine.SPOKEN and Path(destination).parent == engine.QUEUE:
+            moves += 1
+            if moves == 2:
+                raise PermissionError("locked")
+        real_replace(source, destination)
 
     monkeypatch.setattr(engine.os, "replace", replace)
 
-    assert engine._queue_history_replay(source) == target
+    with pytest.raises(RuntimeError, match="could not move History playback boundary"):
+        engine.promote_history_selection(history[-1])
 
-    assert observed == [(False, "Complete replay")]
+    assert engine.history_files_in_order() == history
+    assert not list(engine.QUEUE.glob("*.txt"))
+
+
+def test_history_selection_excludes_worker_claims_until_rollback_finishes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_history_boundary_worker_lock")
+    configure_runtime(engine, tmp_path)
+    source = engine.SPOKEN / "001-af_heart-say.txt"
+    source.write_text("History", encoding="utf-8")
+    entered_save = threading.Event()
+    release_save = threading.Event()
+    real_save = engine.save_queue_order
+
+    def fail_after_worker_waits(paths=None) -> None:
+        entered_save.set()
+        assert release_save.wait(1)
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(engine, "save_queue_order", fail_after_worker_waits)
+    promotion_errors = []
+
+    def promote() -> None:
+        try:
+            engine.promote_history_selection(source)
+        except RuntimeError as error:
+            promotion_errors.append(error)
+
+    promotion = threading.Thread(target=promote)
+    promotion.start()
+    assert entered_save.wait(1)
+    state = engine.State()
+    claimed = []
+    worker = threading.Thread(
+        target=lambda: claimed.append(engine.claim_next_queued_chunk(state))
+    )
+    worker.start()
+    assert worker.is_alive()
+    assert state.claimed == set()
+    release_save.set()
+    promotion.join(1)
+    worker.join(1)
+    monkeypatch.setattr(engine, "save_queue_order", real_save)
+
+    assert promotion_errors
+    assert claimed == [None]
+    assert state.claimed == set()
+    assert source.exists()
+
+
+def test_history_selection_rollback_preserves_a_legacy_queue_duplicate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_history_legacy_duplicate")
+    configure_runtime(engine, tmp_path)
+    duplicate_history = engine.SPOKEN / "003-af_heart-say.txt"
+    duplicate_queue = engine.QUEUE / duplicate_history.name
+    selected = engine.SPOKEN / "002-af_heart-say.txt"
+    duplicate_history.write_text("Legacy replay", encoding="utf-8")
+    duplicate_queue.write_text("Active copy", encoding="utf-8")
+    selected.write_text("Selected", encoding="utf-8")
+    engine.save_history_order([duplicate_history, selected])
+    real_replace = engine.os.replace
+
+    def fail_selected(source, destination) -> None:
+        if Path(source) == selected:
+            raise PermissionError("locked")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(engine.os, "replace", fail_selected)
+
+    with pytest.raises(RuntimeError, match="could not move History playback boundary"):
+        engine.promote_history_selection(selected)
+
+    assert duplicate_queue.read_text(encoding="utf-8") == "Active copy"
+    assert duplicate_history.read_text(encoding="utf-8") == "Legacy replay"
+    assert selected.read_text(encoding="utf-8") == "Selected"
+
+
+def test_history_selection_reports_unconfirmed_if_rollback_cannot_finish(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_history_unconfirmed")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    first = engine.SPOKEN / "002-af_heart-say.txt"
+    selected = engine.SPOKEN / "001-af_heart-say.txt"
+    first.write_text("First", encoding="utf-8")
+    selected.write_text("Selected", encoding="utf-8")
+    engine.save_history_order([first, selected])
+    real_replace = engine.os.replace
+
+    def fail_forward_and_rollback(source, destination) -> None:
+        source = Path(source)
+        destination = Path(destination)
+        if source == selected or (
+            source == engine.QUEUE / first.name and destination == first
+        ):
+            raise PermissionError("locked")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(engine.os, "replace", fail_forward_and_rollback)
+    request_id = engine.request_play(selected.stem)
+
+    assert engine.process_play_request(queue.Queue(), engine.State()) is None
+    with pytest.raises(RuntimeError, match="result was unconfirmed"):
+        engine.wait_for_play_ack(request_id, timeout=0.1)
 
 
 def test_replaying_history_with_another_voice_preserves_text_and_gap(
@@ -1348,10 +1535,68 @@ def test_replaying_history_with_another_voice_preserves_text_and_gap(
     acceptance = engine.wait_for_play_ack(request_id, timeout=0.1)
     variant = engine.QUEUE / f"{acceptance['id']}.txt"
 
-    assert archived.read_text(encoding="utf-8") == "Say this another way"
-    assert variant.name == "008-af_heart-g350-say.txt"
+    assert not archived.exists()
+    assert variant.name == "007-af_heart-g350-say.txt"
     assert variant.read_text(encoding="utf-8") == "Say this another way"
     assert engine.claim_next_queued_chunk(state) == variant
+
+
+def test_history_voice_change_keeps_the_row_position(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_history_voice_position")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    engine.AVAILABLE_VOICES = {"af_heart", "bm_fable"}
+    history = [
+        engine.SPOKEN / "003-af_heart-say.txt",
+        engine.SPOKEN / "002-af_heart-say.txt",
+        engine.SPOKEN / "001-af_heart-say.txt",
+    ]
+    for path in history:
+        path.write_text(path.stem, encoding="utf-8")
+    engine.save_history_order(history)
+    state = engine.State()
+    engine.publish_status("idle", state, force=True)
+    before = json.loads(engine.STATUS.read_text(encoding="utf-8"))
+
+    request_id = engine.request_play(history[1].stem, "bm_fable")
+    assert engine.process_play_request(queue.Queue(), state) == "select"
+    acceptance = engine.wait_for_play_ack(request_id, timeout=0.1)
+    after = json.loads(engine.STATUS.read_text(encoding="utf-8"))
+
+    assert [item["text"] for item in before["history"]] == [
+        *[item["text"] for item in reversed(after["queue"])],
+        after["current"]["text"],
+        *[item["text"] for item in after["history"]],
+    ]
+    assert after["current"]["id"] == acceptance["id"]
+    assert after["current"]["voice"] == "bm_fable"
+    assert not (engine.SPOKEN / history[1].name).exists()
+
+
+def test_history_voice_rejection_restores_the_history_boundary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_history_voice_rejection")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    engine.AVAILABLE_VOICES = {"af_heart"}
+    history = [
+        engine.SPOKEN / "002-af_heart-say.txt",
+        engine.SPOKEN / "001-af_heart-say.txt",
+    ]
+    for path in history:
+        path.write_text(path.stem, encoding="utf-8")
+    engine.save_history_order(history)
+
+    request_id = engine.request_play(history[-1].stem, "bm_fable")
+    assert engine.process_play_request(queue.Queue(), engine.State()) is None
+
+    with pytest.raises(RuntimeError, match="could not replay"):
+        engine.wait_for_play_ack(request_id, timeout=0.1)
+    assert engine.history_files_in_order() == history
+    assert not list(engine.QUEUE.glob("*.txt"))
 
 
 def test_changing_a_waiting_voice_keeps_the_selection_position(
@@ -1374,12 +1619,12 @@ def test_changing_a_waiting_voice_keeps_the_selection_position(
     acceptance = engine.wait_for_play_ack(request_id, timeout=0.1)
     variant = engine.QUEUE / f"{acceptance['id']}.txt"
 
-    assert variant.name == "004-af_heart-g500-say.txt"
+    assert variant.name == "002-af_heart-g500-say.txt"
     assert variant.read_text(encoding="utf-8") == "Selected words"
     assert not older.exists()
     assert not selected.exists()
     assert (engine.SPOKEN / older.name).exists()
-    assert (engine.SPOKEN / selected.name).exists()
+    assert not (engine.SPOKEN / selected.name).exists()
     assert engine.claim_next_queued_chunk(state) == variant
     assert engine.claim_next_queued_chunk(state) == newer
 
@@ -1402,10 +1647,10 @@ def test_changing_the_current_voice_replaces_it_without_changing_text(
     acceptance = engine.wait_for_play_ack(request_id, timeout=0.1)
     variant = engine.QUEUE / f"{acceptance['id']}.txt"
 
-    assert variant.name == "002-bm_fable-g600-say.txt"
+    assert variant.name == "001-bm_fable-g600-say.txt"
     assert variant.read_text(encoding="utf-8") == "Current words"
     assert not current.exists()
-    assert (engine.SPOKEN / current.name).exists()
+    assert not (engine.SPOKEN / current.name).exists()
     assert engine.claim_next_queued_chunk(state) == variant
 
 
@@ -1540,7 +1785,7 @@ def test_idle_selection_replaces_worker_claims_and_becomes_next(
     engine.request_play(selected.stem)
     assert engine.process_play_request(queue.Queue(), state) == "select"
 
-    assert state.playing is None
+    assert state.playing == selected.name
     assert state.claimed == set()
     assert engine.claim_next_queued_chunk(state) == selected
 
@@ -1678,6 +1923,83 @@ def test_failed_synthesis_archive_stops_instead_of_leaving_a_stuck_claim(
     assert waiting.exists()
     assert state.claimed == {waiting.name}
     assert state.stop.is_set()
+
+
+@pytest.mark.parametrize("failure", ["empty", "synthesis"])
+def test_preplay_terminal_item_releases_the_current_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    engine = load_engine(f"super_speech_engine_preplay_release_{failure}")
+    configure_runtime(engine, tmp_path)
+    waiting = engine.QUEUE / "001-af_heart-say.txt"
+    waiting.write_text("" if failure == "empty" else "Waiting", encoding="utf-8")
+    state = engine.State()
+    state.playing = waiting.name
+
+    class Kokoro:
+        @staticmethod
+        def create(*_args, **_kwargs):
+            raise RuntimeError("synthesis failed")
+
+    worker = threading.Thread(
+        target=engine.synth_worker,
+        args=(Kokoro(), queue.Queue(), state),
+    )
+    worker.start()
+    destination = engine.SPOKEN if failure == "empty" else engine.FAILED
+    for _ in range(100):
+        if (destination / waiting.name).exists():
+            break
+        threading.Event().wait(0.01)
+    state.stop.set()
+    worker.join(timeout=1)
+
+    assert not worker.is_alive()
+    assert state.playing is None
+    assert state.claimed == set()
+
+
+def test_transient_current_read_failure_does_not_block_stop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_current_read_failure")
+    configure_runtime(engine, tmp_path)
+    waiting = engine.QUEUE / "001-af_heart-say.txt"
+    waiting.write_text("Waiting", encoding="utf-8")
+    state = engine.State()
+    state.playing = waiting.name
+    original_read_text = Path.read_text
+    read_failed = threading.Event()
+    release_failure = threading.Event()
+
+    def fail_once(path: Path, *args, **kwargs) -> str:
+        if path == waiting and not read_failed.is_set():
+            read_failed.set()
+            assert release_failure.wait(1)
+            raise PermissionError("locked")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_once)
+    worker = threading.Thread(
+        target=engine.synth_worker,
+        args=(SimpleNamespace(), queue.Queue(), state),
+    )
+    worker.start()
+    assert read_failed.wait(1)
+    state.saw_stop = True
+    release_failure.set()
+    for _ in range(100):
+        if state.playing is None:
+            break
+        threading.Event().wait(0.01)
+    state.stop.set()
+    worker.join(timeout=1)
+
+    assert not worker.is_alive()
+    assert waiting.exists()
+    assert state.playing is None
 
 
 def test_stop_during_a_gap_keeps_the_next_chunk_queued(tmp_path: Path) -> None:

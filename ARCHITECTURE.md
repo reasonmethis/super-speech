@@ -71,7 +71,7 @@ runtime sizes.
 
 ## Playback protocol
 
-`super-speech-engine status` publishes a version 8 snapshot with the current
+`super-speech-engine status` publishes a version 9 snapshot with the current
 speech item, the complete upcoming queue, and up to 50 recent archived items in
 their saved display order. A
 speech item is one `speak` invocation, one timeline row, and one replay target.
@@ -80,22 +80,26 @@ history entries. The current item remains active while the engine waits for its
 next rendered piece. Every entry has an opaque `id`. The total `history_count`
 can exceed the bounded
 `history` array.
-`queue_count` always matches the complete `queue` array. A bounded
+`queue_count` always matches the complete `queue` array. Queued work always has
+exactly one playback-boundary item in `current`, including during synthesis,
+inter-piece gaps, and a stopped process. A snapshot with Waiting rows but no
+Current row is invalid. A bounded
 `recent_starts` receipt list lets the renderer distinguish speech that actually
 began from an archived replay that failed before its first audio piece.
 The archive currently includes completed, skipped, and cleared items, so the
 UI calls it History rather than claiming every entry played to completion.
 
 `super-speech-engine play <id> [--voice <voice>]` is the one selection command.
-The optional voice queues the same text and gap under that voice. The engine, not
+The optional voice changes the same row in place while preserving its text, gap,
+and timeline position. The engine, not
 Electron, validates the identifier and owns every queue or archive mutation:
 
 - selecting the current item resumes it from the same sample when paused
 - selecting an upcoming item archives the current item and every older waiting
   item before it, then plays the selection without reordering newer items
-- selecting an archived item queues a working copy under the same ID, preserving
-  the original archive and the untouched upcoming queue without adding another
-  History row when replay finishes
+- selecting an archived item moves the playback boundary to that row; it and
+  every History row above it become the active sequence, while all cards retain
+  their screen order
 
 Selection invalidates rendered pieces that no longer match the chosen order.
 Each selection uses an atomic request file and a private acknowledgement that
@@ -134,10 +138,11 @@ position relative to the other rows. Waiting and History drags translate back
 into `move` and `move-history` commands. The renderer applies the result
 immediately and reloads the authoritative snapshot if the engine rejects the command. Current
 speech is not reorderable. The status producer derives active state from the
-same current and queue snapshot, and the renderer uses a discriminated playback
-presentation, so Playing and Paused cannot exist without an active item.
-The process lifecycle remains authoritative: a dead engine is Stopped even when
-Waiting rows remain, and an accepted selection may change the displayed item but
+same current and queue snapshot, and the renderer rejects snapshots whose state,
+Current, and Waiting fields contradict the playback boundary. Playing and Paused
+therefore cannot exist without an active item, and Waiting cannot exist without
+Current. The process lifecycle remains authoritative: a dead engine is Stopped,
+and an accepted selection may change the displayed item but
 cannot override Paused. Timeline mutations cannot target a selection that is
 still starting.
 

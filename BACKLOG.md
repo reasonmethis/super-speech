@@ -41,7 +41,7 @@ work session without having to reconstruct the product decisions.
 ## P1: interactive queue
 
 - [x] Let a user select any upcoming chunk and start it immediately
-- [x] Let a user replay an archived chunk without losing the remaining queue
+- [x] Let a user move playback to any archived chunk without changing timeline order
 - [x] Keep the current chunk and sample position when the user only pauses
 - Add previous and next controls using the identifier-based selection command
 - [x] Add replay through the same identifier-based selection command

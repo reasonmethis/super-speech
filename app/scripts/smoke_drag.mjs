@@ -211,7 +211,29 @@ try {
   );
   assert.equal(
     await page.locator('meta[name="theme-color"]').getAttribute("content"),
-    "#eef0f5",
+    "#f5f6f9",
+  );
+  assert.deepEqual(
+    await page.evaluate(() => {
+      const style = (selector) => getComputedStyle(document.querySelector(selector));
+      return {
+        shellBackgroundImage: style(".app-shell").backgroundImage,
+        shellBorderRadius: style(".app-shell").borderRadius,
+        shellBorderWidth: style(".app-shell").borderWidth,
+        brandShadow: style(".brand-mark").boxShadow,
+        brandRadius: style(".brand-mark").borderRadius,
+        buttonShadow: style(".playback-button").boxShadow,
+      };
+    }),
+    {
+      shellBackgroundImage: "none",
+      shellBorderRadius: "0px",
+      shellBorderWidth: "0px",
+      brandShadow: "none",
+      brandRadius: "0px",
+      buttonShadow: "none",
+    },
+    "The light theme must be flat and free of nested window or icon shells",
   );
   if (process.env.SUPER_SPEECH_SCREENSHOT) {
     const screenshot = path.parse(process.env.SUPER_SPEECH_SCREENSHOT);
@@ -981,7 +1003,9 @@ try {
     "The engine did not delete the History item",
   );
 
-  const historyCountBeforeReplay = status().history_count;
+  const historyOrderBeforePlay = await page.locator(".queue-item").evaluateAll((rows) =>
+    rows.map((row) => row.getAttribute("data-item-id"))
+  );
   await page.locator(`[data-item-id="${secondId}"].is-history .queue-menu-button`).click();
   await page.locator("#queue-action-menu").getByRole("button", { name: "Play" }).click();
   assert.equal(
@@ -1003,15 +1027,30 @@ try {
         "The selected presentation reverted before History playback started",
       );
       assert.equal(await page.locator("#playback-title").textContent(), "Heart");
-      return status().current?.id === secondId;
+      const snapshot = status();
+      assert(
+        snapshot.current?.id === secondId ||
+          !snapshot.queue.some(({ id }) => id === secondId),
+        "A selected History row appeared as Waiting before it became Current",
+      );
+      return snapshot.current?.id === secondId;
     },
     "The History Play action did not start the chunk",
     30_000,
   );
-  assert.equal(
-    status().history_count,
-    historyCountBeforeReplay,
-    "Replaying a History chunk added a duplicate archive row",
+  await waitFor(
+    async () => await page.locator(`[data-item-id="${secondId}"].is-current`).count() === 1,
+    "The selected History row did not become Current in place",
+  );
+  assert.deepEqual(
+    await page.locator(".queue-item").evaluateAll(
+      (rows, ids) => rows
+        .map((row) => row.getAttribute("data-item-id"))
+        .filter((id) => ids.includes(id)),
+      historyOrderBeforePlay,
+    ),
+    historyOrderBeforePlay,
+    "Selecting History moved cards instead of moving the playback boundary",
   );
   runEngine("pause");
 

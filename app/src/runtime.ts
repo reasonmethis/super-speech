@@ -6,7 +6,7 @@ export type RuntimeState =
   | "setup_required"
   | "stopped";
 
-export const ENGINE_STATUS_VERSION = 8 as const;
+export const ENGINE_STATUS_VERSION = 9 as const;
 
 // Labels for the SHA-pinned Kokoro v1.0 voice archive bundled by prepare_resources
 export const VOICE_OPTIONS = [
@@ -124,12 +124,12 @@ export function statusAfterPauseCommand(
     return status;
   }
   if (!status.engine_running) {
-    return { ...status, state: "stopped", current: null };
+    return { ...status, state: "stopped" };
   }
   if (status.state === "loading") {
     return status;
   }
-  const hasWork = status.current !== null || status.queue.length > 0;
+  const hasWork = status.current !== null;
   return {
     ...status,
     state: hasWork ? (paused ? "paused" : "playing") : "idle",
@@ -220,7 +220,7 @@ export function playbackPresentation(
     return { state: "stopped", item: null };
   }
 
-  const activeItem = selectedItem ?? status.current ?? status.queue[0] ?? null;
+  const activeItem = selectedItem ?? status.current;
   if (!activeItem) {
     return status.state === "loading"
       ? { state: "loading", item: null }
@@ -280,19 +280,39 @@ function isStartedItem(value: unknown): value is StartedItem {
   return typeof item.id === "string" && typeof item.started_at === "number";
 }
 
+function playbackBoundaryMatchesState(value: Record<string, unknown>): boolean {
+  const hasCurrent = value.current !== null;
+  if (value.state === "playing" || value.state === "paused") {
+    return hasCurrent;
+  }
+  if (value.state === "idle") {
+    return !hasCurrent;
+  }
+  return true;
+}
+
 function hasStatusCore(value: Record<string, unknown>): boolean {
+  const queue = Array.isArray(value.queue) && value.queue.every(isQueueItem)
+    ? value.queue
+    : null;
+  const current = value.current === null || isCurrentItem(value.current)
+    ? value.current
+    : undefined;
   return (
     typeof value.state === "string" &&
     RUNTIME_STATES.has(value.state as RuntimeState) &&
     typeof value.updated_at === "number" &&
     (value.engine_pid === null || typeof value.engine_pid === "number") &&
-    (value.current === null || isCurrentItem(value.current)) &&
+    current !== undefined &&
     Array.isArray(value.recent_starts) &&
     value.recent_starts.every(isStartedItem) &&
     typeof value.queue_count === "number" &&
-    Array.isArray(value.queue) &&
-    value.queue.every(isQueueItem) &&
-    value.queue_count === value.queue.length
+    queue !== null &&
+    (current !== null || queue.length === 0) &&
+    (current === null || !queue.some(({ id }) => id === current.id)) &&
+    new Set(queue.map(({ id }) => id)).size === queue.length &&
+    value.queue_count === queue.length &&
+    playbackBoundaryMatchesState(value)
   );
 }
 

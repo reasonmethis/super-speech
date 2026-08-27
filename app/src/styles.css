@@ -41,9 +41,6 @@ body {
   --page-bg: #0b0d14;
   --shell-start: #12141e;
   --shell-end: #0b0d14;
-  --shell-border: rgba(255, 255, 255, 0.08);
-  --shell-highlight: rgba(255, 255, 255, 0.045);
-  --shell-shade: rgba(0, 0, 0, 0.16);
   --card-start: rgba(255, 255, 255, 0.038);
   --card-end: rgba(255, 255, 255, 0.012);
   --card-shadow: rgba(0, 0, 0, 0.2);
@@ -67,15 +64,12 @@ body {
 }
 
 body[data-theme="light"] {
-  --page-bg: #e9ebf1;
-  --shell-start: #f8f9fc;
-  --shell-end: #eef0f5;
-  --shell-border: rgba(30, 32, 45, 0.1);
-  --shell-highlight: rgba(255, 255, 255, 0.7);
-  --shell-shade: rgba(35, 38, 55, 0.035);
+  --page-bg: #f5f6f9;
+  --shell-start: #f5f6f9;
+  --shell-end: #f5f6f9;
   --card-start: rgba(255, 255, 255, 0.78);
   --card-end: rgba(255, 255, 255, 0.42);
-  --card-shadow: rgba(43, 47, 69, 0.09);
+  --card-shadow: transparent;
   --line: rgba(30, 32, 45, 0.11);
   --text: #242633;
   --text-strong: #252735;
@@ -128,23 +122,21 @@ body[data-state="stopped"] {
     radial-gradient(circle at 50% 25%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 36%),
     radial-gradient(circle at 92% 88%, rgba(67, 112, 255, 0.09), transparent 32%),
     linear-gradient(158deg, var(--shell-start) 0%, var(--shell-end) 64%);
-  border: 1px solid var(--shell-border);
-  border-radius: 18px;
-  box-shadow: inset 0 1px 0 var(--shell-highlight);
-}
-
-.app-shell::after {
-  position: absolute;
-  inset: 0;
-  z-index: 20;
-  border-radius: inherit;
-  box-shadow: inset 0 0 50px var(--shell-shade);
-  content: "";
-  pointer-events: none;
-}
-
-body.is-maximized .app-shell {
+  border: 0;
   border-radius: 0;
+}
+
+body[data-theme="light"] .app-shell {
+  background: var(--page-bg);
+}
+
+body[data-theme="light"] .playback-button {
+  box-shadow: none;
+}
+
+body[data-theme="light"] .playback-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
 }
 
 button {
@@ -178,10 +170,12 @@ button {
 }
 
 .brand-mark {
+  display: block;
   width: 25px;
   height: 25px;
-  border-radius: 8px;
-  box-shadow: 0 5px 16px rgba(72, 49, 150, 0.25);
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 .window-controls {
@@ -422,7 +416,7 @@ body[data-state="loading"] .playback-button {
 body[data-theme="light"][data-state="idle"] .playback-button,
 body[data-theme="light"][data-state="loading"] .playback-button {
   border-color: rgba(36, 38, 51, 0.11);
-  box-shadow: 0 8px 24px rgba(43, 47, 69, 0.1);
+  box-shadow: none;
 }
 
 body[data-state="idle"] .playback-button::after,

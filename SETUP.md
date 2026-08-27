@@ -99,9 +99,9 @@ or the bounded `history` list:
 The same command works in desktop and headless installations. Selecting an
 upcoming item jumps to that point: the current item and every older waiting item
 before the selection move to History, while newer waiting items keep their order.
-Selecting a history entry queues a working copy under the same ID without
-changing the remaining queue, the original archive, or the number of History
-rows. Selection is distinct from pause and resume: pause preserves the exact
+Selecting a History entry moves the playback boundary to that row without
+changing the screen order: the selected row becomes Current, and every row above
+it becomes Waiting. Selection is distinct from pause and resume: pause preserves the exact
 audio sample, while selecting another item ends that paused position. The
 command waits for engine acknowledgement and prints the resulting ID as JSON.
 

@@ -52,25 +52,25 @@ when playback changes. Click a
 row once to toggle its full text, or double-click an upcoming or History row to play it
 without changing its expanded state. Selecting a waiting row jumps to that point:
 the current row and every older waiting row below the selection move to History,
-while newer waiting rows keep their order. Recent
-archive entries appear under History and can be replayed without
-changing the remaining queue or adding duplicate History rows. History includes
+while newer waiting rows keep their order. Selecting a History row moves the
+playback boundary to that row without moving any cards: that row becomes Current,
+and every row above it becomes Waiting. History includes
 completed, skipped, and cleared items. `Clear all` archives every waiting item
 without changing the current item or playback state. A row's three-dot menu
 uses `Play` for waiting and History rows. `Change voice` plays the same text
-with another bundled voice. `Delete` removes a waiting item from
+with another bundled voice in the same timeline position. `Delete` removes a waiting item from
 the active queue and keeps it in History; deleting it again from History removes
 it permanently. Drag a Waiting or History row's grip to reorder it directly;
 a Waiting row can also be dropped on History to archive it. The grips support
 the arrow, Home, and End keys. Current speech is the only row without a grip.
 An empty active timeline is always Idle, so Playing and Paused always identify
-an active speech item. A stopped engine remains Stopped even if speech is still
-waiting. Starting a row explicitly enters Playing; pausing it afterward remains
+an active speech item. If queued work exists, exactly one row is Current even
+while it is being synthesized or the engine is stopped. Starting a row explicitly enters Playing; pausing it afterward remains
 Paused while that selection is prepared.
 
 The title-bar Settings button switches between persisted Dark and Light themes.
-The light theme uses a cool gray window background so the white Super Speech
-icon remains distinct.
+The light theme uses a flat, pale gray window background so the white Super
+Speech icon remains distinct.
 
 In desktop mode, mutable state stays in `~/.super-speech/`. The installed model
 and engine are read-only application resources. A headless installation keeps
