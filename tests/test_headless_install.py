@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,21 @@ INSTALLER = (
     / "scripts"
     / "install.py"
 )
+
+
+def test_engine_package_includes_every_local_runtime_module() -> None:
+    engine_directory = INSTALLER.parents[1] / "engine"
+    configuration = tomllib.loads(
+        (engine_directory / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    packaged_modules = set(configuration["tool"]["setuptools"]["py-modules"])
+    local_modules = {
+        path.stem
+        for path in engine_directory.glob("*.py")
+        if path.name != "__init__.py"
+    }
+
+    assert packaged_modules == local_modules
 
 
 def load_installer():

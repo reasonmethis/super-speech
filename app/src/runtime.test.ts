@@ -644,3 +644,22 @@ test("a stale poll cannot roll back a committed snapshot", () => {
     engine_running: false,
   });
 });
+
+test("a new engine process starts a fresh timeline revision sequence", () => {
+  const oldProcess: RuntimeStatus = {
+    ...status,
+    timeline_revision: 80,
+    updated_at: 80,
+    engine_pid: 100,
+    engine_running: true,
+    installed: true,
+  };
+  const newProcess: RuntimeStatus = {
+    ...oldProcess,
+    timeline_revision: 0,
+    updated_at: 1,
+    engine_pid: 200,
+  };
+
+  assert.equal(adoptTimelineSnapshot(oldProcess, newProcess), newProcess);
+});

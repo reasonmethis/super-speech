@@ -14,7 +14,12 @@ dynamic = ["dependencies"]
 super-speech-engine = "super_speech_engine:cli"
 
 [tool.setuptools]
-py-modules = ["super_speech_engine", "pauseable_audio", "speechicle_identity"]
+py-modules = [
+    "super_speech_engine",
+    "pauseable_audio",
+    "speechicle_identity",
+    "mutation_protocol",
+]
 
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements-runtime.txt"] }

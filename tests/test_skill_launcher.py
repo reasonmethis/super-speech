@@ -21,6 +21,11 @@ INSTALLATION_ERROR = (
 )
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Unix executable modes are not available")
+def test_shell_launcher_is_directly_executable() -> None:
+    assert os.access(SHELL_LAUNCHER, os.X_OK)
+
+
 def powershell() -> str:
     executable = shutil.which("pwsh") or shutil.which("powershell")
     if not executable:

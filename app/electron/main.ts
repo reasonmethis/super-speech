@@ -222,7 +222,9 @@ function getStatus(): RuntimeStatus {
     timeline_revision: timeline?.timeline_revision ?? 0,
     state,
     updated_at: engine?.updated_at ?? 0,
-    engine_pid: engineRunning ? (engine?.engine_pid ?? ownedEngine?.pid ?? null) : null,
+    engine_pid: engineRunning
+      ? (timeline?.engine_pid ?? ownedEngine?.pid ?? null)
+      : null,
     engine_running: engineRunning,
     installed,
     current: timeline?.current ?? null,

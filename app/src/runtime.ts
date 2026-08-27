@@ -557,10 +557,15 @@ export function adoptTimelineSnapshot(
   current: RuntimeStatus,
   candidate: RuntimeStatus,
 ): RuntimeStatus {
-  // Prefer committed timeline order over the clock time of a stale poll
-  const timelineIsOlder = candidate.timeline_revision < current.timeline_revision || (
-    candidate.timeline_revision === current.timeline_revision &&
-    candidate.updated_at < current.updated_at
+  const newEngineProcess = candidate.engine_pid !== null &&
+    current.engine_pid !== null &&
+    candidate.engine_pid !== current.engine_pid;
+  // Revisions are comparable only while the same engine process owns the timeline
+  const timelineIsOlder = !newEngineProcess && (
+    candidate.timeline_revision < current.timeline_revision || (
+      candidate.timeline_revision === current.timeline_revision &&
+      candidate.updated_at < current.updated_at
+    )
   );
   if (!timelineIsOlder) {
     return candidate;
