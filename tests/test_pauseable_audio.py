@@ -443,6 +443,35 @@ def test_persistent_status_publication_failure_stops_the_engine(
     assert not engine.STATUS_FAILURE.exists()
 
 
+def test_status_publication_uses_a_fresh_temporary_file_after_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_status_fresh_temporary")
+    configure_runtime(engine, tmp_path)
+    state = engine.State()
+    temporary_paths: list[Path] = []
+    real_replace = engine.os.replace
+
+    def replace(source: Path, target: Path) -> None:
+        temporary_paths.append(Path(source))
+        if len(temporary_paths) == 1:
+            raise PermissionError("temporary file is being scanned")
+        real_replace(source, target)
+
+    monkeypatch.setattr(engine.os, "replace", replace)
+
+    engine.publish_status("idle", state, force=True)
+    engine.publish_status("idle", state, force=True)
+
+    assert len(temporary_paths) == 2
+    assert temporary_paths[0] != temporary_paths[1]
+    assert not state.stop.is_set()
+    assert json.loads(engine.STATUS.read_text(encoding="utf-8"))["state"] == "idle"
+    log = engine.LOG.read_text(encoding="utf-8")
+    assert "status publication failed: PermissionError" in log
+    assert "status publication recovered" in log
+
+
 def test_stopped_status_contains_the_same_queue_items_as_its_count(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

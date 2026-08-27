@@ -100,8 +100,10 @@ inference, PortAudio, queue archival, and shutdown.
 py -3.12 scripts/smoke_engine.py
 ```
 
-The Electron binary also supports `--smoke-test`. It exits successfully only
-after the supervised engine reaches idle with an empty queue.
+The Electron binary also supports `--smoke-test`. It waits for the bundled
+engine to become healthy, terminates that engine unexpectedly, verifies that
+the desktop supervisor starts a different engine process, and requires the
+replacement to remain healthy for five seconds.
 
 ## Packaging
 
@@ -113,6 +115,17 @@ This single command installs pinned build dependencies, verifies model hashes,
 freezes the engine, builds Electron, and creates a current-user NSIS installer.
 The package contains the engine, model, voices, complete agent skill bundle,
 third-party notices, and corresponding Super Speech engine source.
+
+After installing that package, verify the installed files rather than the
+repository build:
+
+```powershell
+npm run test:installed
+```
+
+This launches the installed app with an isolated runtime and silent audio, then
+runs the engine supervision smoke test above. Treat this as a required release
+check before reopening the app against the user's real queue.
 
 Electron Builder is configured for a macOS arm64 DMG, but the native sidecar
 must be built on Apple Silicon running macOS 14 or newer. Windows x64 is the

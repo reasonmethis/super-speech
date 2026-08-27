@@ -44,6 +44,8 @@ import {
 } from "../src/runtime";
 
 const HEARTBEAT_FRESHNESS_MS = 15_000;
+const ENGINE_STABLE_AFTER_MS = 30_000;
+const ENGINE_RESTART_MAX_DELAY_MS = 30_000;
 const MODEL_MIN_BYTES = 300_000_000;
 const VOICES_MIN_BYTES = 20_000_000;
 const SETUP_URL = "https://github.com/reasonmethis/super-speech#install";
@@ -55,6 +57,8 @@ const startHidden = smokeTest || process.argv.includes("--hidden");
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let ownedEngine: ChildProcess | null = null;
+let engineRestartFailures = 0;
+let engineRestartTimer: NodeJS.Timeout | null = null;
 let quitting = false;
 let lastEngineStatus: EngineStatus | null = null;
 
@@ -379,6 +383,26 @@ function writeInstallManifest(
   );
 }
 
+function scheduleEngineRestart(runDurationMilliseconds: number): void {
+  if (quitting || engineRestartTimer) {
+    return;
+  }
+  if (runDurationMilliseconds >= ENGINE_STABLE_AFTER_MS) {
+    engineRestartFailures = 0;
+  }
+  const delayMilliseconds = Math.min(
+    1_000 * 2 ** engineRestartFailures,
+    ENGINE_RESTART_MAX_DELAY_MS,
+  );
+  engineRestartFailures += 1;
+  engineRestartTimer = setTimeout(() => {
+    engineRestartTimer = null;
+    if (!quitting) {
+      void startEngine();
+    }
+  }, delayMilliseconds);
+}
+
 async function startEngine(): Promise<void> {
   const base = runtimeDir();
   mkdirSync(path.join(base, "queue"), { recursive: true });
@@ -407,7 +431,7 @@ async function startEngine(): Promise<void> {
 
   const logDescriptor = openSync(path.join(base, "engine.log"), "a");
   try {
-    ownedEngine = spawn(launch.command, [...launch.args, "serve"], {
+    const child = spawn(launch.command, [...launch.args, "serve"], {
       env: {
         ...process.env,
         SUPER_SPEECH_HOME: base,
@@ -416,20 +440,30 @@ async function startEngine(): Promise<void> {
       windowsHide: true,
       stdio: ["ignore", logDescriptor, logDescriptor],
     });
-    ownedEngine.once("error", () => {
+    ownedEngine = child;
+    const startedAt = Date.now();
+    const restartAfterUnexpectedExit = () => {
+      if (ownedEngine !== child) {
+        return;
+      }
       ownedEngine = null;
-    });
-    ownedEngine.once("exit", () => {
-      ownedEngine = null;
-    });
+      scheduleEngineRestart(Date.now() - startedAt);
+    };
+    child.once("error", restartAfterUnexpectedExit);
+    child.once("exit", restartAfterUnexpectedExit);
   } catch {
     ownedEngine = null;
+    scheduleEngineRestart(0);
   } finally {
     closeSync(logDescriptor);
   }
 }
 
 function stopOwnedEngine(): void {
+  if (engineRestartTimer) {
+    clearTimeout(engineRestartTimer);
+    engineRestartTimer = null;
+  }
   if (!ownedEngine || ownedEngine.exitCode !== null) {
     return;
   }
@@ -443,20 +477,49 @@ function stopOwnedEngine(): void {
 
 function runSmokeTest(): void {
   const startedAt = Date.now();
+  let firstEnginePid: number | null = null;
+  let restartedAt: number | null = null;
   const interval = setInterval(() => {
     const status = getStatus();
     if (
+      firstEnginePid === null &&
       status.engine_running &&
       status.state === "idle" &&
       status.queue_count === 0 &&
       !status.current
     ) {
-      clearInterval(interval);
-      console.log("Super Speech desktop smoke test passed");
-      app.quit();
+      if (!ownedEngine?.pid || status.engine_pid !== ownedEngine.pid || !ownedEngine.kill()) {
+        clearInterval(interval);
+        quitting = true;
+        stopOwnedEngine();
+        console.error("Super Speech desktop smoke test could not stop its engine fixture");
+        app.exit(1);
+        return;
+      }
+      firstEnginePid = status.engine_pid;
       return;
     }
-    if (status.state === "setup_required" || status.state === "stopped") {
+    if (
+      firstEnginePid !== null &&
+      status.engine_running &&
+      status.engine_pid !== firstEnginePid &&
+      status.state === "idle" &&
+      status.queue_count === 0 &&
+      !status.current
+    ) {
+      restartedAt ??= Date.now();
+      if (Date.now() - restartedAt >= 5_000) {
+        clearInterval(interval);
+        console.log("Super Speech desktop supervision smoke test passed");
+        app.quit();
+      }
+      return;
+    }
+    restartedAt = null;
+    if (
+      status.state === "setup_required" ||
+      (firstEnginePid === null && status.state === "stopped")
+    ) {
       clearInterval(interval);
       quitting = true;
       stopOwnedEngine();
@@ -464,7 +527,7 @@ function runSmokeTest(): void {
       app.exit(1);
       return;
     }
-    if (Date.now() - startedAt > 45_000) {
+    if (Date.now() - startedAt > 90_000) {
       clearInterval(interval);
       quitting = true;
       stopOwnedEngine();

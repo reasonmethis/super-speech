@@ -11,6 +11,7 @@
     "dev": "vite",
     "test": "node --test --experimental-strip-types src/runtime.test.ts src/queue-drag-model.test.ts",
     "test:drag": "npm run build && node scripts/smoke_drag.mjs",
+    "test:installed": "node scripts/smoke_installed.mjs",
     "resources": "node scripts/prepare_resources.mjs",
     "prebuild": "npm run check",
     "build": "vite build",

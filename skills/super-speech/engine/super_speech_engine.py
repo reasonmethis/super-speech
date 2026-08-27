@@ -120,7 +120,7 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
-ENGINE_VERSION = "0.4.10"
+ENGINE_VERSION = "0.4.11"
 STATUS_VERSION = 10
 QUEUE_ACTIONS = frozenset({"move", "move_history", "archive", "delete"})
 
@@ -1745,16 +1745,24 @@ def publish_status(
         "history_count": history_count,
         "history": history_items,
     }
-    temp_path = STATUS.with_name(f"{STATUS.name}.{os.getpid()}.tmp")
+    temp_path = STATUS.with_name(
+        f"{STATUS.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    )
     try:
         temp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         os.replace(temp_path, STATUS)
         STATUS_FAILURE.unlink(missing_ok=True)
         _last_status_write = now
+        if _status_failure_started is not None:
+            log(
+                "status publication recovered after "
+                f"{now - _status_failure_started:.1f} seconds"
+            )
         _status_failure_started = None
-    except OSError:
+    except OSError as error:
         if _status_failure_started is None:
             _status_failure_started = now
+            log(f"status publication failed: {type(error).__name__}: {error}")
         elif now - _status_failure_started >= 5.0:
             try:
                 STATUS_FAILURE.touch()

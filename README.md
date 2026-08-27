@@ -95,8 +95,9 @@ npm run package:win
 The package command installs pinned build dependencies, verifies or stages the
 model files by SHA-256, freezes the engine, builds Electron, and creates the NSIS
 installer. See [app/README.md](app/README.md) for focused build and smoke-test
-commands. Users who do not want Electron can install the same engine and skill
-without the app by following [SETUP.md](SETUP.md).
+commands, including the required installed-build supervision check. Users who
+do not want Electron can install the same engine and skill without the app by
+following [SETUP.md](SETUP.md).
 
 ## Headless installation
 
