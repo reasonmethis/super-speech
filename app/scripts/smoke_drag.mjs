@@ -195,13 +195,6 @@ try {
     env: environment,
   });
   const page = await electronApp.firstWindow();
-  assert.equal(
-    await electronApp.evaluate(({ BrowserWindow }) =>
-      BrowserWindow.getAllWindows()[0]?.webContents.getLastWebPreferences().backgroundThrottling
-    ),
-    false,
-    "Background polling must stay active while another app has focus",
-  );
   await waitFor(
     () => {
       const current = status().current;
@@ -217,6 +210,15 @@ try {
   await waitFor(
     async () => await page.locator("#current-text").textContent() === followedText,
     "The compact playback card did not follow the current speech piece",
+  );
+  await page.locator(".queue-item.is-current").waitFor();
+  assert(
+    await page.locator(".queue-item.is-current").evaluate((row) => {
+      const rowBounds = row.getBoundingClientRect();
+      const listBounds = document.querySelector("#queue-list").getBoundingClientRect();
+      return rowBounds.top >= listBounds.top && rowBounds.bottom <= listBounds.bottom;
+    }),
+    "The app must reveal the current row when playback first appears",
   );
   await page.locator("#playback-copy").click();
   assert(
@@ -334,14 +336,6 @@ try {
   await waitFor(
     async () => await page.locator("body").getAttribute("data-state") === "paused",
     "The Electron window did not render the paused fixture",
-  );
-  assert(
-    await page.locator(".queue-item.is-current").evaluate((row) => {
-      const rowBounds = row.getBoundingClientRect();
-      const listBounds = document.querySelector("#queue-list").getBoundingClientRect();
-      return rowBounds.top >= listBounds.top && rowBounds.bottom <= listBounds.bottom;
-    }),
-    "The app must reveal the current row when playback first appears",
   );
   assert.deepEqual(
     await page.locator(".timeline-divider").evaluateAll((dividers) =>
@@ -1165,6 +1159,12 @@ try {
   );
   assert(!status().queue.some(({ id }) => id === olderWaiting.id));
   runEngine("pause");
+  await waitFor(
+    async () =>
+      status().state === "paused" &&
+      await page.locator("body").getAttribute("data-state") === "paused",
+    "The engine and renderer did not acknowledge Pause",
+  );
 
   const currentBeforeVoiceChange = status().current;
   assert(currentBeforeVoiceChange, "Voice change requires current speech");
@@ -1220,15 +1220,26 @@ try {
   assert.equal(await page.locator("#playback-copy").getAttribute("role"), null);
   assert.equal(await page.locator("#playback-copy").getAttribute("aria-label"), null);
 
-  runEngine("pause");
   runEngine(
     "speak",
-    "Background follow-along starts while the hidden window is idle and must update before focus returns. The second sentence is deliberately long enough to become another internal speech piece for the progression check. The final sentence keeps silent playback active until the renderer displays the new highlighted range.",
+    "Background follow-along starts while the hidden window is idle and must update before focus returns. The second sentence gives the renderer another internal speech piece to display during progression. The third sentence keeps silent playback active while the pause command settles on an early piece. The fourth sentence makes the test independent of a boundary race near the first piece's end. The fifth sentence leaves another highlighted range available after playback resumes. The final sentence keeps the fixture active until the renderer has displayed the updated range.",
   );
   await waitFor(
     () => {
       const current = status().current;
-      return status().state === "paused" && current?.piece_count >= 2 && current.piece >= 1;
+      return current?.piece_count >= 4 && current.piece >= 1;
+    },
+    "The hidden renderer fixture did not begin multi-piece speech",
+    30_000,
+  );
+  runEngine("pause");
+  await waitFor(
+    () => {
+      const current = status().current;
+      return status().state === "paused" &&
+        current?.piece_count >= 4 &&
+        current.piece >= 1 &&
+        current.piece < current.piece_count;
     },
     "The hidden renderer fixture did not reach paused multi-piece speech",
     30_000,

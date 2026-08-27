@@ -50,15 +50,6 @@ def wait_for_file(path: Path, timeout: float = 45.0) -> None:
     raise RuntimeError(f"timed out waiting for {path.name}")
 
 
-def wait_for_replay(path: Path, previous_mtime: int, timeout: float = 45.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if path.is_file() and path.stat().st_mtime_ns > previous_mtime:
-            return
-        time.sleep(0.1)
-    raise RuntimeError(f"timed out waiting for replay of {path.name}")
-
-
 def read_status(environment: dict[str, str]) -> dict[str, Any]:
     result = subprocess.run(
         [str(ENGINE), "status"],
@@ -121,7 +112,11 @@ def main() -> None:
                 [
                     str(ENGINE),
                     "speak",
-                    "The frozen Super Speech engine is complete and working.",
+                    (
+                        "The frozen Super Speech engine is complete and working. "
+                        "This longer fixture stays active while the replay test observes "
+                        "Current speech and pauses it before silent playback finishes."
+                    ),
                     "--voice",
                     "af_heart",
                     "--gap-ms",
@@ -133,7 +128,6 @@ def main() -> None:
             spoken = runtime / "spoken" / "001-af_heart-g0-say.txt"
             wait_for_file(spoken)
             original_text = spoken.read_text(encoding="utf-8")
-            original_mtime = spoken.stat().st_mtime_ns
             replay_result = subprocess.run(
                 [str(ENGINE), "play", spoken.stem],
                 env=environment,
@@ -146,7 +140,26 @@ def main() -> None:
                 raise RuntimeError(
                     "frozen engine returned an invalid replay acknowledgement"
                 )
-            wait_for_replay(spoken, original_mtime)
+            wait_for_status(
+                environment,
+                lambda status: (status.get("current") or {}).get("id") == spoken.stem,
+            )
+            subprocess.run([str(ENGINE), "pause"], env=environment, check=True)
+            wait_for_status(
+                environment,
+                lambda status: status.get("state") == "paused"
+                and (status.get("current") or {}).get("id") == spoken.stem,
+            )
+            subprocess.run([str(ENGINE), "resume"], env=environment, check=True)
+            wait_for_status(
+                environment,
+                lambda status: status.get("state") == "idle"
+                and status.get("current") is None
+                and any(
+                    item.get("id") == spoken.stem
+                    for item in status.get("history", [])
+                ),
+            )
             if spoken.read_text(encoding="utf-8") != original_text:
                 raise RuntimeError("frozen engine replay changed the archived text")
             if len(list((runtime / "spoken").glob("*.txt"))) != 1:

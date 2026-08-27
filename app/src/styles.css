@@ -132,6 +132,7 @@ body[data-theme="light"] .app-shell {
 
 body[data-theme="light"] .playback-button {
   box-shadow: none;
+  transition: transform 160ms ease, filter 160ms ease;
 }
 
 body[data-theme="light"] .playback-button:focus-visible {
@@ -294,6 +295,11 @@ button {
   min-height: 0;
   padding: 18px 28px 24px;
   background: var(--page-bg);
+}
+
+body.playback-expanded .queue-section,
+body.playback-expanded footer {
+  visibility: hidden;
 }
 
 .status-line {
