@@ -81,8 +81,6 @@ const currentText = requiredElement<HTMLParagraphElement>("current-text");
 const voicePill = requiredElement<HTMLSpanElement>("voice-pill");
 const voiceLabel = requiredElement<HTMLSpanElement>("voice-label");
 const metadataRow = requiredElement<HTMLDivElement>("metadata-row");
-const visibleSectionLabel = requiredElement<HTMLSpanElement>("visible-section-label");
-const queueCount = requiredElement<HTMLSpanElement>("queue-count");
 const clearQueueButton = requiredElement<HTMLButtonElement>("clear-queue-button");
 const queueList = requiredElement<HTMLDivElement>("queue-list");
 const queueActionMenu = requiredElement<HTMLDivElement>("queue-action-menu");
@@ -369,7 +367,6 @@ function render(status: RuntimeStatus): void {
     voicePill.classList.add("is-hidden");
   }
 
-  queueCount.textContent = `${status.queue_count} waiting`;
   clearQueueButton.classList.toggle("is-hidden", status.queue_count === 0);
   clearQueueButton.disabled = commandPending || clearPending || pendingQueueMutation !== null ||
     pendingSelection !== null;
@@ -1160,7 +1157,7 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     updateTimelineDividers(items, historyTotal);
     updateTimelineRows(items);
     revealCurrentItem();
-    updateTimelineViewport();
+    updateTimelineFade();
     return;
   }
   cancelQueuePointerDrag();
@@ -1183,7 +1180,7 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     empty.className = "queue-empty";
     empty.innerHTML = '<span class="empty-check">&#10003;</span><span>No speech yet</span>';
     queueList.append(empty);
-    updateTimelineViewport();
+    updateTimelineFade();
     return;
   }
 
@@ -1300,7 +1297,7 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
   updateTimelineDividers(items, historyTotal);
   updateTimelineRows(items);
   revealCurrentItem();
-  updateTimelineViewport();
+  updateTimelineFade();
   if (focusedItemId) {
     const row = queueList.querySelector<HTMLElement>(`[data-item-id="${focusedItemId}"]`);
     const preferred = focusedControlClass
@@ -1390,23 +1387,9 @@ function updateTimelineRows(items: TimelineItem[]): void {
   }
 }
 
-function updateTimelineViewport(): void {
+function updateTimelineFade(): void {
   const remaining = queueList.scrollHeight - queueList.clientHeight - queueList.scrollTop;
   queueList.classList.toggle("has-more", remaining > 1);
-  const dividers = [...queueList.querySelectorAll<HTMLElement>(".timeline-divider")];
-  const listBounds = queueList.getBoundingClientRect();
-  const sectionProbe = listBounds.top + listBounds.height / 2;
-  let activeDivider: HTMLElement | null = dividers[0] ?? null;
-  for (const divider of dividers) {
-    if (divider.getBoundingClientRect().top <= sectionProbe) {
-      activeDivider = divider;
-    } else {
-      break;
-    }
-  }
-  visibleSectionLabel.textContent = activeDivider
-    ?.querySelector<HTMLElement>(".timeline-divider-title")
-    ?.textContent ?? "";
 }
 
 function setExpandedItem(id: string | null): void {
@@ -1426,7 +1409,7 @@ function setExpandedItem(id: string | null): void {
       accessibleText.hidden = !expanded;
     }
   }
-  updateTimelineViewport();
+  updateTimelineFade();
 }
 
 async function playTimelineItem(item: TimelineItem, voice?: string): Promise<void> {
@@ -1927,7 +1910,7 @@ queueList.addEventListener("scroll", () => {
   if (openMenuItemId) {
     setOpenActionMenu(openMenuItemId);
   }
-  updateTimelineViewport();
+  updateTimelineFade();
 }, { passive: true });
 window.addEventListener("pointermove", updateQueuePointerDrag, true);
 window.addEventListener("pointermove", updateChunkPointerGesture, true);

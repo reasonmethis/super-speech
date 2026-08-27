@@ -12,9 +12,9 @@ frozen Python sidecar remains authoritative for synthesis, queue order, replay,
 and the current sample cursor. Playback selection returns the engine's exact
 resulting queue ID, so the renderer never infers acceptance from matching text.
 The renderer projects one timeline with Waiting, Current, and History dividers,
-plus a fixed label naming the visible section. It reveals a new current row once,
-then leaves scrolling under user control while status polling preserves the
-existing row nodes.
+under the Speechicles heading. It reveals a new current row once, then leaves
+scrolling under user control while status polling preserves the existing row
+nodes.
 
 ## Prerequisites
 

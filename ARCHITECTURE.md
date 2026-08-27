@@ -127,8 +127,8 @@ to retry instead of retaining an unreleasable live claim.
 The engine status keeps waiting items in playback order, oldest first. The
 desktop timeline displays that list in reverse so new arrivals enter at the top,
 then places the current item above newest-first History. Section dividers and a
-fixed visible-section label identify Waiting, Current, and History, and a new
-current ID is scrolled into view once instead of on every status poll. When current playback
+Speechicles heading identify the timeline, and a new current ID is scrolled into
+view once instead of on every status poll. When current playback
 finishes, the same row therefore crosses the divider without changing its
 position relative to the other rows. Waiting and History drags translate back
 into `move` and `move-history` commands. The renderer applies the result

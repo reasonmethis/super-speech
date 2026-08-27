@@ -458,41 +458,10 @@ body[data-state="loading"] .playback-copy {
 }
 
 .section-heading h2 {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
   margin: 0;
   font-size: 16px;
   font-weight: 630;
   letter-spacing: -0.02em;
-}
-
-#visible-section-label {
-  color: #918d9f;
-  font-size: 9px;
-  font-weight: 650;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.queue-count {
-  display: grid;
-  min-width: 25px;
-  height: 25px;
-  padding: 0 7px;
-  place-items: center;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  color: #aaa7b6;
-  background: rgba(255, 255, 255, 0.035);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-
-.queue-actions {
-  display: flex;
-  align-items: center;
-  gap: 7px;
 }
 
 .clear-queue-button {

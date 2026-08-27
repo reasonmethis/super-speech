@@ -261,9 +261,10 @@ try {
     0,
     "Every waiting row must have a reorder handle",
   );
-  await waitFor(
-    async () => await page.locator("#visible-section-label").textContent() === "Current",
-    "The fixed timeline context did not identify the visible Current section",
+  assert.equal(
+    await page.locator("#speech-heading").textContent(),
+    "Speechicles",
+    "The timeline must use the Speechicles brand name",
   );
   const pausedPlayback = await playbackSnapshot(page);
   assert(pausedPlayback.title && pausedPlayback.text && pausedPlayback.voice);

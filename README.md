@@ -47,8 +47,8 @@ then resume from that exact point. The window also shows the current voice,
 current text, and a scrollable queue. Waiting rows appear newest first, with the
 current row at the bottom of the active group. When it finishes, that row enters
 the top of History without moving the surrounding rows. Waiting, Current, and
-History dividers mark the timeline, while a fixed label beside Speech names the
-section in view. The app reveals the current row when playback changes. Click a
+History dividers mark the Speechicles timeline. The app reveals the current row
+when playback changes. Click a
 row once to toggle its full text, or double-click an upcoming or History row to play it
 without changing its expanded state. Selecting a waiting row jumps to that point:
 the current row and every older waiting row below the selection move to History,
