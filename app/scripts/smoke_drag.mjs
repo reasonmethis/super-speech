@@ -188,6 +188,7 @@ async function playbackExpansionSnapshot(page) {
     };
     const card = bounds("#playback-card");
     const cardStyle = getComputedStyle(document.querySelector("#playback-card"));
+    const textStyle = getComputedStyle(document.querySelector("#current-text"));
     return {
       height: card.height,
       stable: {
@@ -198,6 +199,13 @@ async function playbackExpansionSnapshot(page) {
         backgroundImage: cardStyle.backgroundImage,
         padding: cardStyle.padding,
         cursor: getComputedStyle(document.querySelector("#playback-copy")).cursor,
+        typography: {
+          fontFamily: textStyle.fontFamily,
+          fontSize: textStyle.fontSize,
+          fontWeight: textStyle.fontWeight,
+          letterSpacing: textStyle.letterSpacing,
+          lineHeight: textStyle.lineHeight,
+        },
       },
     };
   });
@@ -259,6 +267,13 @@ try {
     "The playback card did not enter its expanded state",
   );
   assert.equal(await page.locator("#current-text mark.current-piece").textContent(), followedText);
+  assert.equal(
+    await page.locator("#current-text mark.current-piece").evaluate(
+      (piece) => getComputedStyle(piece).padding,
+    ),
+    "0px",
+    "The current-piece highlight must not change text flow",
+  );
   assert(
     await page.locator(".queue-section").evaluate((section) => section.inert),
     "Expanded playback must remove the covered timeline from keyboard navigation",
@@ -315,6 +330,9 @@ try {
         brandShadow: style(".brand-mark").boxShadow,
         brandRadius: style(".brand-mark").borderRadius,
         buttonShadow: style(".playback-button").boxShadow,
+        buttonFilter: style(".playback-button").filter,
+        iconFilter: style(".playback-icon").filter,
+        controlOverflow: style(".playback-control").overflow,
       };
     }),
     {
@@ -324,6 +342,9 @@ try {
       brandShadow: "none",
       brandRadius: "0px",
       buttonShadow: "none",
+      buttonFilter: "none",
+      iconFilter: "none",
+      controlOverflow: "visible",
     },
     "The light theme must be flat and free of nested window or icon shells",
   );
