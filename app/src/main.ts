@@ -247,19 +247,26 @@ function visibleTimelineItems(status = currentStatus): TimelineItem[] {
   return timelineItems(status);
 }
 
-function itemReference(item: TimelineItem): string {
+function itemReference(
+  item: TimelineItem,
+  waitingPosition = item.position,
+): string {
   const summary = item.text.trim().slice(0, 40);
   if (item.kind === "current") {
     return "current speech";
   }
   if (item.kind === "upcoming") {
-    return `waiting speech ${item.position}, ${summary}`;
+    return `waiting speech ${waitingPosition}, ${summary}`;
   }
   return `history speech, ${summary}`;
 }
 
-function chunkActionLabel(item: TimelineItem, expanded: boolean): string {
-  return `${expanded ? "Collapse" : "Expand"} full text for ${itemReference(item)}`;
+function chunkActionLabel(
+  item: TimelineItem,
+  expanded: boolean,
+  reference = itemReference(item),
+): string {
+  return `${expanded ? "Collapse" : "Expand"} full text for ${reference}`;
 }
 
 function statusCopy(presentation: PlaybackPresentation): {
@@ -755,6 +762,7 @@ function applyDragVisualOrder(kind: DraggableKind, visualOrder: readonly string[
       kind === "upcoming" ? queueList.insertBefore(row, anchor) : queueList.append(row);
     }
   }
+  updateTimelineRows(visibleTimelineItems());
   if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
     return;
   }
@@ -1443,6 +1451,15 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
 
 function updateTimelineRows(items: TimelineItem[]): void {
   const itemById = new Map(items.map((item) => [item.id, item]));
+  const displayedWaitingRows = [
+    ...queueList.querySelectorAll<HTMLElement>(".queue-item.is-upcoming"),
+  ];
+  const displayedWaitingPositions = new Map(
+    displayedWaitingRows.map((row, index) => [
+      row.dataset.itemId,
+      displayedWaitingRows.length - index,
+    ]),
+  );
   const pendingId = pendingTimelineMutation && pendingTimelineMutation.kind !== "clear"
     ? pendingTimelineMutation.item.id
     : null;
@@ -1452,7 +1469,10 @@ function updateTimelineRows(items: TimelineItem[]): void {
     if (!item) {
       continue;
     }
-    const reference = itemReference(item);
+    const reference = itemReference(
+      item,
+      displayedWaitingPositions.get(item.id) ?? item.position,
+    );
     const pending = item.id === pendingId ? pendingTimelineMutation : null;
     const failed = item.id === failedTimelineMutation?.id;
     row.classList.toggle("is-pending", pending !== null);
@@ -1462,7 +1482,7 @@ function updateTimelineRows(items: TimelineItem[]): void {
       chunk.setAttribute("aria-busy", String(pending !== null));
       chunk.setAttribute(
         "aria-label",
-        chunkActionLabel(item, row.classList.contains("is-expanded")),
+        chunkActionLabel(item, row.classList.contains("is-expanded"), reference),
       );
     }
     const dragHandle = row.querySelector<HTMLButtonElement>(".queue-drag-handle");

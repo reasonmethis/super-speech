@@ -557,8 +557,8 @@ export function adoptTimelineSnapshot(
   current: RuntimeStatus,
   candidate: RuntimeStatus,
 ): RuntimeStatus {
-  const newEngineProcess = candidate.engine_pid !== null &&
-    current.engine_pid !== null &&
+  const newEngineProcess = candidate.engine_running &&
+    candidate.engine_pid !== null &&
     candidate.engine_pid !== current.engine_pid;
   // Revisions are comparable only while the same engine process owns the timeline
   const timelineIsOlder = !newEngineProcess && (
@@ -588,6 +588,29 @@ export function adoptTimelineSnapshot(
     engine_pid: candidate.engine_pid,
     engine_running: candidate.engine_running,
     installed: candidate.installed,
+  };
+}
+
+export function runtimeStatusForMutationSnapshot(
+  snapshot: EngineStatus,
+  runtime: RuntimeStatus,
+): RuntimeStatus {
+  if (
+    !runtime.engine_running ||
+    runtime.engine_pid === null ||
+    snapshot.engine_pid !== runtime.engine_pid
+  ) {
+    return runtime;
+  }
+  return {
+    ...snapshot,
+    state: runtimeStateForSnapshot(
+      runtime.installed,
+      runtime.engine_running,
+      snapshot.state,
+    ),
+    engine_running: runtime.engine_running,
+    installed: runtime.installed,
   };
 }
 

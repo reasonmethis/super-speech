@@ -34,6 +34,7 @@ import {
   parseTimelineMutation,
   parseTimelineMutationResult,
   runtimeStateForSnapshot,
+  runtimeStatusForMutationSnapshot,
   statusAfterTransientRead,
   statusAfterPauseCommand,
   statusForEngineProcess,
@@ -276,16 +277,10 @@ function runtimeMutationResult(
   result: TimelineMutationResult,
 ): TimelineMutationResult<RuntimeStatus> {
   const runtime = getStatus();
-  const snapshot = statusAfterPauseCommand({
-    ...result.snapshot,
-    state: runtimeStateForSnapshot(
-      runtime.installed,
-      runtime.engine_running,
-      result.snapshot.state,
-    ),
-    engine_running: runtime.engine_running,
-    installed: runtime.installed,
-  }, existsSync(path.join(runtimeDir(), "PAUSE")));
+  const snapshot = statusAfterPauseCommand(
+    runtimeStatusForMutationSnapshot(result.snapshot, runtime),
+    existsSync(path.join(runtimeDir(), "PAUSE")),
+  );
   return { ...result, snapshot };
 }
 

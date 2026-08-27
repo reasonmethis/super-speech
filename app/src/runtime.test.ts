@@ -13,6 +13,7 @@ import {
   parseEngineProcessStatus,
   parseTimelineMutation,
   parseTimelineMutationResult,
+  runtimeStatusForMutationSnapshot,
   runtimeStateForSnapshot,
   statusAfterTransientRead,
   statusForEngineProcess,
@@ -662,4 +663,66 @@ test("a new engine process starts a fresh timeline revision sequence", () => {
   };
 
   assert.equal(adoptTimelineSnapshot(oldProcess, newProcess), newProcess);
+});
+
+test("a live process is adopted after the stopped state cleared the old PID", () => {
+  const oldProcess: RuntimeStatus = {
+    ...status,
+    timeline_revision: 80,
+    updated_at: 80,
+    engine_pid: 100,
+    engine_running: true,
+    installed: true,
+  };
+  const stopped = adoptTimelineSnapshot(oldProcess, {
+    ...oldProcess,
+    timeline_revision: 79,
+    updated_at: 81,
+    state: "stopped",
+    engine_pid: null,
+    engine_running: false,
+  });
+  const newProcess: RuntimeStatus = {
+    ...status,
+    timeline_revision: 0,
+    updated_at: 1,
+    engine_pid: 200,
+    engine_running: true,
+    installed: true,
+  };
+
+  assert.equal(stopped.engine_pid, null);
+  assert.equal(adoptTimelineSnapshot(stopped, newProcess), newProcess);
+});
+
+test("mutation snapshots must belong to the live engine process", () => {
+  const runtime: RuntimeStatus = {
+    ...status,
+    timeline_revision: 2,
+    updated_at: 20,
+    engine_pid: 200,
+    engine_running: true,
+    installed: true,
+  };
+  const currentSnapshot = {
+    ...status,
+    timeline_revision: 3,
+    updated_at: 21,
+    engine_pid: 200,
+  };
+  const lateSnapshot = {
+    ...currentSnapshot,
+    timeline_revision: 80,
+    updated_at: 80,
+    engine_pid: 100,
+  };
+
+  assert.deepEqual(runtimeStatusForMutationSnapshot(currentSnapshot, runtime), {
+    ...currentSnapshot,
+    engine_running: true,
+    installed: true,
+  });
+  assert.equal(runtimeStatusForMutationSnapshot(lateSnapshot, runtime), runtime);
+  const stopped = { ...runtime, state: "stopped" as const, engine_pid: null, engine_running: false };
+  assert.equal(runtimeStatusForMutationSnapshot(currentSnapshot, stopped), stopped);
 });
