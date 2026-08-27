@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import platform
 import shutil
@@ -39,24 +40,95 @@ def engine_environment(runtime: Path) -> dict[str, str]:
     }
 
 
+def process_exists(process_id: object) -> bool:
+    if not isinstance(process_id, int) or process_id <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+        open_process.restype = ctypes.c_void_p
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
+        handle = open_process(0x1000, False, process_id)
+        if not handle:
+            return False
+        close_handle(handle)
+        return True
+    try:
+        os.kill(process_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def engine_lock_is_held(runtime: Path) -> bool:
+    lock_path = runtime / "engine.lock"
+    try:
+        if not lock_path.is_file() or lock_path.stat().st_size == 0:
+            return False
+        lock_file = lock_path.open("r+b")
+    except OSError:
+        return True
+    lock_file.seek(0)
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        return True
+    finally:
+        lock_file.close()
+    return False
+
+
+def runtime_engine_is_active(runtime: Path) -> bool:
+    if (runtime / "engine.alive").exists() or engine_lock_is_held(runtime):
+        return True
+    try:
+        status = json.loads((runtime / "status.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    return isinstance(status, dict) and process_exists(status.get("engine_pid"))
+
+
 def stop_existing_engine(engine: Path, runtime: Path) -> None:
     if not engine.is_file():
         return
-    result = subprocess.run(
-        [str(engine), "interrupt"],
-        env=engine_environment(runtime),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    if result.returncode != 0:
-        return
-
-    heartbeat = runtime / "engine.alive"
     deadline = time.monotonic() + 10
-    while heartbeat.exists() and time.monotonic() < deadline:
+    attempted_interrupt = False
+    while True:
+        active = runtime_engine_is_active(runtime)
+        if attempted_interrupt and not active:
+            return
+        result = subprocess.run(
+            [str(engine), "interrupt"],
+            check=False,
+            env=engine_environment(runtime),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        attempted_interrupt = True
+        if result.returncode != 0 and not active:
+            return
+        if time.monotonic() >= deadline:
+            break
         time.sleep(0.1)
-    if heartbeat.exists():
-        raise RuntimeError("the existing headless engine did not stop before upgrade")
+    raise RuntimeError("the existing headless engine did not stop before upgrade")
 
 
 def validate_platform() -> None:

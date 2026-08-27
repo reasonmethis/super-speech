@@ -557,7 +557,7 @@ def save_queue_order(paths: list[Path] | None = None) -> None:
         _write_saved_order(QUEUE_ORDER, ids)
 
 
-def log(msg: str) -> None:
+def log(msg: str, *, stderr: bool = False) -> None:
     now = time.time()
     line = f"{time.strftime('%H:%M:%S', time.localtime(now))}.{int((now % 1) * 1000):03d} {msg}\n"
     try:
@@ -565,7 +565,7 @@ def log(msg: str) -> None:
             f.write(line)
     except Exception:
         pass
-    print(line, end="", flush=True)
+    print(line, end="", file=sys.stderr if stderr else sys.stdout, flush=True)
 
 
 _last_hb = 0.0
@@ -920,7 +920,10 @@ def wait_for_ack_payload(target: Path, deadline: float) -> dict[str, object] | N
         try:
             target.unlink(missing_ok=True)
         except OSError as error:
-            log(f"could not remove acknowledgement {target.name}: {error}")
+            log(
+                f"could not remove acknowledgement {target.name}: {error}",
+                stderr=True,
+            )
         if not isinstance(payload, dict):
             raise RuntimeError("invalid engine acknowledgement: expected an object")
         return payload
@@ -1250,6 +1253,8 @@ class State:
     def __init__(self):
         self.lock = threading.RLock()
         self.claimed: set[str] = set()  # filenames in the buffer or being synthesized
+        self.claim_generations: dict[str, int] = {}
+        self.next_claim_generation = 0
         # Active playback-boundary item, including synthesis and inter-item gaps
         self.playing: str | None = None
         self.current_text: str | None = None
@@ -1976,6 +1981,9 @@ def _reset_waiting_buffer(buf: "queue.Queue", st: State) -> int:
     """Drop rendered waiting audio while preserving every current-chunk piece."""
     with st.lock:
         current_was_claimed = bool(st.playing and st.playing in st.claimed)
+        current_generation = (
+            st.claim_generations.get(st.playing) if st.playing else None
+        )
         kept = []
         discarded = 0
         while True:
@@ -1990,8 +1998,15 @@ def _reset_waiting_buffer(buf: "queue.Queue", st: State) -> int:
         for entry in kept:
             buf.put_nowait(entry)
         st.claimed = {entry[0].name for entry in kept}
+        st.claim_generations = {
+            name: generation
+            for name, generation in st.claim_generations.items()
+            if name in st.claimed
+        }
         if current_was_claimed and st.playing:
             st.claimed.add(st.playing)
+            if current_generation is not None:
+                st.claim_generations[st.playing] = current_generation
         if st.selection_name and _find_chunk(QUEUE, Path(st.selection_name).stem) is None:
             st.selection_name = None
         return discarded
@@ -2147,6 +2162,7 @@ def _process_play_request_locked(buf: "queue.Queue", st: State) -> str | None:
     with st.lock:
         discarded = _discard_buffer(buf)
         st.claimed.clear()
+        st.claim_generations.clear()
         st.playing = target.name
         st.current_text = selected_text
         st.current_voice = voice_from_name(target.name)
@@ -2183,6 +2199,7 @@ def do_clear(buf: "queue.Queue", st: State) -> bool:
             ordered = queue_files_in_order()
         except RuntimeError as error:
             st.claimed.clear()
+            st.claim_generations.clear()
             st.stop.set()
             log(f"CLEAR stopped because the saved queue order is unavailable: {error}")
             return False
@@ -2190,20 +2207,24 @@ def do_clear(buf: "queue.Queue", st: State) -> bool:
             archived = _archive_many(ordered)
         except MutationOutcomeUnconfirmed as error:
             st.claimed.clear()
+            st.claim_generations.clear()
             st.stop.set()
             log(f"CLEAR result is unconfirmed; stopping: {error}")
             return False
         except (OSError, RuntimeError) as error:
             st.claimed.clear()
+            st.claim_generations.clear()
             st.stop.set()
             log(f"CLEAR could not recover the timeline; stopping: {error}")
             return False
         if not archived:
             st.claimed.clear()
+            st.claim_generations.clear()
             st.stop.set()
             log("CLEAR could not archive the timeline; stopping")
             return False
         st.claimed = set()
+        st.claim_generations = {}
         st.selection_name = None
         st.skip_name = None
         st.saw_stop = False
@@ -2317,7 +2338,11 @@ def apply_queue_command(
     )
 
 
-def process_queue_requests(buf: "queue.Queue", st: State) -> bool:
+def process_queue_requests(
+    buf: "queue.Queue",
+    st: State,
+    held_chunk_name: str | None = None,
+) -> bool:
     """Apply every queued mutation in publication order and acknowledge each caller."""
     claimed_requests = claim_queue_requests()
     if not claimed_requests:
@@ -2359,6 +2384,8 @@ def process_queue_requests(buf: "queue.Queue", st: State) -> bool:
             changed = True
             acknowledged = publish_queue_ack(request_id)
         retire_claim(claimed, acknowledged)
+    if changed and held_chunk_name is not None:
+        invalidate_claim(st, held_chunk_name)
     return changed
 
 
@@ -2382,22 +2409,49 @@ def reject_pending_requests(reason: str) -> None:
             )
 
 
-def _claimed(st: State, name: str) -> bool:
+def _claimed(st: State, name: str, generation: int | None = None) -> bool:
     with st.lock:
-        return name in st.claimed and st.skip_name != name
+        return (
+            name in st.claimed
+            and st.skip_name != name
+            and (
+                generation is None
+                or st.claim_generations.get(name) == generation
+            )
+        )
+
+
+def invalidate_claim(st: State, name: str) -> None:
+    """Make every buffered or in-flight piece from the current claim stale."""
+    with st.lock:
+        st.claimed.discard(name)
+        st.claim_generations.pop(name, None)
+
+
+def buffered_piece_is_stale(st: State, name: str, generation: int) -> bool:
+    return not _claimed(st, name, generation)
 
 
 def release_preplay_chunk(st: State, name: str) -> None:
     """Remove a worker-owned item that ended before its first audio piece."""
     with st.lock:
         st.claimed.discard(name)
+        st.claim_generations.pop(name, None)
         if st.selection_name == name:
             st.selection_name = None
         if st.playing == name:
             clear_current_playback(st)
 
 
-def claim_next_queued_chunk(st: State) -> Path | None:
+def _record_claim(st: State, path: Path) -> tuple[Path, int]:
+    st.next_claim_generation += 1
+    generation = st.next_claim_generation
+    st.claimed.add(path.name)
+    st.claim_generations[path.name] = generation
+    return path, generation
+
+
+def claim_next_queued_chunk_with_generation(st: State) -> tuple[Path, int] | None:
     with st.lock:
         try:
             candidates = queue_files_in_order()
@@ -2410,8 +2464,7 @@ def claim_next_queued_chunk(st: State) -> Path | None:
                 None,
             )
             if active is not None and active.name not in st.claimed:
-                st.claimed.add(active.name)
-                return active
+                return _record_claim(st, active)
             return None
         if st.selection_name:
             selected = next(
@@ -2422,8 +2475,7 @@ def claim_next_queued_chunk(st: State) -> Path | None:
                 candidates.remove(selected)
                 candidates.insert(0, selected)
                 if selected.name not in st.claimed:
-                    st.claimed.add(selected.name)
-                    return selected
+                    return _record_claim(st, selected)
             else:
                 st.selection_name = None
         if st.playing:
@@ -2432,14 +2484,18 @@ def claim_next_queued_chunk(st: State) -> Path | None:
                 None,
             )
             if active is not None and active.name not in st.claimed:
-                st.claimed.add(active.name)
-                return active
+                return _record_claim(st, active)
         for path in candidates:
             if path.name in st.claimed:
                 continue
-            st.claimed.add(path.name)
-            return path
+            return _record_claim(st, path)
     return None
+
+
+def claim_next_queued_chunk(st: State) -> Path | None:
+    """Claim the next item while hiding the worker-only claim generation."""
+    claim = claim_next_queued_chunk_with_generation(st)
+    return claim[0] if claim is not None else None
 
 
 def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
@@ -2450,17 +2506,20 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
     while not st.stop.is_set():
         if consume(WARMUP):
             warmup(kokoro)
-        nxt = claim_next_queued_chunk(st)
-        if nxt is None:
+        claim = claim_next_queued_chunk_with_generation(st)
+        if claim is None:
             heartbeat()
             time.sleep(POLL_INTERVAL)
             continue
+        nxt, generation = claim
         try:
             text = nxt.read_text(encoding="utf-8").strip()
         except Exception as e:
             log(f"read error {nxt.name}: {e}")
             with st.lock:
                 st.claimed.discard(nxt.name)
+                if st.claim_generations.get(nxt.name) == generation:
+                    st.claim_generations.pop(nxt.name, None)
                 started = st.read_failures.setdefault(nxt.name, time.monotonic())
                 deadline = 0.5 if st.saw_stop else 5.0
                 if time.monotonic() - started >= deadline:
@@ -2483,7 +2542,8 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
         pieces = split_text_pieces(text, SPLIT_CHARS)
         delivered = 0
         for idx, piece in enumerate(pieces):
-            if st.stop.is_set() or not _claimed(st, nxt.name):
+            terminal_failure = False
+            if st.stop.is_set() or not _claimed(st, nxt.name, generation):
                 break
             heartbeat(force=True)
             t0 = time.time()
@@ -2492,13 +2552,16 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
                     piece.text, voice=voice, speed=1.0, lang="en-us"
                 )
             except Exception as e:
-                if not _claimed(st, nxt.name):
+                if not _claimed(st, nxt.name, generation):
                     log(f"ignored stale synth error {nxt.name}[{idx}]: {e}")
                     break
                 log(f"synth error {nxt.name}[{idx}] (voice={voice}): {e}")
                 if delivered == 0:
                     with st.lock:
-                        if nxt.name not in st.claimed or st.stop.is_set():
+                        if (
+                            st.claim_generations.get(nxt.name) != generation
+                            or st.stop.is_set()
+                        ):
                             log(f"ignored stale synth error {nxt.name}[{idx}]")
                             break
                         if archive_failed(nxt):
@@ -2509,6 +2572,7 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
                 # Mid-chunk failure: deliver an empty terminal piece so the
                 # consumer still archives and releases the chunk.
                 audio = audio[:0]
+                terminal_failure = True
             else:
                 log(
                     f"synth {nxt.name}[{idx+1}/{len(pieces)}] voice={voice} "
@@ -2519,17 +2583,21 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
                 audio,
                 sr,
                 idx == 0,
-                idx == len(pieces) - 1,
+                terminal_failure or idx == len(pieces) - 1,
                 idx + 1,
                 len(pieces),
                 text,
                 voice,
                 piece.start,
                 piece.end,
+                generation,
             )
             while not st.stop.is_set():
                 with st.lock:
-                    if nxt.name not in st.claimed or nxt.name == st.skip_name:
+                    if (
+                        st.claim_generations.get(nxt.name) != generation
+                        or nxt.name == st.skip_name
+                    ):
                         break
                     try:
                         buf.put_nowait(entry)
@@ -2540,6 +2608,8 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
                         break
                 heartbeat()
                 time.sleep(SIGNAL_TICK)
+            if terminal_failure:
+                break
 
 
 def gap_wait(seconds: float, buf: "queue.Queue", st: State) -> str | None:
@@ -2560,7 +2630,9 @@ def gap_wait(seconds: float, buf: "queue.Queue", st: State) -> str | None:
         if consume_control(STOP):
             reject_pending_requests("engine stopped before command was applied")
             return "stop"
-        if process_queue_requests(buf, st):
+        with st.lock:
+            held_chunk_name = st.playing
+        if process_queue_requests(buf, st, held_chunk_name):
             return "queue_changed"
         if st.stop.is_set():
             return "fatal"
@@ -2696,6 +2768,7 @@ def finish_chunk_playback(path: Path, outcome: str, last: bool, st: State) -> bo
     with st.lock:
         if released:
             st.claimed.discard(path.name)
+            st.claim_generations.pop(path.name, None)
         else:
             st.stop.set()
             log(
@@ -2830,6 +2903,7 @@ def run_engine_loop() -> None:
                     voice,
                     piece_start,
                     piece_end,
+                    claim_generation,
                 ) = buf.get(timeout=POLL_INTERVAL)
             except queue.Empty:
                 heartbeat()
@@ -2842,16 +2916,18 @@ def run_engine_loop() -> None:
 
             # Drop pieces invalidated while the worker was handing them off
             with st.lock:
-                stale = st.skip_name == path.name or path.name not in st.claimed
+                stale = buffered_piece_is_stale(
+                    st,
+                    path.name,
+                    claim_generation,
+                )
                 selected = not stale and first and st.selection_name == path.name
                 if first and st.skip_name and not stale:
                     st.skip_name = None
             if stale:
                 continue
 
-            if process_queue_requests(buf, st):
-                with st.lock:
-                    st.claimed.discard(path.name)
+            if process_queue_requests(buf, st, path.name):
                 continue
 
             if first and not session_first and not selected:
@@ -2864,19 +2940,15 @@ def run_engine_loop() -> None:
                     log("engine stopping during the inter-chunk gap")
                     return
                 if outcome == "select":
-                    with st.lock:
-                        st.claimed.discard(path.name)
+                    invalidate_claim(st, path.name)
                     continue
                 if outcome == "stop":
-                    with st.lock:
-                        st.claimed.discard(path.name)
+                    invalidate_claim(st, path.name)
                     log("STOP (gap); exiting")
                     return
                 if outcome == "clear":
                     continue
                 if outcome == "queue_changed":
-                    with st.lock:
-                        st.claimed.discard(path.name)
                     continue
                 if outcome == "skip":
                     finish_chunk_playback(path, "skip", True, st)

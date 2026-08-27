@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -69,3 +72,77 @@ def test_copy_skill_excludes_generated_runtime(
     assert (destination / "engine" / "engine.py").is_file()
     assert not (destination / "engine" / "build").exists()
     assert not (destination / "runtime").exists()
+
+
+def test_stop_existing_engine_retries_during_status_before_heartbeat_startup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    installer = load_installer()
+    engine = tmp_path / "venv" / "super-speech-engine"
+    engine.parent.mkdir()
+    engine.touch()
+    runtime = tmp_path / "runtime"
+    activity = iter((True, True, False))
+    attempts: list[list[str]] = []
+
+    monkeypatch.setattr(
+        installer,
+        "runtime_engine_is_active",
+        lambda _runtime: next(activity),
+    )
+
+    def interrupt(command, **_kwargs):
+        attempts.append(command)
+        return SimpleNamespace(returncode=1 if len(attempts) == 1 else 0)
+
+    monkeypatch.setattr(installer.subprocess, "run", interrupt)
+    monkeypatch.setattr(installer.time, "sleep", lambda _seconds: None)
+
+    installer.stop_existing_engine(engine, runtime)
+
+    assert attempts == [[str(engine), "interrupt"], [str(engine), "interrupt"]]
+
+
+def test_status_detects_a_starting_engine_before_its_first_heartbeat(
+    tmp_path: Path,
+) -> None:
+    installer = load_installer()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "status.json").write_text(
+        json.dumps({"state": "loading", "engine_pid": os.getpid()}),
+        encoding="utf-8",
+    )
+
+    assert installer.runtime_engine_is_active(runtime)
+
+
+def test_install_stops_the_engine_before_updating_its_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    installer = load_installer()
+    destination = tmp_path / "skill"
+    environment = destination / "runtime" / "venv"
+    python = installer.virtualenv_python(environment)
+    engine = installer.engine_command(environment)
+    python.parent.mkdir(parents=True)
+    python.touch()
+    engine.touch()
+    calls: list[str] = []
+
+    monkeypatch.setattr(installer, "copy_skill", lambda _destination: None)
+    monkeypatch.setattr(
+        installer,
+        "stop_existing_engine",
+        lambda *_args: calls.append("stop"),
+    )
+
+    def run(command, **_kwargs):
+        calls.append("pip" if "pip" in command else "setup")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(installer.subprocess, "run", run)
+
+    installer.install(destination)
+
+    assert calls == ["stop", "pip", "setup"]

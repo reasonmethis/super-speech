@@ -278,7 +278,7 @@ def test_engine_stream_failure_leaves_current_item_visible_in_stopped_queue(
 
     def deliver_one(_kokoro, buf: queue.Queue, state) -> None:
         with state.lock:
-            state.claimed.add(queued.name)
+            _, generation = engine._record_claim(state, queued)
         buf.put(
             (
                 queued,
@@ -292,6 +292,7 @@ def test_engine_stream_failure_leaves_current_item_visible_in_stopped_queue(
                 "af_heart",
                 0,
                 len("Keep visible"),
+                generation,
             )
         )
         state.stop.wait()
@@ -1259,6 +1260,46 @@ def test_play_command_starts_engine_then_publishes_the_requested_id(
     ]
 
 
+def test_play_command_keeps_stdout_as_json_when_ack_cleanup_is_locked(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine = load_engine("super_speech_engine_play_cli_locked_ack")
+    configure_runtime(engine, tmp_path)
+    request_id = "a" * 24
+    acknowledgement = engine.play_ack_path(request_id)
+    acknowledgement.write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "result_id": "007-bm_fable-say",
+                "accepted_at": 1.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    real_unlink = Path.unlink
+
+    def lock_ack(path: Path, *args, **kwargs) -> None:
+        if path == acknowledgement:
+            raise PermissionError("locked")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(engine, "start_engine", lambda: None)
+    monkeypatch.setattr(engine, "request_play", lambda *_args: request_id)
+    monkeypatch.setattr(Path, "unlink", lock_ack)
+
+    assert engine.cli(["play", "007-bm_fable-say"]) == 0
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "id": "007-bm_fable-say",
+        "accepted_at": 1.0,
+    }
+    assert "could not remove acknowledgement" in captured.err
+
+
 def test_play_request_rejects_a_non_id_before_touching_runtime(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -2218,6 +2259,88 @@ def test_reordering_during_a_gap_discards_the_held_piece(
     assert engine.claim_next_queued_chunk(state) == selected
 
 
+def test_queue_mutation_invalidates_the_piece_held_before_playback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_queue_held_piece_generation")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-bm_fable-say.txt"
+    moved = engine.QUEUE / "003-af_heart-say.txt"
+    for path in (current, waiting, moved):
+        path.write_text(path.stem, encoding="utf-8")
+    state = engine.State()
+    state.playing = current.name
+    first_claim = engine.claim_next_queued_chunk_with_generation(state)
+    assert first_claim is not None
+    held_path, old_generation = first_claim
+    engine.request_queue_command("move", moved.stem, waiting.stem)
+
+    assert engine.process_queue_requests(queue.Queue(), state, held_path.name)
+    replacement_claim = engine.claim_next_queued_chunk_with_generation(state)
+
+    assert replacement_claim is not None
+    replacement_path, new_generation = replacement_claim
+    assert replacement_path == held_path
+    assert new_generation != old_generation
+    assert engine.buffered_piece_is_stale(state, held_path.name, old_generation)
+    assert not engine.buffered_piece_is_stale(state, held_path.name, new_generation)
+
+
+def test_queue_mutation_keeps_an_active_playback_claim_without_buffered_audio(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_queue_active_piece_generation")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-bm_fable-say.txt"
+    moved = engine.QUEUE / "003-af_heart-say.txt"
+    for path in (current, waiting, moved):
+        path.write_text(path.stem, encoding="utf-8")
+    state = engine.State()
+    state.playing = current.name
+    claim = engine.claim_next_queued_chunk_with_generation(state)
+    assert claim is not None
+    current_path, generation = claim
+    engine.request_queue_command("move", moved.stem, waiting.stem)
+
+    assert engine.process_queue_requests(queue.Queue(), state)
+
+    assert state.claimed == {current.name}
+    assert not engine.buffered_piece_is_stale(state, current_path.name, generation)
+
+
+def test_queue_mutation_invalidates_the_piece_held_during_a_gap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_queue_gap_generation")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-bm_fable-say.txt"
+    moved = engine.QUEUE / "003-af_heart-say.txt"
+    for path in (current, waiting, moved):
+        path.write_text(path.stem, encoding="utf-8")
+    state = engine.State()
+    state.playing = current.name
+    first_claim = engine.claim_next_queued_chunk_with_generation(state)
+    assert first_claim is not None
+    held_path, old_generation = first_claim
+    engine.request_queue_command("move", moved.stem, waiting.stem)
+
+    assert engine.gap_wait(1.0, queue.Queue(), state) == "queue_changed"
+    replacement_claim = engine.claim_next_queued_chunk_with_generation(state)
+
+    assert replacement_claim is not None
+    replacement_path, new_generation = replacement_claim
+    assert replacement_path == held_path
+    assert new_generation != old_generation
+    assert engine.buffered_piece_is_stale(state, held_path.name, old_generation)
+    assert not engine.buffered_piece_is_stale(state, held_path.name, new_generation)
+
+
 @pytest.mark.parametrize("outcome", ["done", "skip"])
 def test_failed_archive_keeps_chunk_claimed_instead_of_repeating(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: str
@@ -2377,6 +2500,54 @@ def test_failed_synthesis_archive_stops_instead_of_leaving_a_stuck_claim(
     assert waiting.exists()
     assert state.claimed == {waiting.name}
     assert state.stop.is_set()
+
+
+def test_mid_item_synthesis_failure_emits_one_terminal_piece_and_stops(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_mid_item_synth_failure")
+    configure_runtime(engine, tmp_path)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    current.write_text("One. Two. Three.", encoding="utf-8")
+    pieces = [
+        SimpleNamespace(text=text, start=index * 5, end=index * 5 + len(text))
+        for index, text in enumerate(("One.", "Two.", "Three."))
+    ]
+    monkeypatch.setattr(engine, "split_text_pieces", lambda *_args: pieces)
+    calls: list[str] = []
+
+    class Kokoro:
+        @staticmethod
+        def create(text: str, **_kwargs):
+            calls.append(text)
+            if text == "Two.":
+                raise RuntimeError("piece failed")
+            if text == "Three.":
+                raise AssertionError("synthesis continued past a terminal failure")
+            return np.ones(8, dtype=np.float32), 8
+
+    state = engine.State()
+    buffer: queue.Queue = queue.Queue()
+    worker = threading.Thread(
+        target=engine.synth_worker,
+        args=(Kokoro(), buffer, state),
+    )
+    worker.start()
+    first = buffer.get(timeout=1)
+    terminal = buffer.get(timeout=1)
+    threading.Event().wait(0.05)
+    state.stop.set()
+    worker.join(1)
+
+    assert not worker.is_alive()
+    assert calls == ["One.", "Two."]
+    assert len(first[1]) == 8
+    assert first[4] is False
+    assert len(terminal[1]) == 0
+    assert terminal[4] is True
+    assert terminal[5] == 2
+    with pytest.raises(queue.Empty):
+        buffer.get_nowait()
 
 
 def test_invalidated_synthesis_failure_cannot_stop_the_selected_boundary(
