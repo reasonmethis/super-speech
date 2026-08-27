@@ -2133,16 +2133,17 @@ def test_selecting_a_prefetched_item_restarts_synthesis_at_piece_one(
         args=(BlockingKokoro(), buffered, state),
     )
     worker.start()
-    assert entered_second_piece.wait(1)
-
-    engine.request_play(selected.stem)
-    assert engine.process_play_request(buffered, state) == "select"
-    assert buffered.empty()
-    release_second_piece.set()
-
-    restarted = buffered.get(timeout=1)
-    state.stop.set()
-    worker.join(1)
+    try:
+        assert entered_second_piece.wait(1)
+        engine.request_play(selected.stem)
+        assert engine.process_play_request(buffered, state) == "select"
+        assert buffered.empty()
+        release_second_piece.set()
+        restarted = buffered.get(timeout=1)
+    finally:
+        release_second_piece.set()
+        state.stop.set()
+        worker.join(1)
 
     assert not worker.is_alive()
     assert restarted[0] == selected
