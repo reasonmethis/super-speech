@@ -114,11 +114,22 @@ for (const button of themeButtons) {
   });
 }
 
-interface PendingTimelineMutation {
-  mutation: TimelineMutation;
-  item: TimelineItem | null;
-  playbackState: "playing" | "paused" | null;
-}
+type PlayMutation = Extract<TimelineMutation, { type: "play" }>;
+type RowMutation = Extract<
+  TimelineMutation,
+  { type: "move" | "archive" | "delete" }
+>;
+type ClearMutation = Extract<TimelineMutation, { type: "clear" }>;
+
+type PendingTimelineMutation =
+  | {
+    kind: "play";
+    mutation: PlayMutation;
+    item: TimelineItem;
+    playbackState: "playing" | "paused";
+  }
+  | { kind: "row"; mutation: RowMutation; item: TimelineItem }
+  | { kind: "clear"; mutation: ClearMutation };
 
 interface TimelineMutationFailure {
   id: string | null;
@@ -179,7 +190,7 @@ function pendingPlaybackForPresentation(): {
   state: "playing" | "paused";
 } | null {
   const pending = pendingTimelineMutation;
-  return pending?.mutation.type === "play" && pending.item && pending.playbackState
+  return pending?.kind === "play"
     ? { item: pending.item, state: pending.playbackState }
     : null;
 }
@@ -200,7 +211,11 @@ function formatVoice(voice: string): string {
   return voiceLabels.get(voice) ?? voice.replace(/^[a-z]{2}_/, "").replaceAll("_", " ");
 }
 
-function timelineAction(item: TimelineItem, pending: boolean, failed: boolean): string {
+function timelineAction(
+  item: TimelineItem,
+  pending: PendingTimelineMutation | null,
+  failed: boolean,
+): string {
   if (pending) {
     const pendingLabels: Partial<Record<TimelineMutation["type"], string>> = {
       play: "Starting...",
@@ -208,9 +223,7 @@ function timelineAction(item: TimelineItem, pending: boolean, failed: boolean): 
       archive: "Moving...",
       delete: "Deleting...",
     };
-    return pendingTimelineMutation
-      ? pendingLabels[pendingTimelineMutation.mutation.type] ?? "Working..."
-      : "Working...";
+    return pendingLabels[pending.mutation.type] ?? "Working...";
   }
   if (failed) {
     return failedTimelineMutation?.type === "play"
@@ -457,7 +470,7 @@ function render(status: RuntimeStatus): void {
   playbackButton.dataset.action = action;
   playbackButton.setAttribute("aria-label", actionLabels[action]);
   const nonPlaybackMutationPending = pendingTimelineMutation !== null &&
-    pendingTimelineMutation.mutation.type !== "play";
+    pendingTimelineMutation.kind !== "play";
   playbackButton.disabled = commandPending || nonPlaybackMutationPending ||
     action === "inactive";
   playbackButton.setAttribute(
@@ -478,7 +491,7 @@ function render(status: RuntimeStatus): void {
 
   const visibleItems = visibleTimelineItems(status);
   const activeCount = visibleItems.filter(({ kind }) => kind !== "history").length;
-  const clearPending = pendingTimelineMutation?.mutation.type === "clear";
+  const clearPending = pendingTimelineMutation?.kind === "clear";
   const clearFailed = failedTimelineMutation?.type === "clear";
   clearQueueButton.classList.toggle("is-hidden", activeCount === 0);
   clearQueueButton.disabled = commandPending || pendingTimelineMutation !== null;
@@ -1430,7 +1443,9 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
 
 function updateTimelineRows(items: TimelineItem[]): void {
   const itemById = new Map(items.map((item) => [item.id, item]));
-  const pendingId = pendingTimelineMutation?.item?.id ?? null;
+  const pendingId = pendingTimelineMutation && pendingTimelineMutation.kind !== "clear"
+    ? pendingTimelineMutation.item.id
+    : null;
   const timelineCommandInFlight = commandPending || pendingTimelineMutation !== null;
   for (const row of queueList.querySelectorAll<HTMLElement>(".queue-item")) {
     const item = itemById.get(row.dataset.itemId ?? "");
@@ -1438,13 +1453,13 @@ function updateTimelineRows(items: TimelineItem[]): void {
       continue;
     }
     const reference = itemReference(item);
-    const pending = item.id === pendingId;
+    const pending = item.id === pendingId ? pendingTimelineMutation : null;
     const failed = item.id === failedTimelineMutation?.id;
-    row.classList.toggle("is-pending", pending);
+    row.classList.toggle("is-pending", pending !== null);
     row.classList.toggle("is-error", failed);
     const chunk = row.querySelector<HTMLButtonElement>(".queue-chunk");
     if (chunk) {
-      chunk.setAttribute("aria-busy", String(pending));
+      chunk.setAttribute("aria-busy", String(pending !== null));
       chunk.setAttribute(
         "aria-label",
         chunkActionLabel(item, row.classList.contains("is-expanded")),
@@ -1464,7 +1479,7 @@ function updateTimelineRows(items: TimelineItem[]): void {
       menuButton.setAttribute("aria-label", `Actions for ${reference}`);
       menuButton.setAttribute(
         "aria-busy",
-        String(pending),
+        String(pending !== null),
       );
     }
     row.querySelector<HTMLElement>(".queue-full-text")?.setAttribute(
@@ -1523,10 +1538,14 @@ async function playTimelineItem(item: TimelineItem, voice?: string): Promise<voi
     return;
   }
   await runTimelineMutation(
-    voice
-      ? { type: "play", id: item.id, voice }
-      : { type: "play", id: item.id },
-    voice ? { ...item, voice } : item,
+    {
+      kind: "play",
+      mutation: voice
+        ? { type: "play", id: item.id, voice }
+        : { type: "play", id: item.id },
+      item: voice ? { ...item, voice } : item,
+      playbackState: "playing",
+    },
     "Could not start selected speech. Try again.",
   );
 }
@@ -1535,14 +1554,21 @@ async function moveWaitingItem(id: string, beforeId: string | null): Promise<voi
   if (timelineMutationBlocked()) {
     return;
   }
+  const item = visibleTimelineItems().find((entry) => entry.id === id);
+  if (!item || item.kind !== "upcoming") {
+    return;
+  }
   const reordered = moveQueueItemBefore(currentStatus.queue, id, beforeId);
   const previousIds = currentStatus.queue.map((item) => item.id);
   if (reordered.every((item, index) => item.id === previousIds[index])) {
     return;
   }
   await runTimelineMutation(
-    { type: "move", section: "waiting", id, beforeId },
-    visibleTimelineItems().find((item) => item.id === id) ?? null,
+    {
+      kind: "row",
+      mutation: { type: "move", section: "waiting", id, beforeId },
+      item,
+    },
     "Could not reorder waiting speech. Try again.",
   );
 }
@@ -1551,14 +1577,21 @@ async function moveHistoryItem(id: string, beforeId: string | null): Promise<voi
   if (timelineMutationBlocked()) {
     return;
   }
+  const item = visibleTimelineItems().find((entry) => entry.id === id);
+  if (!item || item.kind !== "history") {
+    return;
+  }
   const reordered = moveQueueItemBefore(currentStatus.history, id, beforeId);
   const previousIds = currentStatus.history.map((item) => item.id);
   if (reordered.every((item, index) => item.id === previousIds[index])) {
     return;
   }
   await runTimelineMutation(
-    { type: "move", section: "history", id, beforeId },
-    visibleTimelineItems().find((item) => item.id === id) ?? null,
+    {
+      kind: "row",
+      mutation: { type: "move", section: "history", id, beforeId },
+      item,
+    },
     "Could not reorder History speech. Try again.",
   );
 }
@@ -1572,8 +1605,11 @@ async function archiveWaitingItem(id: string): Promise<void> {
     return;
   }
   await runTimelineMutation(
-    { type: "archive", id },
-    { ...item, kind: "upcoming", position: null },
+    {
+      kind: "row",
+      mutation: { type: "archive", id },
+      item: { ...item, kind: "upcoming", position: null },
+    },
     "Could not move waiting speech to History. Try again.",
   );
 }
@@ -1587,26 +1623,25 @@ async function deleteHistoryItem(id: string): Promise<void> {
     return;
   }
   await runTimelineMutation(
-    { type: "delete", id },
-    { ...item, kind: "history", position: null },
+    {
+      kind: "row",
+      mutation: { type: "delete", id },
+      item: { ...item, kind: "history", position: null },
+    },
     "Could not delete speech from History. Try again.",
   );
 }
 
 async function runTimelineMutation(
-  mutation: TimelineMutation,
-  item: TimelineItem | null,
+  pending: PendingTimelineMutation,
   failureMessage: string,
 ): Promise<void> {
   if (timelineMutationBlocked()) {
     return;
   }
-  const pending: PendingTimelineMutation = {
-    mutation,
-    item,
-    playbackState: mutation.type === "play" ? "playing" : null,
-  };
-  const restoreTimelineFocus = mutation.type === "clear" &&
+  const { mutation } = pending;
+  const failureId = pending.kind === "clear" ? null : pending.item.id;
+  const restoreTimelineFocus = pending.kind === "clear" &&
     document.activeElement === clearQueueButton;
   pendingTimelineMutation = pending;
   failedTimelineMutation = null;
@@ -1629,7 +1664,7 @@ async function runTimelineMutation(
       throw new Error("Engine protocol error: timeline mutation changed the selected ID");
     }
     if (result.outcome === "rejected") {
-      failedTimelineMutation = { id: item?.id ?? null, type: mutation.type };
+      failedTimelineMutation = { id: failureId, type: mutation.type };
       commandStatus.textContent = failureMessage;
       console.error("Timeline mutation was rejected", result.error);
     } else if (result.outcome === "unconfirmed") {
@@ -1638,7 +1673,7 @@ async function runTimelineMutation(
     }
   } catch (error) {
     console.error("Could not update the speech timeline", error);
-    failedTimelineMutation = { id: item?.id ?? null, type: mutation.type };
+    failedTimelineMutation = { id: failureId, type: mutation.type };
     commandStatus.textContent = error instanceof Error &&
         error.message.includes("Engine protocol error")
       ? "The app and speech engine returned incompatible data. Restart or reinstall Super Speech."
@@ -1680,7 +1715,7 @@ async function runPlaybackAction(): Promise<void> {
   );
   if (
     commandPending ||
-    (pendingTimelineMutation && pendingTimelineMutation.mutation.type !== "play") ||
+    (pendingTimelineMutation && pendingTimelineMutation.kind !== "play") ||
     queuePointerDrag ||
     action === "inactive"
   ) {
@@ -1700,9 +1735,12 @@ async function runPlaybackAction(): Promise<void> {
     return;
   }
   const paused = action === "pause";
-  const previousPendingState = pendingTimelineMutation?.playbackState ?? null;
-  if (pendingTimelineMutation?.mutation.type === "play") {
-    pendingTimelineMutation.playbackState = paused ? "paused" : "playing";
+  const pendingPlay = pendingTimelineMutation?.kind === "play"
+    ? pendingTimelineMutation
+    : null;
+  const previousPendingState = pendingPlay?.playbackState;
+  if (pendingPlay) {
+    pendingPlay.playbackState = paused ? "paused" : "playing";
     render(currentStatus);
   }
   try {
@@ -1714,8 +1752,8 @@ async function runPlaybackAction(): Promise<void> {
     }
   } catch (error) {
     console.error("Could not change playback state", error);
-    if (pendingTimelineMutation?.mutation.type === "play" && previousPendingState) {
-      pendingTimelineMutation.playbackState = previousPendingState;
+    if (pendingTimelineMutation === pendingPlay && previousPendingState) {
+      pendingPlay.playbackState = previousPendingState;
     }
   } finally {
     commandPending = false;
@@ -1744,8 +1782,7 @@ clearQueueButton.addEventListener("click", async () => {
     return;
   }
   await runTimelineMutation(
-    { type: "clear" },
-    null,
+    { kind: "clear", mutation: { type: "clear" } },
     "Could not clear speech. Try again.",
   );
 });

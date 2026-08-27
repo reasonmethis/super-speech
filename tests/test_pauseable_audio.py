@@ -6,6 +6,7 @@ import os
 import queue
 import sys
 import threading
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -3897,27 +3898,58 @@ def test_public_status_contains_no_storage_filenames(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "payload",
+    ("payload", "variant_name"),
     [
-        {"request_id": "a" * 24, "type": "play", "id": f"sp_{'1' * 32}"},
-        {
-            "request_id": "b" * 24,
-            "type": "move",
-            "section": "waiting",
-            "id": f"sp_{'1' * 32}",
-            "before_id": None,
-        },
-        {"request_id": "c" * 24, "type": "archive", "id": f"sp_{'1' * 32}"},
-        {"request_id": "d" * 24, "type": "delete", "id": f"sp_{'1' * 32}"},
-        {"request_id": "e" * 24, "type": "clear"},
+        (
+            {"request_id": "a" * 24, "type": "play", "id": f"sp_{'1' * 32}"},
+            "PlayMutation",
+        ),
+        (
+            {
+                "request_id": "b" * 24,
+                "type": "move",
+                "section": "waiting",
+                "id": f"sp_{'1' * 32}",
+                "before_id": None,
+            },
+            "MoveMutation",
+        ),
+        (
+            {"request_id": "c" * 24, "type": "archive", "id": f"sp_{'1' * 32}"},
+            "ArchiveMutation",
+        ),
+        (
+            {"request_id": "d" * 24, "type": "delete", "id": f"sp_{'1' * 32}"},
+            "DeleteMutation",
+        ),
+        ({"request_id": "e" * 24, "type": "clear"}, "ClearMutation"),
     ],
 )
-def test_mutation_envelope_accepts_each_variant(payload: dict[str, object]) -> None:
+def test_mutation_envelope_accepts_each_variant(
+    payload: dict[str, object], variant_name: str
+) -> None:
     engine = load_engine(f"super_speech_engine_envelope_{payload['type']}")
 
     parsed = engine.parse_durable_mutation(payload)
 
+    assert type(parsed).__name__ == variant_name
     assert parsed.to_payload() == payload
+    with pytest.raises(FrozenInstanceError):
+        parsed.request_id = "f" * 24
+
+
+def test_mutation_variants_only_expose_their_valid_fields() -> None:
+    engine = load_engine("super_speech_engine_mutation_variant_fields")
+    public_id = f"sp_{'1' * 32}"
+
+    play = engine.parse_durable_mutation(
+        {"request_id": "a" * 24, "type": "play", "id": public_id}
+    )
+    clear = engine.parse_durable_mutation({"request_id": "b" * 24, "type": "clear"})
+
+    assert play.id == public_id
+    assert not hasattr(play, "section")
+    assert not hasattr(clear, "id")
 
 
 @pytest.mark.parametrize(

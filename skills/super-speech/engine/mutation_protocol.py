@@ -2,42 +2,106 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass, field
+from typing import Literal, TypeAlias
 
 from speechicle_identity import is_public_id
-
 
 REQUEST_ID_PATTERN = re.compile(r"[a-f0-9]{24}")
 VOICE_PATTERN = re.compile(r"[ab][fm]_[a-z0-9_]+")
 MUTATION_TYPES = frozenset({"play", "move", "archive", "delete", "clear"})
-MOVE_SECTIONS = frozenset({"waiting", "history"})
 
 
 @dataclass(frozen=True)
-class MutationRequest:
-    """One validated timeline change in the engine's durable wire format."""
+class PlayMutation:
+    """Select one Speechicle, optionally with a different voice."""
 
     request_id: str
-    type: str
-    id: str | None = None
-    voice: str | None = None
-    section: str | None = None
-    before_id: str | None = None
+    id: str
+    voice: str | None
+    type: Literal["play"] = field(default="play", init=False)
 
     def to_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {
             "request_id": self.request_id,
             "type": self.type,
+            "id": self.id,
         }
-        if self.id is not None:
-            payload["id"] = self.id
         if self.voice is not None:
             payload["voice"] = self.voice
-        if self.section is not None:
-            payload["section"] = self.section
-            payload["before_id"] = self.before_id
         return payload
+
+
+@dataclass(frozen=True)
+class MoveMutation:
+    """Move one Speechicle within Waiting or History."""
+
+    request_id: str
+    section: Literal["waiting", "history"]
+    id: str
+    before_id: str | None
+    type: Literal["move"] = field(default="move", init=False)
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "request_id": self.request_id,
+            "type": self.type,
+            "section": self.section,
+            "id": self.id,
+            "before_id": self.before_id,
+        }
+
+
+@dataclass(frozen=True)
+class ArchiveMutation:
+    """Move one Waiting Speechicle to History."""
+
+    request_id: str
+    id: str
+    type: Literal["archive"] = field(default="archive", init=False)
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "request_id": self.request_id,
+            "type": self.type,
+            "id": self.id,
+        }
+
+
+@dataclass(frozen=True)
+class DeleteMutation:
+    """Delete one History Speechicle."""
+
+    request_id: str
+    id: str
+    type: Literal["delete"] = field(default="delete", init=False)
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "request_id": self.request_id,
+            "type": self.type,
+            "id": self.id,
+        }
+
+
+@dataclass(frozen=True)
+class ClearMutation:
+    """Move Current and every Waiting Speechicle to History."""
+
+    request_id: str
+    type: Literal["clear"] = field(default="clear", init=False)
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "request_id": self.request_id,
+            "type": self.type,
+        }
+
+
+MutationRequest: TypeAlias = (
+    PlayMutation | MoveMutation | ArchiveMutation | DeleteMutation | ClearMutation
+)
 
 
 def validate_request_id(value: object) -> str:
@@ -70,19 +134,18 @@ def parse_durable_mutation(payload: object) -> MutationRequest:
     request_id = validate_request_id(payload.get("request_id"))
 
     if mutation_type == "play":
-        allowed = {"request_id", "type", "id", "voice"}
-        _reject_extra_fields(payload, allowed)
-        return MutationRequest(
+        _reject_extra_fields(payload, {"request_id", "type", "id", "voice"})
+        return PlayMutation(
             request_id=request_id,
-            type="play",
             id=_validate_id(payload.get("id")),
             voice=_validate_voice(payload.get("voice")),
         )
     if mutation_type == "move":
-        allowed = {"request_id", "type", "section", "id", "before_id"}
-        _reject_extra_fields(payload, allowed)
+        _reject_extra_fields(
+            payload, {"request_id", "type", "section", "id", "before_id"}
+        )
         section = payload.get("section")
-        if section not in MOVE_SECTIONS:
+        if section != "waiting" and section != "history":
             raise ValueError("invalid move section")
         before_value = payload.get("before_id")
         before_id = (
@@ -90,24 +153,27 @@ def parse_durable_mutation(payload: object) -> MutationRequest:
             if before_value is None
             else _validate_id(before_value, "destination Speechicle ID")
         )
-        return MutationRequest(
+        return MoveMutation(
             request_id=request_id,
-            type="move",
             section=section,
             id=_validate_id(payload.get("id")),
             before_id=before_id,
         )
-    if mutation_type in {"archive", "delete"}:
-        allowed = {"request_id", "type", "id"}
-        _reject_extra_fields(payload, allowed)
-        return MutationRequest(
+    if mutation_type == "archive":
+        _reject_extra_fields(payload, {"request_id", "type", "id"})
+        return ArchiveMutation(
             request_id=request_id,
-            type=mutation_type,
+            id=_validate_id(payload.get("id")),
+        )
+    if mutation_type == "delete":
+        _reject_extra_fields(payload, {"request_id", "type", "id"})
+        return DeleteMutation(
+            request_id=request_id,
             id=_validate_id(payload.get("id")),
         )
 
     _reject_extra_fields(payload, {"request_id", "type"})
-    return MutationRequest(request_id=request_id, type="clear")
+    return ClearMutation(request_id=request_id)
 
 
 def parse_cli_mutation(payload: object, request_id: str) -> MutationRequest:

@@ -38,7 +38,6 @@ Env:
   SUPER_SPEECH_SPLIT_CHARS - internal synthesis-piece target size; 0 disables splitting
 """
 import argparse
-from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -50,11 +49,17 @@ import sys
 import threading
 import time
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
-from typing import BinaryIO, NamedTuple
+from typing import BinaryIO, NamedTuple, assert_never
 
 from mutation_protocol import (
+    ArchiveMutation,
+    ClearMutation,
+    DeleteMutation,
+    MoveMutation,
     MutationRequest,
+    PlayMutation,
     parse_cli_mutation,
     parse_durable_mutation,
     validate_request_id,
@@ -67,7 +72,6 @@ from speechicle_identity import (
     load_catalog,
     migration_from_intent,
     plan_identity_migration,
-    read_order_payload as _read_order_payload,
     sequence_for_public_id,
     strict_sequence,
     write_catalog,
@@ -851,7 +855,6 @@ def mutation_result_path(request_id: str) -> Path:
 
 def request_mutation(request: MutationRequest) -> str:
     """Publish one validated mutation to the engine's durable FIFO stream."""
-    request = parse_durable_mutation(request.to_payload())
     if not engine_is_running():
         raise RuntimeError("engine is not running")
 
@@ -2083,7 +2086,7 @@ def _archive_older_queue_items(target: Path, playing: str | None) -> list[Path]:
 def apply_play_mutation(
     buf: "queue.Queue",
     st: State,
-    request: MutationRequest,
+    request: PlayMutation,
 ) -> str | None:
     """Select one ID while excluding worker claims from the transaction."""
     with st.lock:
@@ -2093,11 +2096,9 @@ def apply_play_mutation(
 def _apply_play_mutation_locked(
     buf: "queue.Queue",
     st: State,
-    request: MutationRequest,
+    request: PlayMutation,
 ) -> str | None:
     ensure_identity_catalog()
-    if request.type != "play" or request.id is None:
-        raise ValueError("invalid play mutation")
     chunk_id = request.id
     requested_voice = request.voice
 
@@ -2472,25 +2473,23 @@ def process_mutation_requests(
             )
             continue
 
+        mutation_subject = (
+            request.request_id if isinstance(request, ClearMutation) else request.id
+        )
+        result_id: str | None = None
         try:
-            if request.type == "play":
+            if isinstance(request, PlayMutation):
                 play_effect = apply_play_mutation(buf, st, request)
                 effect = play_effect or effect
                 invalidate_held_chunk = invalidate_held_chunk or play_effect == "select"
                 result_id = request.id
-            elif request.type == "clear":
+            elif isinstance(request, ClearMutation):
                 if not do_clear(buf, st):
                     raise MutationOutcomeUnconfirmed("clear result was unconfirmed")
                 effect = "clear"
                 invalidate_held_chunk = True
-                result_id = None
-            else:
-                assert request.id is not None
-                action = (
-                    "move_history"
-                    if request.type == "move" and request.section == "history"
-                    else request.type
-                )
+            elif isinstance(request, MoveMutation):
+                action = "move_history" if request.section == "history" else "move"
                 apply_queue_command(
                     buf,
                     st,
@@ -2498,20 +2497,24 @@ def process_mutation_requests(
                     request.id,
                     request.before_id,
                 )
-                waiting_changed = (
-                    request.type == "archive"
-                    or request.type == "move" and request.section == "waiting"
-                )
-                if waiting_changed:
+                if request.section == "waiting":
                     if effect is None:
                         effect = "queue_changed"
                     invalidate_held_chunk = True
-                result_id = None
+            elif isinstance(request, ArchiveMutation):
+                apply_queue_command(buf, st, "archive", request.id, None)
+                if effect is None:
+                    effect = "queue_changed"
+                invalidate_held_chunk = True
+            elif isinstance(request, DeleteMutation):
+                apply_queue_command(buf, st, "delete", request.id, None)
+            else:
+                assert_never(request)
         except MutationOutcomeUnconfirmed as error:
             st.stop.set()
             log(
                 f"MUTATION {request.type} outcome is unconfirmed for "
-                f"{request.id or request.request_id}: {error}"
+                f"{mutation_subject}: {error}"
             )
             _publish_mutation_outcome(
                 claimed,
@@ -2522,10 +2525,7 @@ def process_mutation_requests(
             )
             break
         except (OSError, RuntimeError, ValueError) as error:
-            log(
-                f"MUTATION {request.type} rejected for "
-                f"{request.id or request.request_id}: {error}"
-            )
+            log(f"MUTATION {request.type} rejected for {mutation_subject}: {error}")
             _publish_mutation_outcome(
                 claimed,
                 st,
