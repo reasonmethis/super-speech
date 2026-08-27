@@ -181,6 +181,11 @@ result contract. Queue and History order live in `queue-order.json` and
 written to a temporary file and becomes visible only through an atomic replace,
 so concurrent `speak` calls cannot expose half-written rows.
 
+`speak` does not enter the mutation stream. It makes one complete new
+Speechicle visible at once. If the row is visible before the engine reads the
+timeline, the mutation sees it. Otherwise the new row appears after the
+mutation. No process ever sees part of a row.
+
 Clear and History promotion can touch several files. Before either operation,
 the engine writes the intended final layout to `timeline-intent.json`. Startup
 finishes an interrupted intent before accepting another mutation. A known

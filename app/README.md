@@ -3,14 +3,17 @@
 Start with the canonical project overview in [../README.md](../README.md).
 This document covers development and packaging for the Electron app.
 
-The renderer is plain TypeScript and CSS. A sandboxed preload bridge exposes
-status, pause, identifier-based playback and voice selection, Waiting and
-History reordering, archival, deletion, clearing, setup, and window controls
-without giving the renderer Node.js or
-filesystem access. Electron forwards those commands to the engine CLI; the
-frozen Python sidecar remains authoritative for synthesis, queue order, replay,
-and the current sample cursor. Playback selection returns the engine's exact
-resulting queue ID, so the renderer never infers acceptance from matching text.
+The desktop app has three parts. The renderer draws the window with plain
+TypeScript and CSS. Electron main owns the window, tray, and installed app. The
+bundled Python engine owns speech synthesis, queue order, replay, and the current
+audio position.
+
+The renderer cannot use Node.js or access files directly. A sandboxed preload
+bridge gives it a small set of commands for status, playback, voice selection,
+reordering, deletion, clearing, setup, and window controls. Electron main sends
+those commands to the engine CLI. The engine returns the exact result and new
+timeline after each change, so the renderer does not guess what happened.
+
 The renderer projects one timeline with Waiting, Current, and History dividers,
 under the Speechicles heading. It reveals a new current row once, then leaves
 scrolling under user control while status polling preserves the existing row
@@ -42,7 +45,7 @@ Current is the boundary between Waiting and History.
 - `src/main.ts` renders the window and handles playback, menus, and gestures
 - `src/queue-drag-model.ts` contains the pure drag state machine
 - `src/*.test.ts` covers those data and gesture rules without audio
-- `scripts/smoke_electron.mjs` drives the packaged UI with silent audio
+- `scripts/smoke_drag.mjs` drives the packaged UI with silent audio
 - `scripts/smoke_installed.mjs` verifies the installed app and engine supervisor
 
 The Python ownership map is in
@@ -91,13 +94,14 @@ npm run test:drag
 
 It uses real pointer input to reorder Waiting and History cards and archive
 Waiting cards, verifies single-click expansion, double-click-only playback,
-voice changes, row action menus, and stable
-playback-control geometry. It also verifies that Current is initially visible,
+voice changes, row action menus, and stable playback-control geometry. It also
+verifies that Current is initially visible,
 the three timeline sections remain explicit, and menus stay inside the visible
 speech viewport. Waiting and History menus both use `Play`, `Change voice`, and
-`Delete`; History deletion is permanent. The test then checks cancellation when the pointer loses its
-primary button, the window loses focus, or polling replaces the timeline. It
-also verifies compact and expanded follow-along text and that Clear all moves
+`Delete`; History deletion is permanent. The test then checks cancellation when
+the pointer loses its primary button, the window loses focus, or polling
+replaces the timeline. It also verifies compact and expanded follow-along text
+and that Clear all moves
 Current plus Waiting into History. The test runs against a temporary runtime
 with silent audio and verifies the result in both the renderer and the engine
 queue.

@@ -39,8 +39,9 @@ Ask your agent:
 > Use super-speech for your replies until I tell you otherwise
 
 The agent invokes `super-speech-engine speak`, which starts the installed engine
-when needed and queues one speech item. That item stays one row and one replay
-target even though the engine synthesizes it in smaller sentence-sized pieces.
+when needed and queues one Speechicle. A Speechicle is one complete spoken reply.
+It stays one row and one replay target even though the engine synthesizes it in
+smaller sentence-sized pieces.
 
 The app and tray control the same engine:
 
