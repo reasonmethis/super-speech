@@ -1278,8 +1278,8 @@ class State:
         timeline_fingerprint: str | None = None,
     ) -> None:
         self.lock = threading.RLock()
-        self.claimed: set[str] = set()  # filenames in the buffer or being synthesized
-        self.claim_generations: dict[str, int] = {}
+        # Filename to generation for work being synthesized, buffered, or played
+        self.claims: dict[str, int] = {}
         self.next_claim_generation = 0
         # Active playback-boundary item, including synthesis and inter-item gaps
         self.playing: str | None = None
@@ -2033,10 +2033,7 @@ def _discard_buffer(buf: "queue.Queue") -> int:
 def _reset_waiting_buffer(buf: "queue.Queue", st: State) -> int:
     """Drop rendered waiting audio while preserving every current-chunk piece."""
     with st.lock:
-        current_was_claimed = bool(st.playing and st.playing in st.claimed)
-        current_generation = (
-            st.claim_generations.get(st.playing) if st.playing else None
-        )
+        current_generation = st.claims.get(st.playing) if st.playing else None
         kept = []
         discarded = 0
         while True:
@@ -2050,16 +2047,14 @@ def _reset_waiting_buffer(buf: "queue.Queue", st: State) -> int:
                 discarded += 1
         for entry in kept:
             buf.put_nowait(entry)
-        st.claimed = {entry[0].name for entry in kept}
-        st.claim_generations = {
+        kept_names = {entry[0].name for entry in kept}
+        st.claims = {
             name: generation
-            for name, generation in st.claim_generations.items()
-            if name in st.claimed
+            for name, generation in st.claims.items()
+            if name in kept_names
         }
-        if current_was_claimed and st.playing:
-            st.claimed.add(st.playing)
-            if current_generation is not None:
-                st.claim_generations[st.playing] = current_generation
+        if st.playing and current_generation is not None:
+            st.claims[st.playing] = current_generation
         if st.selection_name and not (QUEUE / st.selection_name).exists():
             st.selection_name = None
         return discarded
@@ -2188,8 +2183,7 @@ def _apply_play_mutation_locked(
         raise MutationOutcomeUnconfirmed("play command result was unconfirmed")
     with st.lock:
         discarded = _discard_buffer(buf)
-        st.claimed.clear()
-        st.claim_generations.clear()
+        st.claims.clear()
         st.playing = target.name
         st.current_text = selected_text
         st.current_voice = voice_from_name(target.name)
@@ -2226,33 +2220,28 @@ def do_clear(buf: "queue.Queue", st: State) -> bool:
         try:
             ordered = queue_files_in_order()
         except RuntimeError as error:
-            st.claimed.clear()
-            st.claim_generations.clear()
+            st.claims.clear()
             st.stop.set()
             log(f"clear stopped because the saved queue order is unavailable: {error}")
             return False
         try:
             archived = _archive_many(ordered)
         except MutationOutcomeUnconfirmed as error:
-            st.claimed.clear()
-            st.claim_generations.clear()
+            st.claims.clear()
             st.stop.set()
             log(f"clear result is unconfirmed; stopping: {error}")
             return False
         except (OSError, RuntimeError) as error:
-            st.claimed.clear()
-            st.claim_generations.clear()
+            st.claims.clear()
             st.stop.set()
             log(f"clear could not recover the timeline; stopping: {error}")
             return False
         if not archived:
-            st.claimed.clear()
-            st.claim_generations.clear()
+            st.claims.clear()
             st.stop.set()
             log("clear could not archive the timeline; stopping")
             return False
-        st.claimed = set()
-        st.claim_generations = {}
+        st.claims.clear()
         st.selection_name = None
         st.skip_name = None
         st.saw_stop = False
@@ -2581,31 +2570,28 @@ def reject_pending_requests(reason: str, st: State) -> None:
 def _claimed(st: State, name: str, generation: int | None = None) -> bool:
     with st.lock:
         return (
-            name in st.claimed
+            name in st.claims
             and st.skip_name != name
-            and (
-                generation is None
-                or st.claim_generations.get(name) == generation
-            )
+            and (generation is None or st.claims[name] == generation)
         )
 
 
 def invalidate_claim(st: State, name: str) -> None:
     """Make every buffered or in-flight piece from the current claim stale."""
     with st.lock:
-        st.claimed.discard(name)
-        st.claim_generations.pop(name, None)
+        st.claims.pop(name, None)
 
 
 def buffered_piece_is_stale(st: State, name: str, generation: int) -> bool:
     return not _claimed(st, name, generation)
 
 
-def release_preplay_chunk(st: State, name: str) -> None:
-    """Remove a worker-owned item that ended before its first audio piece."""
+def release_preplay_chunk(st: State, name: str, generation: int) -> None:
+    """Release one exact worker claim before its first audio piece."""
     with st.lock:
-        st.claimed.discard(name)
-        st.claim_generations.pop(name, None)
+        if st.claims.get(name) != generation:
+            return
+        st.claims.pop(name)
         if st.selection_name == name:
             st.selection_name = None
         if st.playing == name:
@@ -2615,8 +2601,7 @@ def release_preplay_chunk(st: State, name: str) -> None:
 def _record_claim(st: State, path: Path) -> tuple[Path, int]:
     st.next_claim_generation += 1
     generation = st.next_claim_generation
-    st.claimed.add(path.name)
-    st.claim_generations[path.name] = generation
+    st.claims[path.name] = generation
     return path, generation
 
 
@@ -2632,7 +2617,7 @@ def claim_next_queued_chunk_with_generation(st: State) -> tuple[Path, int] | Non
                 (path for path in candidates if path.name == st.playing),
                 None,
             )
-            if active is not None and active.name not in st.claimed:
+            if active is not None and active.name not in st.claims:
                 return _record_claim(st, active)
             return None
         if st.selection_name:
@@ -2643,7 +2628,7 @@ def claim_next_queued_chunk_with_generation(st: State) -> tuple[Path, int] | Non
             if selected is not None:
                 candidates.remove(selected)
                 candidates.insert(0, selected)
-                if selected.name not in st.claimed:
+                if selected.name not in st.claims:
                     return _record_claim(st, selected)
             else:
                 st.selection_name = None
@@ -2652,10 +2637,10 @@ def claim_next_queued_chunk_with_generation(st: State) -> tuple[Path, int] | Non
                 (path for path in candidates if path.name == st.playing),
                 None,
             )
-            if active is not None and active.name not in st.claimed:
+            if active is not None and active.name not in st.claims:
                 return _record_claim(st, active)
         for path in candidates:
-            if path.name in st.claimed:
+            if path.name in st.claims:
                 continue
             return _record_claim(st, path)
     return None
@@ -2686,9 +2671,9 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
         except Exception as e:
             log(f"read error {nxt.name}: {e}")
             with st.lock:
-                st.claimed.discard(nxt.name)
-                if st.claim_generations.get(nxt.name) == generation:
-                    st.claim_generations.pop(nxt.name, None)
+                if st.claims.get(nxt.name) != generation:
+                    continue
+                st.claims.pop(nxt.name)
                 started = st.read_failures.setdefault(nxt.name, time.monotonic())
                 deadline = 0.5 if st.saw_stop else 5.0
                 if time.monotonic() - started >= deadline:
@@ -2703,7 +2688,7 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
         if not text:
             log(f"empty {nxt.name}, archiving")
             if archive(nxt):
-                release_preplay_chunk(st, nxt.name)
+                release_preplay_chunk(st, nxt.name, generation)
             else:
                 st.stop.set()
             continue
@@ -2728,13 +2713,13 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
                 if delivered == 0:
                     with st.lock:
                         if (
-                            st.claim_generations.get(nxt.name) != generation
+                            st.claims.get(nxt.name) != generation
                             or st.stop.is_set()
                         ):
                             log(f"ignored stale synth error {nxt.name}[{idx}]")
                             break
                         if archive_failed(nxt):
-                            release_preplay_chunk(st, nxt.name)
+                            release_preplay_chunk(st, nxt.name, generation)
                         else:
                             st.stop.set()
                     break
@@ -2764,7 +2749,7 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
             while not st.stop.is_set():
                 with st.lock:
                     if (
-                        st.claim_generations.get(nxt.name) != generation
+                        st.claims.get(nxt.name) != generation
                         or nxt.name == st.skip_name
                     ):
                         break
@@ -2935,8 +2920,7 @@ def finish_chunk_playback(path: Path, outcome: str, last: bool, st: State) -> bo
     released = outcome in {"select", "clear", "fatal"} or archive(path)
     with st.lock:
         if released:
-            st.claimed.discard(path.name)
-            st.claim_generations.pop(path.name, None)
+            st.claims.pop(path.name, None)
         else:
             st.stop.set()
             log(
