@@ -45,6 +45,7 @@ def configure_runtime(engine, tmp_path: Path) -> None:
     engine.CONTINUE = tmp_path / "CONTINUE"
     engine.PLAY = tmp_path / "PLAY.json"
     engine.QUEUE_COMMAND = tmp_path / "QUEUE_COMMAND.json"
+    engine.MUTATION = tmp_path / "MUTATION.json"
     engine.QUEUE_ORDER = tmp_path / "queue-order.json"
     engine.HISTORY_ORDER = tmp_path / "history-order.json"
     engine.WARMUP = tmp_path / "WARMUP"
@@ -65,6 +66,24 @@ def configure_runtime(engine, tmp_path: Path) -> None:
 def speechicle_id(engine, path: Path) -> str:
     engine.ensure_identity_catalog()
     return engine.public_id_for_path(path)
+
+
+def request_mutation(engine, mutation_type: str, **fields: object) -> str:
+    return engine.request_mutation(
+        engine.build_mutation_request(mutation_type, **fields)
+    )
+
+
+def committed_result(engine, request_id: str) -> dict[str, object]:
+    result = engine.wait_for_mutation_result(request_id, timeout=0.1)
+    assert result["outcome"] == "committed"
+    return result
+
+
+def rejected_result(engine, request_id: str) -> dict[str, object]:
+    result = engine.wait_for_mutation_result(request_id, timeout=0.1)
+    assert result["outcome"] == "rejected"
+    return result
 
 
 def test_split_text_pieces_retains_source_ranges_with_unicode_and_spacing() -> None:
@@ -140,7 +159,6 @@ def test_status_exposes_pause_current_chunk_and_queue(tmp_path: Path) -> None:
     state.current_voice = "af_heart"
     state.current_piece = 1
     state.current_piece_count = 2
-    state.recent_starts = [("001-af_heart-say", 12.5)]
 
     engine.publish_status("playing", state, force=True)
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
@@ -148,9 +166,7 @@ def test_status_exposes_pause_current_chunk_and_queue(tmp_path: Path) -> None:
     assert status["state"] == "paused"
     assert status["current"]["text"] == "Current words"
     assert status["current"]["voice"] == "af_heart"
-    assert status["recent_starts"] == [
-        {"id": "001-af_heart-say", "started_at": 12.5}
-    ]
+    assert status["timeline_revision"] == 0
     assert status["queue_count"] == 5
     assert len(status["queue"]) == 5
     assert status["queue"][0]["text"] == full_queue_text.strip()
@@ -181,22 +197,7 @@ def test_status_stays_playing_while_the_current_item_waits_for_its_next_piece(
     assert status["current"]["id"] == speechicle_id(engine, current)
 
 
-def test_started_receipts_are_bounded_and_keep_multiple_fast_items(
-    tmp_path: Path,
-) -> None:
-    engine = load_engine("super_speech_engine_started_receipts")
-    configure_runtime(engine, tmp_path)
-    state = engine.State()
-
-    for number in range(25):
-        engine.record_started(state, f"{number:03d}-af_heart-say", float(number))
-
-    assert len(state.recent_starts) == 20
-    assert state.recent_starts[0] == ("024-af_heart-say", 24.0)
-    assert state.recent_starts[-1] == ("005-af_heart-say", 5.0)
-
-
-def test_audio_stream_failure_does_not_publish_a_started_receipt(
+def test_audio_stream_failure_propagates_before_playback(
     tmp_path: Path,
 ) -> None:
     engine = load_engine("super_speech_engine_stream_start_failure")
@@ -226,9 +227,6 @@ def test_audio_stream_failure_does_not_publish_a_started_receipt(
             state,
         )
 
-    assert state.recent_starts == []
-
-
 def test_fatal_engine_stop_cannot_start_another_audio_stream(
     tmp_path: Path,
 ) -> None:
@@ -257,9 +255,6 @@ def test_fatal_engine_stop_cannot_start_another_audio_stream(
         queue.Queue(),
         state,
     ) == "fatal"
-    assert state.recent_starts == []
-
-
 def test_engine_stream_failure_leaves_current_item_visible_in_stopped_queue(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -807,7 +802,7 @@ def test_archive_waits_for_history_order_before_moving_the_current_row(
     assert engine.history_files_in_order() == [newer, older]
 
 
-def test_queue_request_is_applied_and_acknowledged(
+def test_waiting_move_publishes_a_committed_result(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     engine = load_engine("super_speech_engine_queue_request")
@@ -818,11 +813,15 @@ def test_queue_request_is_applied_and_acknowledged(
     first.write_text("First", encoding="utf-8")
     second.write_text("Second", encoding="utf-8")
 
-    request_id = engine.request_queue_command(
-        "move", speechicle_id(engine, second), speechicle_id(engine, first)
+    request_id = request_mutation(
+        engine,
+        "move",
+        section="waiting",
+        id=speechicle_id(engine, second),
+        before_id=speechicle_id(engine, first),
     )
-    assert engine.process_queue_requests(queue.Queue(), engine.State())
-    engine.wait_for_queue_ack(request_id, timeout=0.1)
+    assert engine.process_mutation_requests(queue.Queue(), engine.State()) == "queue_changed"
+    committed_result(engine, request_id)
 
     assert [path.stem for path in engine.queue_files_in_order()] == [
         second.stem,
@@ -838,12 +837,14 @@ def test_timed_out_unclaimed_queue_request_cannot_apply_later(
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     waiting = engine.QUEUE / "001-af_heart-say.txt"
     waiting.write_text("Keep me", encoding="utf-8")
-    request_id = engine.request_queue_command("archive", speechicle_id(engine, waiting))
+    request_id = request_mutation(
+        engine, "archive", id=speechicle_id(engine, waiting)
+    )
 
-    with pytest.raises(RuntimeError, match="did not acknowledge"):
-        engine.wait_for_queue_ack(request_id, timeout=0.01)
+    with pytest.raises(RuntimeError, match="did not publish"):
+        engine.wait_for_mutation_result(request_id, timeout=0.01)
 
-    assert not engine.process_queue_requests(queue.Queue(), engine.State())
+    assert engine.process_mutation_requests(queue.Queue(), engine.State()) is None
     assert waiting.exists()
 
 
@@ -853,7 +854,7 @@ def test_timeout_retries_a_transient_request_cancellation_lock(
     engine = load_engine("super_speech_engine_queue_cancel_retry")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    request_id = engine.request_queue_command("delete", f"sp_{'1' * 32}")
+    request_id = request_mutation(engine, "delete", id=f"sp_{'1' * 32}")
     real_replace = engine.os.replace
     failures = 0
 
@@ -866,11 +867,11 @@ def test_timeout_retries_a_transient_request_cancellation_lock(
 
     monkeypatch.setattr(engine.os, "replace", replace)
 
-    with pytest.raises(RuntimeError, match="did not acknowledge"):
-        engine.wait_for_queue_ack(request_id, timeout=0.01)
+    with pytest.raises(RuntimeError, match="did not publish"):
+        engine.wait_for_mutation_result(request_id, timeout=0.01)
 
     assert failures == 2
-    assert not list(engine.BASE.glob(f"QUEUE_COMMAND.*.{request_id}.json"))
+    assert not list(engine.BASE.glob(f"MUTATION.*.{request_id}.json"))
 
 
 def test_persistently_locked_unclaimed_request_returns_unconfirmed(
@@ -879,24 +880,27 @@ def test_persistently_locked_unclaimed_request_returns_unconfirmed(
     engine = load_engine("super_speech_engine_queue_cancel_locked")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    request_id = engine.request_queue_command("delete", f"sp_{'1' * 32}")
-    monkeypatch.setattr(engine, "cancel_unclaimed_request", lambda *_args: False)
+    request_id = request_mutation(engine, "delete", id=f"sp_{'1' * 32}")
+    monkeypatch.setattr(engine, "cancel_unclaimed_mutation", lambda *_args: False)
 
     with pytest.raises(RuntimeError, match="result was unconfirmed"):
-        engine.wait_for_queue_ack(request_id, timeout=0.01)
+        engine.wait_for_mutation_result(request_id, timeout=0.01)
 
-    assert list(engine.BASE.glob(f"QUEUE_COMMAND.*.{request_id}.json"))
+    assert list(engine.BASE.glob(f"MUTATION.*.{request_id}.json"))
 
 
-def test_ack_published_at_the_timeout_boundary_is_still_observed(
+def test_result_published_at_the_timeout_boundary_is_still_observed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    engine = load_engine("super_speech_engine_queue_ack_boundary")
+    engine = load_engine("super_speech_engine_result_boundary")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    request_id = engine.request_queue_command("delete", f"sp_{'1' * 32}")
-    request = next(engine.BASE.glob(f"QUEUE_COMMAND.*.{request_id}.json"))
-    real_wait = engine.wait_for_ack_payload
+    request_id = request_mutation(engine, "delete", id=f"sp_{'1' * 32}")
+    request = next(engine.BASE.glob(f"MUTATION.*.{request_id}.json"))
+    state = engine.State()
+    snapshot = engine.publish_status("idle", state, force=True)
+    assert snapshot is not None
+    real_wait = engine.wait_for_json_payload
     calls = 0
 
     def wait(target: Path, deadline: float):
@@ -904,18 +908,20 @@ def test_ack_published_at_the_timeout_boundary_is_still_observed(
         calls += 1
         if calls == 1:
             request.unlink()
-            assert engine.publish_queue_ack(request_id)
+            assert engine.publish_mutation_result(
+                request_id, "committed", snapshot
+            )
             return None
         return real_wait(target, deadline)
 
-    monkeypatch.setattr(engine, "wait_for_ack_payload", wait)
+    monkeypatch.setattr(engine, "wait_for_json_payload", wait)
 
-    engine.wait_for_queue_ack(request_id, timeout=0.01)
+    committed_result(engine, request_id)
 
     assert calls == 2
 
 
-def test_history_delete_request_is_applied_and_acknowledged(
+def test_history_delete_publishes_a_committed_result(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     engine = load_engine("super_speech_engine_history_delete_request")
@@ -924,22 +930,32 @@ def test_history_delete_request_is_applied_and_acknowledged(
     history = engine.SPOKEN / "001-af_heart-say.txt"
     history.write_text("History", encoding="utf-8")
 
-    request_id = engine.request_queue_command("delete", speechicle_id(engine, history))
-    assert engine.process_queue_requests(queue.Queue(), engine.State())
-    engine.wait_for_queue_ack(request_id, timeout=0.1)
+    request_id = request_mutation(
+        engine, "delete", id=speechicle_id(engine, history)
+    )
+    assert engine.process_mutation_requests(queue.Queue(), engine.State()) is None
+    committed_result(engine, request_id)
 
     assert not history.exists()
 
 
-def test_queue_ack_retries_a_transient_windows_read_error(
+def test_mutation_result_retries_a_transient_windows_read_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    engine = load_engine("super_speech_engine_queue_ack_retry")
+    engine = load_engine("super_speech_engine_result_retry")
     configure_runtime(engine, tmp_path)
     request_id = "a" * 24
-    acknowledgement = engine.queue_ack_path(request_id)
-    acknowledgement.write_text(
-        json.dumps({"ok": True, "accepted_at": 1.0, "error": None}),
+    result_path = engine.mutation_result_path(request_id)
+    snapshot = engine.publish_status("idle", engine.State(), force=True)
+    assert snapshot is not None
+    result_path.write_text(
+        json.dumps(
+            {
+                "outcome": "committed",
+                "request_id": request_id,
+                "snapshot": snapshot,
+            }
+        ),
         encoding="utf-8",
     )
     original_read_text = Path.read_text
@@ -947,18 +963,19 @@ def test_queue_ack_retries_a_transient_windows_read_error(
 
     def read_text(path: Path, *args, **kwargs) -> str:
         nonlocal attempts
-        if path == acknowledgement:
+        if path == result_path:
             attempts += 1
             if attempts == 1:
-                raise PermissionError("acknowledgement is being replaced")
+                raise PermissionError("result is being replaced")
         return original_read_text(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", read_text)
 
-    engine.wait_for_queue_ack(request_id, timeout=0.2)
+    result = engine.wait_for_mutation_result(request_id, timeout=0.2)
+    assert result["outcome"] == "committed"
 
     assert attempts == 2
-    assert not acknowledgement.exists()
+    assert not result_path.exists()
 
 
 def test_queue_request_rejects_the_current_chunk(
@@ -972,11 +989,13 @@ def test_queue_request_rejects_the_current_chunk(
     state = engine.State()
     state.playing = current.name
 
-    request_id = engine.request_queue_command("archive", speechicle_id(engine, current))
-    assert not engine.process_queue_requests(queue.Queue(), state)
+    request_id = request_mutation(
+        engine, "archive", id=speechicle_id(engine, current)
+    )
+    assert engine.process_mutation_requests(queue.Queue(), state) is None
 
-    with pytest.raises(RuntimeError, match="waiting chunk not found"):
-        engine.wait_for_queue_ack(request_id, timeout=0.1)
+    result = rejected_result(engine, request_id)
+    assert "waiting chunk not found" in str(result["error"])
     assert current.is_file()
 
 
@@ -990,18 +1009,20 @@ def test_unconfirmed_waiting_archive_stops_the_engine(
     waiting.write_text("Waiting", encoding="utf-8")
     state = engine.State()
     state.claimed.add(waiting.name)
-    request_id = engine.request_queue_command("archive", speechicle_id(engine, waiting))
+    request_id = request_mutation(
+        engine, "archive", id=speechicle_id(engine, waiting)
+    )
 
     def fail_archive(_path: Path) -> bool:
         raise engine.MutationOutcomeUnconfirmed("rollback failed")
 
     monkeypatch.setattr(engine, "archive", fail_archive)
 
-    assert not engine.process_queue_requests(queue.Queue(), state)
+    assert engine.process_mutation_requests(queue.Queue(), state) is None
     assert state.stop.is_set()
     assert state.claimed == {waiting.name}
-    with pytest.raises(RuntimeError, match="result was unconfirmed"):
-        engine.wait_for_queue_ack(request_id, timeout=0.1)
+    result = engine.wait_for_mutation_result(request_id, timeout=0.1)
+    assert result["outcome"] == "unconfirmed"
 
 
 def test_enqueue_text_ignores_a_stale_legacy_reservation(tmp_path: Path) -> None:
@@ -1225,26 +1246,7 @@ def test_scoped_control_cannot_affect_a_successor_engine(tmp_path: Path) -> None
     assert not engine.INTERRUPT.exists()
 
 
-def test_play_requests_acknowledge_a_superseded_caller(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    engine = load_engine("super_speech_engine_play_signal")
-    configure_runtime(engine, tmp_path)
-    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-
-    first_request_id = engine.request_play(f"sp_{'1' * 32}")
-    second_request_id = engine.request_play(f"sp_{'2' * 32}")
-
-    taken = engine.take_play_request()
-    assert taken is not None
-    assert taken[:3] == (f"sp_{'2' * 32}", None, second_request_id)
-    taken[3].unlink()
-    assert engine.take_play_request() is None
-    with pytest.raises(RuntimeError, match="superseded by a newer play request"):
-        engine.wait_for_play_ack(first_request_id, timeout=0.1)
-
-
-def test_interrupt_rejects_pending_requests_without_a_timeout(
+def test_interrupt_rejects_pending_mutations_with_authoritative_results(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     engine = load_engine("super_speech_engine_interrupt_requests")
@@ -1253,15 +1255,21 @@ def test_interrupt_rejects_pending_requests_without_a_timeout(
     selected = engine.QUEUE / "001-af_heart-say.txt"
     selected.write_text("Selected", encoding="utf-8")
     selected_id = speechicle_id(engine, selected)
-    play_request = engine.request_play(selected_id)
-    queue_request = engine.request_queue_command("move", selected_id)
+    play_request = request_mutation(engine, "play", id=selected_id, voice=None)
+    move_request = request_mutation(
+        engine,
+        "move",
+        section="waiting",
+        id=selected_id,
+        before_id=None,
+    )
     engine.INTERRUPT.touch()
 
     assert engine.gap_wait(1.0, queue.Queue(), engine.State()) == "interrupt"
-    with pytest.raises(RuntimeError, match="interrupted"):
-        engine.wait_for_play_ack(play_request, timeout=0.1)
-    with pytest.raises(RuntimeError, match="interrupted"):
-        engine.wait_for_queue_ack(queue_request, timeout=0.1)
+    play_result = rejected_result(engine, play_request)
+    move_result = rejected_result(engine, move_request)
+    assert "interrupted" in str(play_result["error"])
+    assert "interrupted" in str(move_result["error"])
 
 
 def test_play_command_starts_engine_then_publishes_the_requested_id(
@@ -1271,17 +1279,17 @@ def test_play_command_starts_engine_then_publishes_the_requested_id(
     configure_runtime(engine, tmp_path)
     calls: list[object] = []
     monkeypatch.setattr(engine, "start_engine", lambda: calls.append("start"))
-    def request(chunk_id: str, voice: str | None) -> str:
-        calls.append((chunk_id, voice))
+    def request(mutation) -> str:
+        calls.append((mutation.id, mutation.voice))
         return "a" * 24
 
-    monkeypatch.setattr(engine, "request_play", request)
+    monkeypatch.setattr(engine, "request_mutation", request)
     public_id = f"sp_{'7' * 32}"
     monkeypatch.setattr(
         engine,
-        "wait_for_play_ack",
+        "wait_for_mutation_result",
         lambda request_id: calls.append(("wait", request_id))
-        or {"id": public_id, "accepted_at": 1.0},
+        or {"outcome": "committed", "request_id": request_id},
     )
 
     assert engine.cli(["play", public_id, "--voice", "af_heart"]) == 0
@@ -1292,45 +1300,46 @@ def test_play_command_starts_engine_then_publishes_the_requested_id(
     ]
 
 
-def test_play_command_keeps_stdout_as_json_when_ack_cleanup_is_locked(
+def test_play_command_keeps_stdout_as_json_when_result_cleanup_is_locked(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    engine = load_engine("super_speech_engine_play_cli_locked_ack")
+    engine = load_engine("super_speech_engine_play_cli_locked_result")
     configure_runtime(engine, tmp_path)
     request_id = "a" * 24
-    acknowledgement = engine.play_ack_path(request_id)
+    result_path = engine.mutation_result_path(request_id)
     public_id = f"sp_{'7' * 32}"
-    acknowledgement.write_text(
+    snapshot = engine.publish_status("idle", engine.State(), force=True)
+    assert snapshot is not None
+    expected_result = {
+        "outcome": "committed",
+        "request_id": request_id,
+        "result_id": public_id,
+        "snapshot": snapshot,
+    }
+    result_path.write_text(
         json.dumps(
-            {
-                "ok": True,
-                "result_id": public_id,
-                "accepted_at": 1.0,
-            }
+            expected_result
         ),
         encoding="utf-8",
     )
     real_unlink = Path.unlink
 
-    def lock_ack(path: Path, *args, **kwargs) -> None:
-        if path == acknowledgement:
+    def lock_result(path: Path, *args, **kwargs) -> None:
+        if path == result_path:
             raise PermissionError("locked")
         real_unlink(path, *args, **kwargs)
 
     monkeypatch.setattr(engine, "start_engine", lambda: None)
-    monkeypatch.setattr(engine, "request_play", lambda *_args: request_id)
-    monkeypatch.setattr(Path, "unlink", lock_ack)
+    monkeypatch.setattr(engine, "request_mutation", lambda *_args: request_id)
+    monkeypatch.setattr(Path, "unlink", lock_result)
 
     assert engine.cli(["play", public_id]) == 0
 
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == {
-        "id": public_id,
-        "accepted_at": 1.0,
-    }
-    assert "could not remove acknowledgement" in captured.err
+    assert json.loads(captured.out) == expected_result
+    assert "could not remove result" in captured.err
 
 
 def test_play_request_rejects_a_non_id_before_touching_runtime(
@@ -1341,9 +1350,9 @@ def test_play_request_rejects_a_non_id_before_touching_runtime(
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
 
     with pytest.raises(ValueError):
-        engine.request_play("../spoken/007")
+        request_mutation(engine, "play", id="../spoken/007", voice=None)
 
-    assert not engine.PLAY.exists()
+    assert not list(engine.BASE.glob("MUTATION.*.json"))
 
 
 def test_playing_current_chunk_resumes_without_reordering(
@@ -1363,17 +1372,18 @@ def test_playing_current_chunk_resumes_without_reordering(
     state.claimed.add(current.name)
     state.saw_stop = True
 
-    request_id = engine.request_play(speechicle_id(engine, current))
-    assert engine.process_play_request(buffered, state) is None
-    acceptance = engine.wait_for_play_ack(request_id, timeout=0.1)
+    request_id = request_mutation(
+        engine, "play", id=speechicle_id(engine, current), voice=None
+    )
+    assert engine.process_mutation_requests(buffered, state) is None
+    result = committed_result(engine, request_id)
 
     assert not engine.PAUSE.exists()
     assert not engine.STOP.exists()
     assert not state.saw_stop
     assert state.claimed == {current.name}
-    assert state.recent_starts == []
     assert buffered.get_nowait() == "banked piece"
-    assert acceptance["id"] == speechicle_id(engine, current)
+    assert result["result_id"] == speechicle_id(engine, current)
 
 
 def test_selecting_upcoming_chunk_archives_everything_older(
@@ -1396,9 +1406,11 @@ def test_selecting_upcoming_chunk_archives_everything_older(
     state.playing = current.name
     state.claimed.update({current.name, older.name, selected.name})
 
-    request_id = engine.request_play(speechicle_id(engine, selected))
-    assert engine.process_play_request(buffered, state) == "select"
-    acceptance = engine.wait_for_play_ack(request_id, timeout=0.1)
+    request_id = request_mutation(
+        engine, "play", id=speechicle_id(engine, selected), voice=None
+    )
+    assert engine.process_mutation_requests(buffered, state) == "select"
+    result = committed_result(engine, request_id)
 
     assert not current.exists()
     assert not older.exists()
@@ -1412,7 +1424,7 @@ def test_selecting_upcoming_chunk_archives_everything_older(
     assert engine.claim_next_queued_chunk(state) == selected
     assert engine.claim_next_queued_chunk(state) == newer
     assert engine.claim_next_queued_chunk(state) is None
-    assert acceptance["id"] == speechicle_id(engine, selected)
+    assert result["result_id"] == speechicle_id(engine, selected)
 
 
 def test_selecting_waiting_chunk_without_playback_archives_older_waiting_items(
@@ -1427,8 +1439,10 @@ def test_selecting_waiting_chunk_without_playback_archives_older_waiting_items(
     for path in (older, selected, newer):
         path.write_text(path.stem, encoding="utf-8")
 
-    engine.request_play(speechicle_id(engine, selected))
-    assert engine.process_play_request(queue.Queue(), engine.State()) == "select"
+    request_mutation(
+        engine, "play", id=speechicle_id(engine, selected), voice=None
+    )
+    assert engine.process_mutation_requests(queue.Queue(), engine.State()) == "select"
 
     assert not older.exists()
     assert (engine.SPOKEN / older.name).exists()
@@ -1448,11 +1462,13 @@ def test_selecting_waiting_chunk_rejects_an_archive_failure(
     monkeypatch.setattr(engine, "_archive_many", lambda _paths: False)
     state = engine.State()
 
-    request_id = engine.request_play(speechicle_id(engine, selected))
-    assert engine.process_play_request(queue.Queue(), state) is None
+    request_id = request_mutation(
+        engine, "play", id=speechicle_id(engine, selected), voice=None
+    )
+    assert engine.process_mutation_requests(queue.Queue(), state) is None
 
-    with pytest.raises(RuntimeError, match="could not select"):
-        engine.wait_for_play_ack(request_id, timeout=0.1)
+    result = rejected_result(engine, request_id)
+    assert "could not select" in str(result["error"])
     assert state.selection_name is None
     assert older.exists()
     assert selected.exists()
@@ -1479,11 +1495,13 @@ def test_selection_rolls_back_earlier_archives_when_a_later_archive_fails(
         real_replace(source, destination)
 
     monkeypatch.setattr(engine.os, "replace", fail_second)
-    request_id = engine.request_play(speechicle_id(engine, selected))
-    assert engine.process_play_request(queue.Queue(), engine.State()) is None
+    request_id = request_mutation(
+        engine, "play", id=speechicle_id(engine, selected), voice=None
+    )
+    assert engine.process_mutation_requests(queue.Queue(), engine.State()) is None
 
-    with pytest.raises(RuntimeError, match="could not select"):
-        engine.wait_for_play_ack(request_id, timeout=0.1)
+    result = rejected_result(engine, request_id)
+    assert "could not select" in str(result["error"])
     assert engine.queue_files_in_order() == [*older, selected]
     assert not list(engine.SPOKEN.glob("*.txt"))
 
@@ -1509,11 +1527,16 @@ def test_voice_selection_rolls_back_when_archiving_an_older_item_fails(
         real_replace(source, destination)
 
     monkeypatch.setattr(engine.os, "replace", fail_second)
-    request_id = engine.request_play(speechicle_id(engine, selected), "bm_fable")
-    assert engine.process_play_request(queue.Queue(), engine.State()) is None
+    request_id = request_mutation(
+        engine,
+        "play",
+        id=speechicle_id(engine, selected),
+        voice="bm_fable",
+    )
+    assert engine.process_mutation_requests(queue.Queue(), engine.State()) is None
 
-    with pytest.raises(RuntimeError, match="could not select"):
-        engine.wait_for_play_ack(request_id, timeout=0.1)
+    result = rejected_result(engine, request_id)
+    assert "could not select" in str(result["error"])
     assert engine.queue_files_in_order() == [*older, selected]
     assert not list(engine.SPOKEN.glob("*.txt"))
 
@@ -1528,16 +1551,17 @@ def test_replaying_history_reuses_its_id_without_duplicating_history(
     archived.write_text("Say this again", encoding="utf-8")
     state = engine.State()
 
-    request_id = engine.request_play(speechicle_id(engine, archived))
-    assert engine.process_play_request(queue.Queue(), state) == "select"
+    archived_id = speechicle_id(engine, archived)
+    request_id = request_mutation(
+        engine, "play", id=archived_id, voice=None
+    )
+    assert engine.process_mutation_requests(queue.Queue(), state) == "select"
 
     replay = engine.QUEUE / archived.name
     assert not archived.exists()
     assert replay.read_text(encoding="utf-8") == "Say this again"
     assert engine.claim_next_queued_chunk(state) == replay
-    assert engine.wait_for_play_ack(request_id, timeout=0.1)["id"] == speechicle_id(
-        engine, archived
-    )
+    assert committed_result(engine, request_id)["result_id"] == archived_id
     assert engine.archive(replay)
     assert [path.name for path in engine.SPOKEN.glob("*.txt")] == [archived.name]
 
@@ -1590,11 +1614,12 @@ def test_history_selection_moves_only_the_playback_boundary(
     original_order = visible_ids()
     selected = history[history_index]
 
-    request_id = engine.request_play(speechicle_id(engine, selected))
-    assert engine.process_play_request(queue.Queue(), state) == "select"
-    assert engine.wait_for_play_ack(request_id, timeout=0.1)["id"] == speechicle_id(
-        engine, selected
+    selected_id = speechicle_id(engine, selected)
+    request_id = request_mutation(
+        engine, "play", id=selected_id, voice=None
     )
+    assert engine.process_mutation_requests(queue.Queue(), state) == "select"
+    assert committed_result(engine, request_id)["result_id"] == selected_id
     selected_status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
     assert selected_status["current"]["id"] == speechicle_id(engine, selected)
@@ -1626,9 +1651,11 @@ def test_history_replay_stays_first_after_an_engine_restart(
         path.write_text(path.stem, encoding="utf-8")
     engine.save_queue_order([first, second])
 
-    request_id = engine.request_play(speechicle_id(engine, archived))
-    assert engine.process_play_request(queue.Queue(), engine.State()) == "select"
-    engine.wait_for_play_ack(request_id, timeout=0.1)
+    request_id = request_mutation(
+        engine, "play", id=speechicle_id(engine, archived), voice=None
+    )
+    assert engine.process_mutation_requests(queue.Queue(), engine.State()) == "select"
+    committed_result(engine, request_id)
 
     assert engine.claim_next_queued_chunk(engine.State()) == engine.QUEUE / archived.name
 
@@ -1925,11 +1952,14 @@ def test_history_selection_reports_unconfirmed_if_rollback_cannot_finish(
         real_replace(source, destination)
 
     monkeypatch.setattr(engine.os, "replace", fail_forward_and_rollback)
-    request_id = engine.request_play(speechicle_id(engine, selected))
+    request_id = request_mutation(
+        engine, "play", id=speechicle_id(engine, selected), voice=None
+    )
 
-    assert engine.process_play_request(queue.Queue(), engine.State()) is None
-    with pytest.raises(RuntimeError, match="result was unconfirmed"):
-        engine.wait_for_play_ack(request_id, timeout=0.1)
+    assert engine.process_mutation_requests(queue.Queue(), engine.State()) is None
+    result = engine.wait_for_mutation_result(request_id, timeout=0.1)
+    assert result["outcome"] == "unconfirmed"
+    assert result["snapshot"]["state"] == "stopped"
 
 
 def test_replaying_history_with_another_voice_preserves_text_and_gap(
@@ -1944,12 +1974,14 @@ def test_replaying_history_with_another_voice_preserves_text_and_gap(
     state = engine.State()
 
     original_id = speechicle_id(engine, archived)
-    request_id = engine.request_play(original_id, "af_heart")
-    assert engine.process_play_request(queue.Queue(), state) == "select"
-    acceptance = engine.wait_for_play_ack(request_id, timeout=0.1)
-    variant = engine._find_chunk(engine.QUEUE, acceptance["id"])
+    request_id = request_mutation(
+        engine, "play", id=original_id, voice="af_heart"
+    )
+    assert engine.process_mutation_requests(queue.Queue(), state) == "select"
+    result = committed_result(engine, request_id)
+    variant = engine._find_chunk(engine.QUEUE, str(result["result_id"]))
 
-    assert acceptance["id"] == original_id
+    assert result["result_id"] == original_id
     assert variant is not None
     assert not archived.exists()
     assert variant.name == "007-af_heart-g350-say.txt"
@@ -1976,9 +2008,14 @@ def test_history_voice_change_keeps_the_row_position(
     engine.publish_status("idle", state, force=True)
     before = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
-    request_id = engine.request_play(speechicle_id(engine, history[1]), "bm_fable")
-    assert engine.process_play_request(queue.Queue(), state) == "select"
-    acceptance = engine.wait_for_play_ack(request_id, timeout=0.1)
+    request_id = request_mutation(
+        engine,
+        "play",
+        id=speechicle_id(engine, history[1]),
+        voice="bm_fable",
+    )
+    assert engine.process_mutation_requests(queue.Queue(), state) == "select"
+    result = committed_result(engine, request_id)
     after = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
     assert [item["text"] for item in before["history"]] == [
@@ -1986,7 +2023,7 @@ def test_history_voice_change_keeps_the_row_position(
         after["current"]["text"],
         *[item["text"] for item in after["history"]],
     ]
-    assert after["current"]["id"] == acceptance["id"]
+    assert after["current"]["id"] == result["result_id"]
     assert after["current"]["voice"] == "bm_fable"
     assert not (engine.SPOKEN / history[1].name).exists()
 
@@ -2006,11 +2043,16 @@ def test_history_voice_rejection_restores_the_history_boundary(
         path.write_text(path.stem, encoding="utf-8")
     engine.save_history_order(history)
 
-    request_id = engine.request_play(speechicle_id(engine, history[-1]), "bm_fable")
-    assert engine.process_play_request(queue.Queue(), engine.State()) is None
+    request_id = request_mutation(
+        engine,
+        "play",
+        id=speechicle_id(engine, history[-1]),
+        voice="bm_fable",
+    )
+    assert engine.process_mutation_requests(queue.Queue(), engine.State()) is None
 
-    with pytest.raises(RuntimeError, match="could not replay"):
-        engine.wait_for_play_ack(request_id, timeout=0.1)
+    result = rejected_result(engine, request_id)
+    assert "could not replay" in str(result["error"])
     assert engine.history_files_in_order() == history
     assert not list(engine.QUEUE.glob("*.txt"))
 
@@ -2031,12 +2073,14 @@ def test_changing_a_waiting_voice_keeps_the_selection_position(
     state = engine.State()
 
     original_id = speechicle_id(engine, selected)
-    request_id = engine.request_play(original_id, "af_heart")
-    assert engine.process_play_request(queue.Queue(), state) == "select"
-    acceptance = engine.wait_for_play_ack(request_id, timeout=0.1)
-    variant = engine._find_chunk(engine.QUEUE, acceptance["id"])
+    request_id = request_mutation(
+        engine, "play", id=original_id, voice="af_heart"
+    )
+    assert engine.process_mutation_requests(queue.Queue(), state) == "select"
+    result = committed_result(engine, request_id)
+    variant = engine._find_chunk(engine.QUEUE, str(result["result_id"]))
 
-    assert acceptance["id"] == original_id
+    assert result["result_id"] == original_id
     assert variant is not None
     assert variant.name == "002-af_heart-g500-say.txt"
     assert variant.read_text(encoding="utf-8") == "Selected words"
@@ -2062,12 +2106,14 @@ def test_changing_the_current_voice_replaces_it_without_changing_text(
     state.claimed.add(current.name)
 
     original_id = speechicle_id(engine, current)
-    request_id = engine.request_play(original_id, "bm_fable")
-    assert engine.process_play_request(queue.Queue(), state) == "select"
-    acceptance = engine.wait_for_play_ack(request_id, timeout=0.1)
-    variant = engine._find_chunk(engine.QUEUE, acceptance["id"])
+    request_id = request_mutation(
+        engine, "play", id=original_id, voice="bm_fable"
+    )
+    assert engine.process_mutation_requests(queue.Queue(), state) == "select"
+    result = committed_result(engine, request_id)
+    variant = engine._find_chunk(engine.QUEUE, str(result["result_id"]))
 
-    assert acceptance["id"] == original_id
+    assert result["result_id"] == original_id
     assert variant is not None
     assert variant.name == "001-bm_fable-g600-say.txt"
     assert variant.read_text(encoding="utf-8") == "Current words"
@@ -2076,18 +2122,20 @@ def test_changing_the_current_voice_replaces_it_without_changing_text(
     assert engine.claim_next_queued_chunk(state) == variant
 
 
-def test_play_ack_reports_a_missing_chunk(
+def test_play_mutation_rejects_a_missing_chunk(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     engine = load_engine("super_speech_engine_play_missing")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
 
-    request_id = engine.request_play(f"sp_{'f' * 32}")
-    assert engine.process_play_request(queue.Queue(), engine.State()) is None
+    request_id = request_mutation(
+        engine, "play", id=f"sp_{'f' * 32}", voice=None
+    )
+    assert engine.process_mutation_requests(queue.Queue(), engine.State()) is None
 
-    with pytest.raises(RuntimeError, match="chunk not found"):
-        engine.wait_for_play_ack(request_id, timeout=0.1)
+    result = rejected_result(engine, request_id)
+    assert "chunk not found" in str(result["error"])
 
 
 def test_engine_loop_replays_history_before_the_existing_queue(
@@ -2112,10 +2160,14 @@ def test_engine_loop_replays_history_before_the_existing_queue(
     archived = engine.SPOKEN / "007-bm_fable-say.txt"
     queued.write_text("First queued", encoding="utf-8")
     archived.write_text("Replay me", encoding="utf-8")
-    play_request = engine.BASE / f"PLAY.1.{'a' * 24}.json"
+    play_request = engine.BASE / f"MUTATION.1.{'a' * 24}.json"
     play_request.write_text(
         json.dumps(
-            {"id": speechicle_id(engine, archived), "request_id": "a" * 24}
+            {
+                "type": "play",
+                "id": speechicle_id(engine, archived),
+                "request_id": "a" * 24,
+            }
         ),
         encoding="utf-8",
     )
@@ -2191,7 +2243,7 @@ def test_engine_loop_replays_history_before_the_existing_queue(
     assert len(list(engine.SPOKEN.glob("*.txt"))) == 2
     assert not list(engine.QUEUE.glob("*.txt"))
     final_status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
-    assert final_status["recent_starts"][0]["id"] == speechicle_id(engine, queued)
+    assert final_status["current"] is None
 
 
 def test_idle_selection_replaces_worker_claims_and_becomes_next(
@@ -2207,8 +2259,10 @@ def test_idle_selection_replaces_worker_claims_and_becomes_next(
     state = engine.State()
     state.claimed.add(earlier.name)
 
-    engine.request_play(speechicle_id(engine, selected))
-    assert engine.process_play_request(queue.Queue(), state) == "select"
+    request_mutation(
+        engine, "play", id=speechicle_id(engine, selected), voice=None
+    )
+    assert engine.process_mutation_requests(queue.Queue(), state) == "select"
 
     assert state.playing == selected.name
     assert state.claimed == set()
@@ -2250,8 +2304,10 @@ def test_selecting_a_prefetched_item_restarts_synthesis_at_piece_one(
     worker.start()
     try:
         assert entered_second_piece.wait(1)
-        engine.request_play(speechicle_id(engine, selected))
-        assert engine.process_play_request(buffered, state) == "select"
+        request_mutation(
+            engine, "play", id=speechicle_id(engine, selected), voice=None
+        )
+        assert engine.process_mutation_requests(buffered, state) == "select"
         assert buffered.empty()
         release_second_piece.set()
         restarted = buffered.get(timeout=1)
@@ -2276,7 +2332,9 @@ def test_selection_interrupts_an_inter_chunk_gap(
     selected.write_text("Selected", encoding="utf-8")
     state = engine.State()
 
-    engine.request_play(speechicle_id(engine, selected))
+    request_mutation(
+        engine, "play", id=speechicle_id(engine, selected), voice=None
+    )
 
     assert engine.gap_wait(1.0, queue.Queue(), state) == "select"
     assert engine.claim_next_queued_chunk(state) == selected
@@ -2294,12 +2352,16 @@ def test_reordering_during_a_gap_discards_the_held_piece(
     selected.write_text("Selected", encoding="utf-8")
     state = engine.State()
     state.claimed.add(held.name)
-    request_id = engine.request_queue_command(
-        "move", speechicle_id(engine, selected), speechicle_id(engine, held)
+    request_id = request_mutation(
+        engine,
+        "move",
+        section="waiting",
+        id=speechicle_id(engine, selected),
+        before_id=speechicle_id(engine, held),
     )
 
     assert engine.gap_wait(1.0, queue.Queue(), state) == "queue_changed"
-    engine.wait_for_queue_ack(request_id, timeout=0.1)
+    committed_result(engine, request_id)
 
     assert held.is_file()
     assert state.claimed == set()
@@ -2322,11 +2384,18 @@ def test_queue_mutation_invalidates_the_piece_held_before_playback(
     first_claim = engine.claim_next_queued_chunk_with_generation(state)
     assert first_claim is not None
     held_path, old_generation = first_claim
-    engine.request_queue_command(
-        "move", speechicle_id(engine, moved), speechicle_id(engine, waiting)
+    request_mutation(
+        engine,
+        "move",
+        section="waiting",
+        id=speechicle_id(engine, moved),
+        before_id=speechicle_id(engine, waiting),
     )
 
-    assert engine.process_queue_requests(queue.Queue(), state, held_path.name)
+    assert (
+        engine.process_mutation_requests(queue.Queue(), state, held_path.name)
+        == "queue_changed"
+    )
     replacement_claim = engine.claim_next_queued_chunk_with_generation(state)
 
     assert replacement_claim is not None
@@ -2353,11 +2422,15 @@ def test_queue_mutation_keeps_an_active_playback_claim_without_buffered_audio(
     claim = engine.claim_next_queued_chunk_with_generation(state)
     assert claim is not None
     current_path, generation = claim
-    engine.request_queue_command(
-        "move", speechicle_id(engine, moved), speechicle_id(engine, waiting)
+    request_mutation(
+        engine,
+        "move",
+        section="waiting",
+        id=speechicle_id(engine, moved),
+        before_id=speechicle_id(engine, waiting),
     )
 
-    assert engine.process_queue_requests(queue.Queue(), state)
+    assert engine.process_mutation_requests(queue.Queue(), state) == "queue_changed"
 
     assert state.claimed == {current.name}
     assert not engine.buffered_piece_is_stale(state, current_path.name, generation)
@@ -2379,8 +2452,12 @@ def test_queue_mutation_invalidates_the_piece_held_during_a_gap(
     first_claim = engine.claim_next_queued_chunk_with_generation(state)
     assert first_claim is not None
     held_path, old_generation = first_claim
-    engine.request_queue_command(
-        "move", speechicle_id(engine, moved), speechicle_id(engine, waiting)
+    request_mutation(
+        engine,
+        "move",
+        section="waiting",
+        id=speechicle_id(engine, moved),
+        before_id=speechicle_id(engine, waiting),
     )
 
     assert engine.gap_wait(1.0, queue.Queue(), state) == "queue_changed"
@@ -2811,6 +2888,7 @@ def test_fatal_engine_stop_ends_a_gap_before_the_next_chunk(tmp_path: Path) -> N
     [(1_000_000_000, 2_000_000_000, "stop"), (2_000_000_000, 1_000_000_000, "clear")],
 )
 def test_clear_and_stop_follow_publication_order_during_a_gap(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     clear_time: int,
     stop_time: int,
@@ -2818,14 +2896,16 @@ def test_clear_and_stop_follow_publication_order_during_a_gap(
 ) -> None:
     engine = load_engine(f"super_speech_engine_clear_stop_order_{expected}")
     configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     engine.SIGNAL_TICK = 0.001
     current = engine.QUEUE / "001-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     state = engine.State()
     state.playing = current.name
-    engine.CLEAR.touch()
+    request_id = request_mutation(engine, "clear")
+    request = next(engine.BASE.glob(f"MUTATION.*.{request_id}.json"))
     engine.STOP.touch()
-    os.utime(engine.CLEAR, ns=(clear_time, clear_time))
+    os.utime(request, ns=(clear_time, clear_time))
     os.utime(engine.STOP, ns=(stop_time, stop_time))
 
     assert engine.gap_wait(0.01, queue.Queue(), state) == expected
@@ -2866,8 +2946,10 @@ def test_play_and_stop_follow_publication_order(
     state = engine.State()
     state.playing = current.name
     state.saw_stop = True
-    request_id = engine.request_play(speechicle_id(engine, current))
-    request = next(engine.BASE.glob(f"PLAY.*.{request_id}.json"))
+    request_id = request_mutation(
+        engine, "play", id=speechicle_id(engine, current), voice=None
+    )
+    request = next(engine.BASE.glob(f"MUTATION.*.{request_id}.json"))
     engine.STOP.touch()
     play_time, stop_time = (
         (2_000_000_000, 1_000_000_000)
@@ -2877,17 +2959,17 @@ def test_play_and_stop_follow_publication_order(
     os.utime(request, ns=(play_time, play_time))
     os.utime(engine.STOP, ns=(stop_time, stop_time))
 
-    engine.process_play_request(queue.Queue(), state)
+    engine.process_mutation_requests(queue.Queue(), state)
 
     if play_is_newer:
-        assert engine.wait_for_play_ack(request_id, timeout=0.1)[
-            "id"
-        ] == speechicle_id(engine, current)
+        assert committed_result(engine, request_id)["result_id"] == speechicle_id(
+            engine, current
+        )
         assert not engine.STOP.exists()
         assert not state.saw_stop
     else:
-        with pytest.raises(RuntimeError, match="engine stopped"):
-            engine.wait_for_play_ack(request_id, timeout=0.1)
+        result = rejected_result(engine, request_id)
+        assert "engine stopped" in str(result["error"])
         assert engine.STOP.exists()
         assert state.saw_stop
 
@@ -2917,10 +2999,10 @@ def test_fatal_selection_failure_dominates_skip_during_gap(
     state = engine.State()
     engine.SKIP.touch()
 
-    def fail_selection(_buf, failed_state) -> None:
+    def fail_selection(_buf, failed_state, _held_chunk_name) -> None:
         failed_state.stop.set()
 
-    monkeypatch.setattr(engine, "process_play_request", fail_selection)
+    monkeypatch.setattr(engine, "process_mutation_requests", fail_selection)
 
     assert engine.gap_wait(0.01, queue.Queue(), state) == "fatal"
     assert engine.SKIP.exists()
@@ -3030,14 +3112,17 @@ def test_queue_acceptance_failure_reports_durable_work_as_queued(
     assert waiting.read_text(encoding="utf-8") == "Speak later"
 
 
-def test_clear_during_a_gap_does_not_play_the_archived_chunk(tmp_path: Path) -> None:
+def test_clear_during_a_gap_does_not_play_the_archived_chunk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     engine = load_engine("super_speech_engine_clear_gap")
     configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     next_chunk = engine.QUEUE / "002-bm_fable-say.txt"
     next_chunk.write_text("Next", encoding="utf-8")
     state = engine.State()
     state.claimed.add(next_chunk.name)
-    engine.CLEAR.touch()
+    request_mutation(engine, "clear")
 
     assert engine.gap_wait(1.0, queue.Queue(), state) == "clear"
     assert not next_chunk.exists()
@@ -3122,8 +3207,8 @@ def test_clear_cannot_race_a_worker_refilling_a_full_buffer(tmp_path: Path) -> N
     assert (engine.SPOKEN / queued.name).read_text(encoding="utf-8") == "Queued"
 
 
-def test_startup_cleanup_preserves_unclaimed_requests(tmp_path: Path) -> None:
-    engine = load_engine("super_speech_engine_clear_play")
+def test_startup_cleanup_removes_protocol_11_request_artifacts(tmp_path: Path) -> None:
+    engine = load_engine("super_speech_engine_remove_v11_requests")
     configure_runtime(engine, tmp_path)
     engine.PLAY.write_text('{"id":"001-af_heart-say"}', encoding="utf-8")
     request = engine.BASE / f"PLAY.1.{'a' * 24}.json"
@@ -3144,11 +3229,11 @@ def test_startup_cleanup_preserves_unclaimed_requests(tmp_path: Path) -> None:
     engine.clear_transient_signals()
 
     assert not engine.PLAY.exists()
-    assert request.exists()
+    assert not request.exists()
     assert not claim.exists()
     assert not temporary.exists()
     assert not acknowledgement.exists()
-    assert queue_request.exists()
+    assert not queue_request.exists()
     assert not queue_acknowledgement.exists()
 
 
@@ -3158,26 +3243,29 @@ def test_startup_rejects_an_abandoned_claim_without_leaving_its_caller_waiting(
     engine = load_engine("super_speech_engine_recover_claim")
     configure_runtime(engine, tmp_path)
     request_id = "a" * 24
-    claim = engine.BASE / f"PLAY.1.{request_id}.claim"
+    claim = engine.BASE / f"MUTATION.1.{request_id}.claim"
     claim.write_text(
         json.dumps(
             {
+                "type": "play",
                 "id": f"sp_{'1' * 32}",
-                "voice": None,
                 "request_id": request_id,
             }
         ),
         encoding="utf-8",
     )
 
-    engine.clear_transient_signals()
+    state = engine.State()
+    engine.publish_status("idle", state, force=True)
+    engine.settle_stale_mutation_claims(state)
 
-    with pytest.raises(RuntimeError, match="engine restarted"):
-        engine.wait_for_play_ack(request_id, timeout=0.1)
+    result = engine.wait_for_mutation_result(request_id, timeout=0.1)
+    assert result["outcome"] == "unconfirmed"
+    assert "engine restarted" in str(result["error"])
     assert not claim.exists()
 
 
-def test_failed_ack_keeps_the_applied_claim_without_repeating_the_mutation(
+def test_failed_result_keeps_the_applied_claim_without_repeating_the_mutation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     engine = load_engine("super_speech_engine_applied_claim")
@@ -3185,17 +3273,20 @@ def test_failed_ack_keeps_the_applied_claim_without_repeating_the_mutation(
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     history = engine.SPOKEN / "001-af_heart-say.txt"
     history.write_text("Delete once", encoding="utf-8")
-    request_id = engine.request_queue_command("delete", speechicle_id(engine, history))
-    monkeypatch.setattr(engine, "publish_queue_ack", lambda *_args, **_kwargs: False)
+    request_id = request_mutation(
+        engine, "delete", id=speechicle_id(engine, history)
+    )
+    monkeypatch.setattr(engine, "publish_mutation_result", lambda *_args, **_kwargs: False)
 
-    assert engine.process_queue_requests(queue.Queue(), engine.State())
-    claims = list(engine.BASE.glob(f"QUEUE_COMMAND.*.{request_id}.claim"))
+    state = engine.State()
+    assert engine.process_mutation_requests(queue.Queue(), state) is None
+    claims = list(engine.BASE.glob(f"MUTATION.*.{request_id}.claim"))
 
     assert len(claims) == 1
     assert not history.exists()
-    assert not engine.process_queue_requests(queue.Queue(), engine.State())
+    assert engine.process_mutation_requests(queue.Queue(), state) is None
     with pytest.raises(RuntimeError, match="result was unconfirmed"):
-        engine.wait_for_queue_ack(request_id, timeout=0.01)
+        engine.wait_for_mutation_result(request_id, timeout=0.01)
 
 
 def test_claimed_request_returns_unconfirmed_when_successor_cannot_start(
@@ -3204,7 +3295,7 @@ def test_claimed_request_returns_unconfirmed_when_successor_cannot_start(
     engine = load_engine("super_speech_engine_claim_restart_failure")
     configure_runtime(engine, tmp_path)
     request_id = "a" * 24
-    claim = engine.BASE / f"QUEUE_COMMAND.1.{request_id}.claim"
+    claim = engine.BASE / f"MUTATION.1.{request_id}.claim"
     claim.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(engine, "engine_is_running", lambda: False)
 
@@ -3214,21 +3305,21 @@ def test_claimed_request_returns_unconfirmed_when_successor_cannot_start(
     monkeypatch.setattr(engine, "start_engine", fail_start)
 
     with pytest.raises(RuntimeError, match="result was unconfirmed"):
-        engine.wait_for_queue_ack(request_id, timeout=0.01)
+        engine.wait_for_mutation_result(request_id, timeout=0.01)
 
     assert claim.exists()
 
 
-def test_play_ack_pruning_keeps_active_waiters(tmp_path: Path) -> None:
-    engine = load_engine("super_speech_engine_ack_pruning")
+def test_mutation_result_pruning_keeps_active_waiters(tmp_path: Path) -> None:
+    engine = load_engine("super_speech_engine_result_pruning")
     configure_runtime(engine, tmp_path)
-    stale = engine.BASE / f"PLAY_ACK.{'a' * 24}.json"
-    active = engine.BASE / f"PLAY_ACK.{'b' * 24}.json"
+    stale = engine.BASE / f"MUTATION_RESULT.{'a' * 24}.json"
+    active = engine.BASE / f"MUTATION_RESULT.{'b' * 24}.json"
     stale.write_text("{}", encoding="utf-8")
     active.write_text("{}", encoding="utf-8")
     os.utime(stale, (0, 0))
 
-    engine.prune_play_acknowledgements()
+    engine.prune_mutation_results()
 
     assert not stale.exists()
     assert active.exists()
@@ -3253,7 +3344,9 @@ def test_serve_removes_stale_status_after_acquiring_the_lock(
 
     monkeypatch.setattr(engine, "EngineInstanceLock", FakeLock)
     monkeypatch.setattr(
-        engine, "run_engine_loop", lambda: observed.append(engine.STATUS.exists())
+        engine,
+        "run_engine_loop",
+        lambda *_args: observed.append(engine.STATUS.exists()),
     )
 
     engine.serve()
@@ -3753,10 +3846,10 @@ def test_deleted_identity_and_sequence_are_never_reused(
     assert engine._find_chunk(engine.SPOKEN, first_id) is None
 
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    request_id = engine.request_play(first_id)
-    assert engine.process_play_request(queue.Queue(), engine.State()) is None
-    with pytest.raises(RuntimeError, match="chunk not found"):
-        engine.wait_for_play_ack(request_id, timeout=0.1)
+    request_id = request_mutation(engine, "play", id=first_id, voice=None)
+    assert engine.process_mutation_requests(queue.Queue(), engine.State()) is None
+    result = rejected_result(engine, request_id)
+    assert "chunk not found" in str(result["error"])
 
 
 def test_voice_and_history_lifecycle_preserve_one_public_identity(
@@ -3791,7 +3884,7 @@ def test_public_status_contains_no_storage_filenames(tmp_path: Path) -> None:
     engine.publish_status("idle", engine.State(), force=True)
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
-    assert status["version"] == 11
+    assert status["version"] == engine.STATUS_VERSION
     assert "filename" not in json.dumps(status)
     visible = [
         *([status["current"]] if status["current"] else []),
@@ -3801,3 +3894,263 @@ def test_public_status_contains_no_storage_filenames(tmp_path: Path) -> None:
     assert visible
     assert all(engine.is_public_id(item["id"]) for item in visible)
     assert not engine.PAUSE.exists()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"request_id": "a" * 24, "type": "play", "id": f"sp_{'1' * 32}"},
+        {
+            "request_id": "b" * 24,
+            "type": "move",
+            "section": "waiting",
+            "id": f"sp_{'1' * 32}",
+            "before_id": None,
+        },
+        {"request_id": "c" * 24, "type": "archive", "id": f"sp_{'1' * 32}"},
+        {"request_id": "d" * 24, "type": "delete", "id": f"sp_{'1' * 32}"},
+        {"request_id": "e" * 24, "type": "clear"},
+    ],
+)
+def test_mutation_envelope_accepts_each_variant(payload: dict[str, object]) -> None:
+    engine = load_engine(f"super_speech_engine_envelope_{payload['type']}")
+
+    parsed = engine.parse_durable_mutation(payload)
+
+    assert parsed.to_payload() == payload
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        {"request_id": "short", "type": "clear"},
+        {"request_id": "a" * 24, "type": "unknown"},
+        {"request_id": "a" * 24, "type": "play", "id": "../history"},
+        {
+            "request_id": "a" * 24,
+            "type": "move",
+            "section": "current",
+            "id": f"sp_{'1' * 32}",
+            "before_id": None,
+        },
+        {"request_id": "a" * 24, "type": "clear", "id": f"sp_{'1' * 32}"},
+    ],
+)
+def test_mutation_envelope_rejects_invalid_shapes(payload: object) -> None:
+    engine = load_engine("super_speech_engine_invalid_envelope")
+
+    with pytest.raises(ValueError):
+        engine.parse_durable_mutation(payload)
+
+
+def test_mutations_commit_and_publish_results_in_one_fifo_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_mutation_fifo")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    first = engine.QUEUE / "001-af_heart-say.txt"
+    second = engine.QUEUE / "002-bm_fable-say.txt"
+    first.write_text("First", encoding="utf-8")
+    second.write_text("Second", encoding="utf-8")
+    first_id = speechicle_id(engine, first)
+    second_id = speechicle_id(engine, second)
+    move_request = request_mutation(
+        engine,
+        "move",
+        section="waiting",
+        id=second_id,
+        before_id=first_id,
+    )
+    play_request = request_mutation(
+        engine, "play", id=second_id, voice=None
+    )
+    published: list[str] = []
+    real_publish = engine.publish_mutation_result
+
+    def publish(request_id: str, *args, **kwargs) -> bool:
+        published.append(request_id)
+        return real_publish(request_id, *args, **kwargs)
+
+    monkeypatch.setattr(engine, "publish_mutation_result", publish)
+
+    assert engine.process_mutation_requests(queue.Queue(), engine.State()) == "queue_changed"
+
+    assert published == [move_request, play_request]
+    assert committed_result(engine, move_request)["snapshot"]["current"]["id"] == second_id
+    play_result = committed_result(engine, play_request)
+    assert play_result["result_id"] == second_id
+    assert play_result["snapshot"]["current"]["id"] == second_id
+
+
+def test_later_waiting_move_does_not_hide_an_earlier_playback_selection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_mutation_effect_priority")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    selected = engine.QUEUE / "002-bm_fable-say.txt"
+    waiting = engine.QUEUE / "003-af_heart-say.txt"
+    for path in (current, selected, waiting):
+        path.write_text(path.stem, encoding="utf-8")
+    state = engine.State()
+    state.playing = current.name
+    request_mutation(
+        engine, "play", id=speechicle_id(engine, selected), voice=None
+    )
+    request_mutation(
+        engine,
+        "move",
+        section="waiting",
+        id=speechicle_id(engine, waiting),
+        before_id=None,
+    )
+
+    assert engine.process_mutation_requests(queue.Queue(), state) == "select"
+
+
+def test_every_mutation_outcome_contains_an_authoritative_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_mutation_outcomes")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-bm_fable-say.txt"
+    current.write_text("Current", encoding="utf-8")
+    waiting.write_text("Waiting", encoding="utf-8")
+    state = engine.State()
+    state.playing = current.name
+
+    committed_request = request_mutation(
+        engine,
+        "move",
+        section="waiting",
+        id=speechicle_id(engine, waiting),
+        before_id=None,
+    )
+    rejected_request = request_mutation(
+        engine, "delete", id=speechicle_id(engine, waiting)
+    )
+    assert engine.process_mutation_requests(queue.Queue(), state) == "queue_changed"
+
+    committed = committed_result(engine, committed_request)
+    rejected = rejected_result(engine, rejected_request)
+    assert committed["snapshot"]["version"] == engine.STATUS_VERSION
+    assert rejected["snapshot"]["version"] == engine.STATUS_VERSION
+
+    unconfirmed_request = request_mutation(
+        engine, "archive", id=speechicle_id(engine, waiting)
+    )
+    monkeypatch.setattr(
+        engine,
+        "archive",
+        lambda _path: (_ for _ in ()).throw(
+            engine.MutationOutcomeUnconfirmed("rollback failed")
+        ),
+    )
+    engine.process_mutation_requests(queue.Queue(), state)
+    unconfirmed = engine.wait_for_mutation_result(unconfirmed_request, timeout=0.1)
+
+    assert unconfirmed["outcome"] == "unconfirmed"
+    assert unconfirmed["snapshot"]["version"] == engine.STATUS_VERSION
+    assert unconfirmed["snapshot"]["state"] == "stopped"
+
+
+def test_timeline_revision_changes_only_with_the_timeline_and_survives_restart(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_timeline_revision")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    engine.AVAILABLE_VOICES = {"af_heart", "bm_fable"}
+    first = engine.QUEUE / "001-af_heart-say.txt"
+    second = engine.QUEUE / "002-af_heart-say.txt"
+    third = engine.QUEUE / "003-af_heart-say.txt"
+    for path in (first, second, third):
+        path.write_text(path.stem, encoding="utf-8")
+    state = engine.State()
+    initial = engine.publish_status("playing", state, force=True)
+    assert initial is not None
+    assert initial["timeline_revision"] == 0
+
+    state.current_piece = 2
+    engine.PAUSE.touch()
+    progress = engine.publish_status("paused", state, force=True)
+    assert progress is not None
+    assert progress["timeline_revision"] == 0
+
+    move_request = request_mutation(
+        engine,
+        "move",
+        section="waiting",
+        id=speechicle_id(engine, third),
+        before_id=speechicle_id(engine, second),
+    )
+    assert engine.process_mutation_requests(queue.Queue(), state) == "queue_changed"
+    moved = committed_result(engine, move_request)
+    assert moved["snapshot"]["timeline_revision"] == 1
+
+    first_id = speechicle_id(engine, first)
+    voice_request = request_mutation(
+        engine, "play", id=first_id, voice="bm_fable"
+    )
+    assert engine.process_mutation_requests(queue.Queue(), state) == "select"
+    voice_changed = committed_result(engine, voice_request)
+    assert voice_changed["result_id"] == first_id
+    assert voice_changed["snapshot"]["timeline_revision"] == 2
+
+    revision, fingerprint = engine.load_timeline_revision_seed()
+    restarted = engine.State(revision, fingerprint)
+    after_restart = engine.publish_status("playing", restarted, force=True)
+    assert after_restart is not None
+    assert after_restart["timeline_revision"] == 2
+
+
+def test_private_mutate_command_normalizes_camel_case_and_prints_only_json(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine = load_engine("super_speech_engine_mutate_cli")
+    configure_runtime(engine, tmp_path)
+    public_id = f"sp_{'1' * 32}"
+    before_id = f"sp_{'2' * 32}"
+    captured_requests = []
+    monkeypatch.setattr(engine, "start_engine", lambda: None)
+
+    def request(mutation) -> str:
+        captured_requests.append(mutation)
+        return mutation.request_id
+
+    monkeypatch.setattr(engine, "request_mutation", request)
+    monkeypatch.setattr(
+        engine,
+        "wait_for_mutation_result",
+        lambda request_id: {
+            "outcome": "committed",
+            "request_id": request_id,
+            "snapshot": {"version": engine.STATUS_VERSION},
+        },
+    )
+
+    assert engine.cli(
+        [
+            "mutate",
+            json.dumps(
+                {
+                    "type": "move",
+                    "section": "waiting",
+                    "id": public_id,
+                    "beforeId": before_id,
+                }
+            ),
+        ]
+    ) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["outcome"] == "committed"
+    assert len(captured_requests) == 1
+    assert captured_requests[0].before_id == before_id

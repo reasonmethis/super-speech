@@ -29,18 +29,19 @@ import {
   IPC_CHANNELS,
   compatibleEngineIsRunning,
   engineProcessIsLive,
-  isSpeechicleId,
   parseEngineStatus,
   parseEngineProcessStatus,
-  parsePlayAcceptance,
+  parseTimelineMutation,
+  parseTimelineMutationResult,
   runtimeStateForSnapshot,
   statusAfterTransientRead,
   statusAfterPauseCommand,
   statusForEngineProcess,
   type EngineStatus,
   type EngineProcessStatus,
-  type PlayAcceptance,
   type RuntimeStatus,
+  type TimelineMutation,
+  type TimelineMutationResult,
   type VersionInfo,
 } from "../src/runtime";
 
@@ -218,13 +219,13 @@ function getStatus(): RuntimeStatus {
 
   const status: RuntimeStatus = {
     version: ENGINE_STATUS_VERSION,
+    timeline_revision: timeline?.timeline_revision ?? 0,
     state,
     updated_at: engine?.updated_at ?? 0,
     engine_pid: engineRunning ? (engine?.engine_pid ?? ownedEngine?.pid ?? null) : null,
     engine_running: engineRunning,
     installed,
     current: timeline?.current ?? null,
-    recent_starts: timeline?.recent_starts ?? [],
     queue_count: timeline?.queue_count ?? 0,
     queue: timeline?.queue ?? [],
     history_count: timeline?.history_count ?? 0,
@@ -269,41 +270,42 @@ function runEngineCommand(...arguments_: string[]): Promise<string> {
   });
 }
 
-async function playChunk(id: string, voice?: string): Promise<PlayAcceptance> {
-  if (!isSpeechicleId(id)) {
-    throw new Error(`Invalid Speechicle ID: ${id}`);
+function runtimeMutationResult(
+  result: TimelineMutationResult,
+): TimelineMutationResult<RuntimeStatus> {
+  const runtime = getStatus();
+  const snapshot = statusAfterPauseCommand({
+    ...result.snapshot,
+    state: runtimeStateForSnapshot(
+      runtime.installed,
+      runtime.engine_running,
+      result.snapshot.state,
+    ),
+    engine_running: runtime.engine_running,
+    installed: runtime.installed,
+  }, existsSync(path.join(runtimeDir(), "PAUSE")));
+  return { ...result, snapshot };
+}
+
+async function mutateTimeline(
+  input: unknown,
+): Promise<TimelineMutationResult<RuntimeStatus>> {
+  const mutation = parseTimelineMutation(input);
+  if (!mutation) {
+    throw new Error("Invalid timeline mutation");
   }
-  const output = await runEngineCommand("play", id, ...(voice ? ["--voice", voice] : []));
-  const acceptance = parsePlayAcceptance(JSON.parse(output));
-  if (!acceptance) {
-    throw new Error("Engine protocol error: incomplete play acknowledgement");
+  const output = await runEngineCommand("mutate", JSON.stringify(mutation));
+  let value: unknown;
+  try {
+    value = JSON.parse(output);
+  } catch {
+    throw new Error("Engine protocol error: timeline mutation returned invalid JSON");
   }
-  if (acceptance.id !== id) {
-    throw new Error(
-      `Engine protocol error: play acknowledgement changed ${id} to ${acceptance.id}`,
-    );
+  const result = parseTimelineMutationResult(value);
+  if (!result) {
+    throw new Error("Engine protocol error: incomplete timeline mutation result");
   }
-  return acceptance;
-}
-
-async function moveQueueItem(id: string, beforeId: string | null): Promise<void> {
-  await runEngineCommand("move", id, ...(beforeId ? [beforeId] : []));
-}
-
-async function moveHistoryItem(id: string, beforeId: string | null): Promise<void> {
-  await runEngineCommand("move-history", id, ...(beforeId ? [beforeId] : []));
-}
-
-async function archiveQueueItem(id: string): Promise<void> {
-  await runEngineCommand("archive", id);
-}
-
-async function deleteHistoryItem(id: string): Promise<void> {
-  await runEngineCommand("delete", id);
-}
-
-async function clearQueue(): Promise<void> {
-  await runEngineCommand("clear");
+  return runtimeMutationResult(result);
 }
 
 async function getVersions(): Promise<VersionInfo> {
@@ -678,25 +680,10 @@ function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.getStatus, getStatus);
   ipcMain.handle(IPC_CHANNELS.getVersions, getVersions);
   ipcMain.handle(IPC_CHANNELS.setPaused, (_event, paused: boolean) => setPaused(paused));
-  ipcMain.handle(IPC_CHANNELS.playChunk, (_event, id: string, voice?: string) =>
-    playChunk(id, voice)
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.moveQueueItem,
-    (_event, id: string, beforeId: string | null) => moveQueueItem(id, beforeId),
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.moveHistoryItem,
-    (_event, id: string, beforeId: string | null) => moveHistoryItem(id, beforeId),
-  );
-  ipcMain.handle(IPC_CHANNELS.archiveQueueItem, (_event, id: string) =>
-    archiveQueueItem(id)
-  );
-  ipcMain.handle(IPC_CHANNELS.deleteHistoryItem, (_event, id: string) =>
-    deleteHistoryItem(id)
+  ipcMain.handle(IPC_CHANNELS.mutateTimeline, (_event, mutation: TimelineMutation) =>
+    mutateTimeline(mutation)
   );
   ipcMain.handle(IPC_CHANNELS.copyText, (_event, text: string) => clipboard.writeText(text));
-  ipcMain.handle(IPC_CHANNELS.clearQueue, clearQueue);
   ipcMain.handle(IPC_CHANNELS.openSetup, () => shell.openExternal(SETUP_URL));
   ipcMain.handle(IPC_CHANNELS.minimize, (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize();

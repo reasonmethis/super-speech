@@ -24,11 +24,9 @@ behavior. Signal files in BASE are the engine's private process protocol:
   INTERRUPT  - stop playback immediately and exit
   SKIP       - stop current chunk (all its remaining pieces), archive it,
                continue with next
-  CLEAR      - stop and move Current plus every Waiting row to History
   CONTINUE   - cancel a graceful stop because new speech was queued
-  PLAY.*.json - select a queued or recent chunk by ID; selecting waiting speech
-                archives the current item and older waiting items first
-  QUEUE_COMMAND.*.json - reorder/archive Waiting or reorder/delete History by ID
+  MUTATION.*.json - play, move, archive, delete, or clear the timeline in one
+                    durable FIFO stream
   WARMUP     - synthesize a throwaway phrase to pay the first-inference cost
 
 Env:
@@ -55,6 +53,12 @@ import urllib.request
 from pathlib import Path
 from typing import BinaryIO, NamedTuple
 
+from mutation_protocol import (
+    MutationRequest,
+    parse_cli_mutation,
+    parse_durable_mutation,
+    validate_request_id,
+)
 from pauseable_audio import PauseableAudio
 from speechicle_identity import (
     IdentityCatalog,
@@ -86,10 +90,8 @@ STOP = BASE / "STOP"
 PAUSE = BASE / "PAUSE"
 INTERRUPT = BASE / "INTERRUPT"
 SKIP = BASE / "SKIP"
-CLEAR = BASE / "CLEAR"
 CONTINUE = BASE / "CONTINUE"
-PLAY = BASE / "PLAY.json"
-QUEUE_COMMAND = BASE / "QUEUE_COMMAND.json"
+MUTATION = BASE / "MUTATION.json"
 QUEUE_ORDER = BASE / "queue-order.json"
 HISTORY_ORDER = BASE / "history-order.json"
 WARMUP = BASE / "WARMUP"
@@ -134,8 +136,7 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
 ENGINE_VERSION = "0.4.11"
-STATUS_VERSION = 11
-QUEUE_ACTIONS = frozenset({"move", "move_history", "archive", "delete"})
+STATUS_VERSION = 12
 
 
 class MutationOutcomeUnconfirmed(RuntimeError):
@@ -843,114 +844,80 @@ def consume_control(signal: Path) -> bool:
     return True
 
 
-def play_ack_path(request_id: str) -> Path:
-    if not re.fullmatch(r"[a-f0-9]{24}", request_id):
-        raise ValueError("invalid play request ID")
-    return BASE / f"PLAY_ACK.{request_id}.json"
+def mutation_result_path(request_id: str) -> Path:
+    validate_request_id(request_id)
+    return BASE / f"MUTATION_RESULT.{request_id}.json"
 
 
-def request_play(chunk_id: str, voice: str | None = None) -> str:
-    """Atomically publish one uniquely acknowledged selection request."""
-    if not is_public_id(chunk_id):
-        raise ValueError("invalid Speechicle ID")
-    if voice is not None and not re.fullmatch(r"[ab][fm]_[a-z0-9_]+", voice):
-        raise ValueError("invalid Kokoro voice")
+def request_mutation(request: MutationRequest) -> str:
+    """Publish one validated mutation to the engine's durable FIFO stream."""
+    request = parse_durable_mutation(request.to_payload())
     if not engine_is_running():
         raise RuntimeError("engine is not running")
 
     BASE.mkdir(parents=True, exist_ok=True)
-    request_id = secrets.token_hex(12)
-    request_path = PLAY.with_name(f"{PLAY.stem}.{time.time_ns()}.{request_id}.json")
+    request_path = MUTATION.with_name(
+        f"{MUTATION.stem}.{time.time_ns()}.{request.request_id}.json"
+    )
     temp_path = request_path.with_name(
         f"{request_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
     )
     try:
         temp_path.write_text(
-            json.dumps({"id": chunk_id, "voice": voice, "request_id": request_id}),
+            json.dumps(request.to_payload(), separators=(",", ":")),
             encoding="utf-8",
         )
         os.replace(temp_path, request_path)
     finally:
         temp_path.unlink(missing_ok=True)
-    return request_id
+    return request.request_id
 
 
-def claim_play_requests() -> list[Path]:
-    """Atomically detach the pending request batch from concurrent writers."""
-    claimed: list[Path] = []
-    pattern = f"{PLAY.stem}.*.json"
-    for request in sorted(BASE.glob(pattern)):
+def build_mutation_request(mutation_type: str, **fields: object) -> MutationRequest:
+    payload = {
+        "request_id": secrets.token_hex(12),
+        "type": mutation_type,
+        **fields,
+    }
+    return parse_durable_mutation(payload)
+
+
+def claim_next_mutation_request() -> Path | None:
+    """Claim the oldest pending mutation so later requests stay unclaimed."""
+    for request in sorted(BASE.glob(f"{MUTATION.stem}.*.json")):
         claim = request.with_suffix(".claim")
         try:
             os.replace(request, claim)
         except FileNotFoundError:
             continue
         except OSError as error:
-            log(f"could not claim play request {request.name}: {error}")
+            log(f"could not claim mutation {request.name}: {error}")
             continue
-        claimed.append(claim)
-    return claimed
+        return claim
+    return None
 
 
-def read_play_claim(claimed: Path) -> tuple[str, str | None, str] | None:
+def read_mutation_claim(claimed: Path) -> MutationRequest:
     try:
         payload = json.loads(claimed.read_text(encoding="utf-8"))
-        chunk_id = payload.get("id")
-        voice = payload.get("voice")
-        request_id = payload.get("request_id")
-        if not is_public_id(chunk_id):
-            raise ValueError("invalid Speechicle ID")
-        if voice is not None and not (
-            isinstance(voice, str) and re.fullmatch(r"[ab][fm]_[a-z0-9_]+", voice)
-        ):
-            raise ValueError("invalid Kokoro voice")
-        if not isinstance(request_id, str):
-            raise ValueError("invalid play request ID")
-        play_ack_path(request_id)
-        return chunk_id, voice, request_id
-    except (OSError, ValueError, json.JSONDecodeError) as error:
-        log(f"invalid play request: {error}")
-        claimed.unlink(missing_ok=True)
+    except OSError as error:
+        raise ValueError(f"could not read mutation: {error}") from error
+    except json.JSONDecodeError as error:
+        raise ValueError(f"invalid mutation JSON: {error}") from error
+    return parse_durable_mutation(payload)
+
+
+def request_id_from_claim_path(claimed: Path) -> str | None:
+    parts = claimed.name.split(".")
+    if len(parts) != 4 or parts[0] != MUTATION.stem or parts[-1] != "claim":
+        return None
+    try:
+        return validate_request_id(parts[-2])
+    except ValueError:
         return None
 
 
-def take_play_request() -> tuple[str, str | None, str, Path] | None:
-    claimed = claim_play_requests()
-    if not claimed:
-        return None
-    prune_play_acknowledgements()
-    for superseded in claimed[:-1]:
-        request = read_play_claim(superseded)
-        if request is not None:
-            _, _, request_id = request
-            retire_claim(
-                superseded,
-                publish_play_ack(
-                    request_id, error="superseded by a newer play request"
-                ),
-            )
-    request = read_play_claim(claimed[-1])
-    return (*request, claimed[-1]) if request is not None else None
-
-
-def publish_play_ack(
-    request_id: str,
-    *,
-    result_id: str | None = None,
-    error: str | None = None,
-    accepted_at: float | None = None,
-) -> bool:
-    target = play_ack_path(request_id)
-    payload = {
-        "ok": error is None,
-        "result_id": result_id,
-        "accepted_at": accepted_at if accepted_at is not None else time.time(),
-        "error": error,
-    }
-    return publish_ack_payload(target, payload, "play")
-
-
-def publish_ack_payload(
+def publish_json_payload(
     target: Path, payload: dict[str, object], label: str
 ) -> bool:
     last_error: OSError | None = None
@@ -967,24 +934,54 @@ def publish_ack_payload(
             time.sleep(0.02)
         finally:
             temp_path.unlink(missing_ok=True)
-    log(f"could not publish {label} acknowledgement: {last_error}")
+    log(f"could not publish {label}: {last_error}")
     return False
 
 
-def retire_claim(claimed: Path, acknowledged: bool) -> None:
-    """Remove an acknowledged claim; otherwise retain it for restart recovery."""
-    if acknowledged:
+def publish_mutation_result(
+    request_id: str,
+    outcome: str,
+    snapshot: dict[str, object],
+    *,
+    result_id: str | None = None,
+    error: str | None = None,
+) -> bool:
+    if outcome not in {"committed", "rejected", "unconfirmed"}:
+        raise ValueError("invalid mutation outcome")
+    if not _snapshot_is_valid(snapshot):
+        raise ValueError("invalid mutation snapshot")
+    payload: dict[str, object] = {
+        "outcome": outcome,
+        "request_id": request_id,
+        "snapshot": snapshot,
+    }
+    if result_id is not None:
+        if not is_public_id(result_id):
+            raise ValueError("invalid mutation result ID")
+        payload["result_id"] = result_id
+    if error is not None:
+        payload["error"] = error
+    return publish_json_payload(
+        mutation_result_path(request_id),
+        payload,
+        "mutation result",
+    )
+
+
+def retire_claim(claimed: Path, result_published: bool) -> None:
+    """Remove a settled claim or retain it for restart recovery."""
+    if result_published:
         try:
             claimed.unlink(missing_ok=True)
         except OSError as error:
-            log(f"could not remove acknowledged request {claimed.name}: {error}")
+            log(f"could not remove settled mutation {claimed.name}: {error}")
         return
 
 
-def cancel_unclaimed_request(stem: str, request_id: str) -> bool:
+def cancel_unclaimed_mutation(request_id: str) -> bool:
     """Cancel a request only while the engine has not claimed it."""
     for _ in range(5):
-        for request in BASE.glob(f"{stem}.*.{request_id}.json"):
+        for request in BASE.glob(f"{MUTATION.stem}.*.{request_id}.json"):
             cancelled = request.with_suffix(".cancel")
             try:
                 os.replace(request, cancelled)
@@ -998,40 +995,40 @@ def cancel_unclaimed_request(stem: str, request_id: str) -> bool:
     return False
 
 
-def request_is_unclaimed(stem: str, request_id: str) -> bool:
-    return any(BASE.glob(f"{stem}.*.{request_id}.json"))
+def mutation_is_unclaimed(request_id: str) -> bool:
+    return any(BASE.glob(f"{MUTATION.stem}.*.{request_id}.json"))
 
 
-def request_is_claimed(stem: str, request_id: str) -> bool:
-    return any(BASE.glob(f"{stem}.*.{request_id}.claim"))
+def mutation_is_claimed(request_id: str) -> bool:
+    return any(BASE.glob(f"{MUTATION.stem}.*.{request_id}.claim"))
 
 
-def wait_for_request_ack(
-    target: Path, stem: str, request_id: str, timeout: float
+def wait_for_mutation_payload(
+    target: Path, request_id: str, timeout: float
 ) -> dict[str, object] | None:
-    payload = wait_for_ack_payload(target, time.monotonic() + timeout)
+    payload = wait_for_json_payload(target, time.monotonic() + timeout)
     if payload is not None:
         return payload
     unclaimed_deadline = time.monotonic() + min(max(timeout, 0.1), 5.0)
-    while request_is_unclaimed(stem, request_id) and time.monotonic() < unclaimed_deadline:
-        if cancel_unclaimed_request(stem, request_id):
+    while mutation_is_unclaimed(request_id) and time.monotonic() < unclaimed_deadline:
+        if cancel_unclaimed_mutation(request_id):
             return None
         time.sleep(0.05)
     settlement_deadline = time.monotonic() + min(max(timeout, 0.1), 5.0)
-    while request_is_claimed(stem, request_id) and time.monotonic() < settlement_deadline:
+    while mutation_is_claimed(request_id) and time.monotonic() < settlement_deadline:
         if not engine_is_running():
             try:
                 start_engine()
             except RuntimeError:
                 break
-        payload = wait_for_ack_payload(target, time.monotonic() + 1.0)
+        payload = wait_for_json_payload(target, time.monotonic() + 1.0)
         if payload is not None:
             return payload
-    return wait_for_ack_payload(target, time.monotonic() + 0.1)
+    return wait_for_json_payload(target, time.monotonic() + 0.1)
 
 
-def wait_for_ack_payload(target: Path, deadline: float) -> dict[str, object] | None:
-    """Read one atomic acknowledgement, tolerating short Windows file locks."""
+def wait_for_json_payload(target: Path, deadline: float) -> dict[str, object] | None:
+    """Read one atomic result, tolerating short Windows file locks."""
     while time.monotonic() < deadline:
         try:
             payload = json.loads(target.read_text(encoding="utf-8"))
@@ -1040,175 +1037,73 @@ def wait_for_ack_payload(target: Path, deadline: float) -> dict[str, object] | N
             continue
         except json.JSONDecodeError as error:
             target.unlink(missing_ok=True)
-            raise RuntimeError(f"invalid engine acknowledgement: {error}") from error
+            raise RuntimeError(f"invalid engine result: {error}") from error
         try:
             target.unlink(missing_ok=True)
         except OSError as error:
             log(
-                f"could not remove acknowledgement {target.name}: {error}",
+                f"could not remove result {target.name}: {error}",
                 stderr=True,
             )
         if not isinstance(payload, dict):
-            raise RuntimeError("invalid engine acknowledgement: expected an object")
+            raise RuntimeError("invalid engine result: expected an object")
         return payload
     return None
 
 
-def wait_for_play_ack(request_id: str, timeout: float = 60.0) -> dict[str, object]:
-    target = play_ack_path(request_id)
-    payload = wait_for_request_ack(target, PLAY.stem, request_id, timeout)
+def _snapshot_is_valid(snapshot: object) -> bool:
+    return (
+        isinstance(snapshot, dict)
+        and snapshot.get("version") == STATUS_VERSION
+        and isinstance(snapshot.get("timeline_revision"), int)
+        and snapshot.get("state")
+        in {"idle", "loading", "paused", "playing", "setup_required", "stopped"}
+        and isinstance(snapshot.get("queue"), list)
+        and isinstance(snapshot.get("history"), list)
+    )
+
+
+def wait_for_mutation_result(
+    request_id: str, timeout: float = 60.0
+) -> dict[str, object]:
+    target = mutation_result_path(request_id)
+    payload = wait_for_mutation_payload(target, request_id, timeout)
     if payload is None:
-        if request_is_claimed(PLAY.stem, request_id) or request_is_unclaimed(
-            PLAY.stem, request_id
-        ):
-            raise RuntimeError("play command result was unconfirmed")
-        raise RuntimeError("engine did not acknowledge play request")
-    if payload.get("ok") is not True:
-        raise RuntimeError(str(payload.get("error") or "engine rejected play request"))
+        if mutation_is_claimed(request_id) or mutation_is_unclaimed(request_id):
+            raise MutationOutcomeUnconfirmed("mutation result was unconfirmed")
+        raise RuntimeError("engine did not publish a mutation result")
+    if payload.get("request_id") != request_id:
+        raise RuntimeError("engine returned a result for another mutation")
+    if payload.get("outcome") not in {"committed", "rejected", "unconfirmed"}:
+        raise RuntimeError("engine returned an invalid mutation outcome")
+    if not _snapshot_is_valid(payload.get("snapshot")):
+        raise RuntimeError("engine returned an invalid mutation snapshot")
     result_id = payload.get("result_id")
-    accepted_at = payload.get("accepted_at")
-    if not is_public_id(result_id) or not isinstance(accepted_at, (int, float)):
-        raise RuntimeError("engine returned an incomplete play acknowledgement")
-    return {"id": result_id, "accepted_at": accepted_at}
+    if result_id is not None and not is_public_id(result_id):
+        raise RuntimeError("engine returned an invalid mutation result ID")
+    error = payload.get("error")
+    if error is not None and not isinstance(error, str):
+        raise RuntimeError("engine returned an invalid mutation error")
+    return payload
 
 
-def prune_play_acknowledgements(max_age: float = 300.0) -> None:
+def prune_mutation_results(max_age: float = 300.0) -> None:
     cutoff = time.time() - max_age
-    for acknowledgement in BASE.glob("PLAY_ACK.*.json"):
+    for result in BASE.glob("MUTATION_RESULT.*.json"):
         try:
-            if acknowledgement.stat().st_mtime < cutoff:
-                acknowledgement.unlink()
+            request_id = result.name.removeprefix("MUTATION_RESULT.").removesuffix(
+                ".json"
+            )
+            if (
+                result.stat().st_mtime < cutoff
+                and not mutation_is_claimed(request_id)
+                and not mutation_is_unclaimed(request_id)
+            ):
+                result.unlink()
         except FileNotFoundError:
             continue
         except OSError as error:
-            log(f"could not prune play acknowledgement {acknowledgement.name}: {error}")
-
-
-def queue_ack_path(request_id: str) -> Path:
-    if not re.fullmatch(r"[a-f0-9]{24}", request_id):
-        raise ValueError("invalid queue request ID")
-    return BASE / f"QUEUE_ACK.{request_id}.json"
-
-
-def request_queue_command(
-    action: str, chunk_id: str, before_id: str | None = None
-) -> str:
-    """Publish one queue or History mutation for exact engine acknowledgement."""
-    if action not in QUEUE_ACTIONS:
-        raise ValueError("invalid queue action")
-    for value in (chunk_id, before_id):
-        if value is not None and not is_public_id(value):
-            raise ValueError("invalid Speechicle ID")
-    if action not in {"move", "move_history"} and before_id is not None:
-        raise ValueError(f"{action} does not accept a destination")
-    if not engine_is_running():
-        raise RuntimeError("engine is not running")
-
-    BASE.mkdir(parents=True, exist_ok=True)
-    request_id = secrets.token_hex(12)
-    request_path = QUEUE_COMMAND.with_name(
-        f"{QUEUE_COMMAND.stem}.{time.time_ns()}.{request_id}.json"
-    )
-    temp_path = request_path.with_name(
-        f"{request_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-    )
-    try:
-        temp_path.write_text(
-            json.dumps(
-                {
-                    "action": action,
-                    "id": chunk_id,
-                    "before_id": before_id,
-                    "request_id": request_id,
-                }
-            ),
-            encoding="utf-8",
-        )
-        os.replace(temp_path, request_path)
-    finally:
-        temp_path.unlink(missing_ok=True)
-    return request_id
-
-
-def claim_queue_requests() -> list[Path]:
-    claimed: list[Path] = []
-    for request in sorted(BASE.glob(f"{QUEUE_COMMAND.stem}.*.json")):
-        claim = request.with_suffix(".claim")
-        try:
-            os.replace(request, claim)
-        except FileNotFoundError:
-            continue
-        except OSError as error:
-            log(f"could not claim queue request {request.name}: {error}")
-            continue
-        claimed.append(claim)
-    return claimed
-
-
-def read_queue_claim(claimed: Path) -> tuple[str, str, str | None, str] | None:
-    try:
-        payload = json.loads(claimed.read_text(encoding="utf-8"))
-        action = payload.get("action")
-        chunk_id = payload.get("id")
-        before_id = payload.get("before_id")
-        request_id = payload.get("request_id")
-        if action not in QUEUE_ACTIONS:
-            raise ValueError("invalid queue action")
-        for value in (chunk_id, before_id):
-            if value is not None and not is_public_id(value):
-                raise ValueError("invalid Speechicle ID")
-        if not isinstance(chunk_id, str):
-            raise ValueError("invalid chunk ID")
-        if action not in {"move", "move_history"} and before_id is not None:
-            raise ValueError(f"{action} does not accept a destination")
-        if not isinstance(request_id, str):
-            raise ValueError("invalid queue request ID")
-        queue_ack_path(request_id)
-        return action, chunk_id, before_id, request_id
-    except (AttributeError, OSError, ValueError, json.JSONDecodeError) as error:
-        log(f"invalid queue request: {error}")
-        claimed.unlink(missing_ok=True)
-        return None
-
-
-def publish_queue_ack(request_id: str, error: str | None = None) -> bool:
-    target = queue_ack_path(request_id)
-    return publish_ack_payload(
-        target,
-        {
-            "ok": error is None,
-            "accepted_at": time.time(),
-            "error": error,
-        },
-        "queue",
-    )
-
-
-def wait_for_queue_ack(request_id: str, timeout: float = 10.0) -> None:
-    target = queue_ack_path(request_id)
-    payload = wait_for_request_ack(target, QUEUE_COMMAND.stem, request_id, timeout)
-    if payload is None:
-        if request_is_claimed(
-            QUEUE_COMMAND.stem, request_id
-        ) or request_is_unclaimed(QUEUE_COMMAND.stem, request_id):
-            raise RuntimeError("queue command result was unconfirmed")
-        raise RuntimeError("engine did not acknowledge queue request")
-    if payload.get("ok") is not True:
-        raise RuntimeError(str(payload.get("error") or "engine rejected queue request"))
-    if not isinstance(payload.get("accepted_at"), (int, float)):
-        raise RuntimeError("engine returned an incomplete queue acknowledgement")
-
-
-def prune_queue_acknowledgements(max_age: float = 300.0) -> None:
-    cutoff = time.time() - max_age
-    for acknowledgement in BASE.glob("QUEUE_ACK.*.json"):
-        try:
-            if acknowledgement.stat().st_mtime < cutoff:
-                acknowledgement.unlink()
-        except FileNotFoundError:
-            continue
-        except OSError as error:
-            log(f"could not prune queue acknowledgement {acknowledgement.name}: {error}")
+            log(f"could not prune mutation result {result.name}: {error}")
 
 
 def _archive_many(paths: list[Path]) -> bool:
@@ -1373,7 +1268,12 @@ def warmup(kokoro) -> None:
 
 class State:
     """Shared coordination between the main (consumer) and worker (producer)."""
-    def __init__(self):
+
+    def __init__(
+        self,
+        timeline_revision: int = 0,
+        timeline_fingerprint: str | None = None,
+    ) -> None:
         self.lock = threading.RLock()
         self.claimed: set[str] = set()  # filenames in the buffer or being synthesized
         self.claim_generations: dict[str, int] = {}
@@ -1387,12 +1287,13 @@ class State:
         self.current_piece_start: int | None = None
         self.current_piece_end: int | None = None
         self.read_failures: dict[str, float] = {}
-        self.recent_starts: list[tuple[str, float]] = []
         self.skip_name: str | None = None  # skipped chunk whose banked pieces must be dropped
         # Selected chunk stays prioritized until its first piece reaches playback
         self.selection_name: str | None = None
         self.stop = threading.Event()    # tell the worker to exit
         self.saw_stop = False            # latched STOP - finish current chunk, then exit
+        self.timeline_revision = timeline_revision
+        self.timeline_fingerprint = timeline_fingerprint
 
 
 def command_cancels_graceful_stop(command: Path, st: State) -> bool:
@@ -1431,20 +1332,6 @@ def consume_continue(st: State) -> bool:
     accepted = command_cancels_graceful_stop(CONTINUE, st)
     CONTINUE.unlink(missing_ok=True)
     return accepted
-
-
-def record_started(st: State, chunk_id: str, started_at: float | None = None) -> float:
-    """Retain enough first-piece receipts to survive slower renderer polling."""
-    timestamp = started_at if started_at is not None else time.time()
-    with st.lock:
-        st.recent_starts = [
-            (existing_id, existing_at)
-            for existing_id, existing_at in st.recent_starts
-            if existing_id != chunk_id
-        ]
-        st.recent_starts.insert(0, (chunk_id, timestamp))
-        del st.recent_starts[20:]
-    return timestamp
 
 
 _last_status_write = 0.0
@@ -1719,6 +1606,79 @@ def activate_next_chunk(st: State) -> bool:
         return True
 
 
+def timeline_fingerprint(
+    current: dict[str, object] | None,
+    queue_items: list[dict[str, object]],
+    history_count: int,
+    history_items: list[dict[str, object]],
+) -> str:
+    """Hash the ordered timeline fields that define user-visible row placement."""
+    ordered_rows = {
+        "current": (
+            {"id": current.get("id"), "voice": current.get("voice")}
+            if current is not None
+            else None
+        ),
+        "queue": [
+            {"id": item.get("id"), "voice": item.get("voice")}
+            for item in queue_items
+        ],
+        "history_count": history_count,
+        "history": [
+            {"id": item.get("id"), "voice": item.get("voice")}
+            for item in history_items
+        ],
+    }
+    encoded = json.dumps(ordered_rows, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _advance_timeline_revision(st: State, fingerprint: str) -> int:
+    """Update the one revision counter owned by status publication."""
+    with st.lock:
+        previous = st.timeline_fingerprint
+        if previous is None:
+            st.timeline_fingerprint = fingerprint
+        elif previous != fingerprint:
+            st.timeline_fingerprint = fingerprint
+            st.timeline_revision += 1
+        return st.timeline_revision
+
+
+def fingerprint_from_status(status: object) -> str | None:
+    """Rebuild the persisted fingerprint from one valid status snapshot."""
+    if not _snapshot_is_valid(status):
+        return None
+    assert isinstance(status, dict)
+    current = status.get("current")
+    queue_items = status.get("queue")
+    history_items = status.get("history")
+    history_count = status.get("history_count")
+    if not (
+        (current is None or isinstance(current, dict))
+        and isinstance(queue_items, list)
+        and all(isinstance(item, dict) for item in queue_items)
+        and isinstance(history_items, list)
+        and all(isinstance(item, dict) for item in history_items)
+        and isinstance(history_count, int)
+    ):
+        return None
+    return timeline_fingerprint(current, queue_items, history_count, history_items)
+
+
+def load_timeline_revision_seed() -> tuple[int, str | None]:
+    """Load the last valid revision before the engine replaces its status file."""
+    try:
+        stored_status = json.loads(STATUS.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return 0, None
+    fingerprint = fingerprint_from_status(stored_status)
+    revision = stored_status.get("timeline_revision") if isinstance(stored_status, dict) else None
+    if fingerprint is None or not isinstance(revision, int) or revision < 0:
+        return 0, None
+    return revision, fingerprint
+
+
 def publish_status(
     playback_state: str,
     st: State,
@@ -1726,12 +1686,12 @@ def publish_status(
     playback: PauseableAudio | None = None,
     sample_rate: int | None = None,
     force: bool = False,
-) -> None:
+) -> dict[str, object] | None:
     """Publish an atomic runtime snapshot for the desktop controller."""
     global _last_status_write, _status_failure_started
     now = time.time()
     if not force and now - _last_status_write < 0.25:
-        return
+        return None
 
     activate_next_chunk(st)
     with st.lock:
@@ -1743,13 +1703,12 @@ def publish_status(
         current_piece_count = st.current_piece_count
         current_piece_start = st.current_piece_start
         current_piece_end = st.current_piece_end
-        recent_starts = list(st.recent_starts)
 
     try:
         ordered_queue = queue_files_in_order()
     except RuntimeError as error:
         log(str(error))
-        return
+        return None
     current_path = next(
         (
             path
@@ -1814,18 +1773,22 @@ def publish_status(
         history_count, history_items = history_snapshot()
     except RuntimeError as error:
         log(str(error))
-        return
+        return None
+    fingerprint = timeline_fingerprint(
+        current,
+        queue_items,
+        history_count,
+        history_items,
+    )
+    timeline_revision = _advance_timeline_revision(st, fingerprint)
 
     payload = {
         "version": STATUS_VERSION,
+        "timeline_revision": timeline_revision,
         "state": playback_state,
         "updated_at": now,
         "engine_pid": os.getpid(),
         "current": current,
-        "recent_starts": [
-            {"id": chunk_id, "started_at": started_at}
-            for chunk_id, started_at in recent_starts
-        ],
         "queue_count": len(queue_items),
         "queue": queue_items,
         "history_count": history_count,
@@ -1845,6 +1808,7 @@ def publish_status(
                 f"{now - _status_failure_started:.1f} seconds"
             )
         _status_failure_started = None
+        return payload
     except OSError as error:
         if _status_failure_started is None:
             _status_failure_started = now
@@ -1860,6 +1824,7 @@ def publish_status(
             temp_path.unlink()
         except OSError:
             pass
+    return None
 
 
 def _find_chunk(directory: Path, chunk_id: str) -> Path | None:
@@ -2115,39 +2080,26 @@ def _archive_older_queue_items(target: Path, playing: str | None) -> list[Path]:
     return archived
 
 
-def process_play_request(buf: "queue.Queue", st: State) -> str | None:
-    """Apply one selection while excluding worker claims from its transaction."""
+def apply_play_mutation(
+    buf: "queue.Queue",
+    st: State,
+    request: MutationRequest,
+) -> str | None:
+    """Select one ID while excluding worker claims from the transaction."""
     with st.lock:
-        return _process_play_request_locked(buf, st)
+        return _apply_play_mutation_locked(buf, st, request)
 
 
-def _process_play_request_locked(buf: "queue.Queue", st: State) -> str | None:
-    """Resolve one selected ID while holding the reentrant State lock."""
+def _apply_play_mutation_locked(
+    buf: "queue.Queue",
+    st: State,
+    request: MutationRequest,
+) -> str | None:
     ensure_identity_catalog()
-    request = take_play_request()
-    if request is None:
-        return None
-    chunk_id, requested_voice, request_id, claim = request
-
-    def acknowledge(
-        *,
-        result_id: str | None = None,
-        error: str | None = None,
-        accepted_at: float | None = None,
-    ) -> None:
-        retire_claim(
-            claim,
-            publish_play_ack(
-                request_id,
-                result_id=result_id,
-                error=error,
-                accepted_at=accepted_at,
-            ),
-        )
-
-    if not command_cancels_graceful_stop(claim, st):
-        acknowledge(error="engine stopped before play command was applied")
-        return None
+    if request.type != "play" or request.id is None:
+        raise ValueError("invalid play mutation")
+    chunk_id = request.id
+    requested_voice = request.voice
 
     # Discard audio rendered for the old order but keep source files queued for a clean restart
     with st.lock:
@@ -2158,8 +2110,6 @@ def _process_play_request_locked(buf: "queue.Queue", st: State) -> str | None:
         and (requested_voice is None or requested_voice == voice_from_name(playing))
     ):
         PAUSE.unlink(missing_ok=True)
-        publish_status("playing", st, force=True)
-        acknowledge(result_id=chunk_id)
         log(f"PLAY current {chunk_id}; resumed")
         return None
 
@@ -2177,17 +2127,13 @@ def _process_play_request_locked(buf: "queue.Queue", st: State) -> str | None:
             except MutationOutcomeUnconfirmed as error:
                 log(f"History selection outcome is unconfirmed for {chunk_id}: {error}")
                 st.stop.set()
-                publish_status("playing", st, force=True)
-                acknowledge(error="play command result was unconfirmed")
-                return None
+                raise
             except (OSError, RuntimeError, ValueError) as error:
                 log(f"could not replay {chunk_id}: {error}")
-                acknowledge(error=f"could not replay {chunk_id}")
-                return None
+                raise RuntimeError(f"could not replay {chunk_id}") from error
     if target is None:
         log(f"PLAY ignored; chunk not found: {chunk_id}")
-        acknowledge(error=f"chunk not found: {chunk_id}")
-        return None
+        raise ValueError(f"chunk not found: {chunk_id}")
 
     voice_original: Path | None = None
     if (
@@ -2202,13 +2148,10 @@ def _process_play_request_locked(buf: "queue.Queue", st: State) -> str | None:
         except MutationOutcomeUnconfirmed as error:
             log(f"voice change outcome is unconfirmed for {chunk_id}: {error}")
             st.stop.set()
-            publish_status("playing", st, force=True)
-            acknowledge(error="play command result was unconfirmed")
-            return None
+            raise
         except (OSError, RuntimeError, ValueError) as error:
             log(f"could not change voice for {chunk_id}: {error}")
-            acknowledge(error=f"could not change voice for {chunk_id}")
-            return None
+            raise RuntimeError(f"could not change voice for {chunk_id}") from error
 
     archived: list[Path] = []
     if replayed_from is None:
@@ -2228,12 +2171,11 @@ def _process_play_request_locked(buf: "queue.Queue", st: State) -> str | None:
             if outcome_unconfirmed:
                 log(f"selection outcome is unconfirmed for {chunk_id}: {error}")
                 st.stop.set()
-                publish_status("playing", st, force=True)
-                acknowledge(error="play command result was unconfirmed")
-                return None
+                raise MutationOutcomeUnconfirmed(
+                    "play command result was unconfirmed"
+                ) from error
             log(f"could not select {chunk_id}: {error}")
-            acknowledge(error=f"could not select {chunk_id}")
-            return None
+            raise RuntimeError(f"could not select {chunk_id}") from error
 
     PAUSE.unlink(missing_ok=True)
     try:
@@ -2242,9 +2184,7 @@ def _process_play_request_locked(buf: "queue.Queue", st: State) -> str | None:
         selected_text = ""
     if not target.exists():
         st.stop.set()
-        publish_status("playing", st, force=True)
-        acknowledge(error="play command result was unconfirmed")
-        return None
+        raise MutationOutcomeUnconfirmed("play command result was unconfirmed")
     with st.lock:
         discarded = _discard_buffer(buf)
         st.claimed.clear()
@@ -2259,8 +2199,9 @@ def _process_play_request_locked(buf: "queue.Queue", st: State) -> str | None:
         st.selection_name = target.name
         st.skip_name = None
         st.saw_stop = False
-    publish_status("playing", st, force=True)
-    acknowledge(result_id=public_id_for_path(target))
+    if public_id_for_path(target) != chunk_id:
+        st.stop.set()
+        raise MutationOutcomeUnconfirmed("play changed the stable Speechicle ID")
     if replayed_from is None:
         log(
             f"PLAY selected {target.name}; archived {len(archived)} older chunk(s); "
@@ -2287,7 +2228,7 @@ def do_clear(buf: "queue.Queue", st: State) -> bool:
             st.claimed.clear()
             st.claim_generations.clear()
             st.stop.set()
-            log(f"CLEAR stopped because the saved queue order is unavailable: {error}")
+            log(f"clear stopped because the saved queue order is unavailable: {error}")
             return False
         try:
             archived = _archive_many(ordered)
@@ -2295,19 +2236,19 @@ def do_clear(buf: "queue.Queue", st: State) -> bool:
             st.claimed.clear()
             st.claim_generations.clear()
             st.stop.set()
-            log(f"CLEAR result is unconfirmed; stopping: {error}")
+            log(f"clear result is unconfirmed; stopping: {error}")
             return False
         except (OSError, RuntimeError) as error:
             st.claimed.clear()
             st.claim_generations.clear()
             st.stop.set()
-            log(f"CLEAR could not recover the timeline; stopping: {error}")
+            log(f"clear could not recover the timeline; stopping: {error}")
             return False
         if not archived:
             st.claimed.clear()
             st.claim_generations.clear()
             st.stop.set()
-            log("CLEAR could not archive the timeline; stopping")
+            log("clear could not archive the timeline; stopping")
             return False
         st.claimed = set()
         st.claim_generations = {}
@@ -2319,8 +2260,8 @@ def do_clear(buf: "queue.Queue", st: State) -> bool:
             PAUSE.unlink(missing_ok=True)
             STOP.unlink(missing_ok=True)
         except OSError as error:
-            log(f"could not clear a playback marker after CLEAR: {error}")
-    log(f"CLEAR; archived {len(ordered)} row(s), dropped {discarded} piece(s)")
+            log(f"could not clear a playback marker: {error}")
+    log(f"clear; archived {len(ordered)} row(s), dropped {discarded} piece(s)")
     return True
 
 
@@ -2445,75 +2386,196 @@ def apply_queue_command(
     )
 
 
-def process_queue_requests(
+def _publish_mutation_outcome(
+    claimed: Path,
+    st: State,
+    request_id: str,
+    outcome: str,
+    *,
+    result_id: str | None = None,
+    error: str | None = None,
+    playback_state: str | None = None,
+) -> bool:
+    """Publish the authoritative status before its matching mutation result."""
+    snapshot = publish_status(
+        playback_state
+        or ("stopped" if outcome == "unconfirmed" and st.stop.is_set() else "idle"),
+        st,
+        force=True,
+    )
+    if snapshot is None:
+        st.stop.set()
+        log(f"could not publish status before mutation result {request_id}")
+        return False
+    published = publish_mutation_result(
+        request_id,
+        outcome,
+        snapshot,
+        result_id=result_id,
+        error=error,
+    )
+    retire_claim(claimed, published)
+    if not published:
+        st.stop.set()
+    return published
+
+
+def process_mutation_requests(
     buf: "queue.Queue",
     st: State,
     held_chunk_name: str | None = None,
-) -> bool:
-    """Apply every queued mutation in publication order and acknowledge each caller."""
-    claimed_requests = claim_queue_requests()
-    if not claimed_requests:
-        return False
-    prune_queue_acknowledgements()
-    changed = False
-    for index, claimed in enumerate(claimed_requests):
-        request = read_queue_claim(claimed)
-        if request is None:
-            continue
-        action, chunk_id, before_id, request_id = request
+) -> str | None:
+    """Apply mutations and publish their snapshots in one total FIFO order."""
+    prune_mutation_results()
+    effect: str | None = None
+    invalidate_held_chunk = False
+    while not st.stop.is_set():
+        claimed = claim_next_mutation_request()
+        if claimed is None:
+            break
+        request_id = request_id_from_claim_path(claimed)
         try:
-            apply_queue_command(buf, st, action, chunk_id, before_id)
+            request = read_mutation_claim(claimed)
+        except ValueError as error:
+            log(f"invalid mutation request: {error}")
+            if request_id is None:
+                claimed.unlink(missing_ok=True)
+                continue
+            _publish_mutation_outcome(
+                claimed,
+                st,
+                request_id,
+                "rejected",
+                error=str(error),
+            )
+            continue
+        if request_id is None:
+            log(f"invalid mutation filename: {claimed.name}")
+            claimed.unlink(missing_ok=True)
+            continue
+        if request.request_id != request_id:
+            _publish_mutation_outcome(
+                claimed,
+                st,
+                request_id,
+                "rejected",
+                error="request ID does not match its mutation filename",
+            )
+            continue
+        if not command_cancels_graceful_stop(claimed, st):
+            _publish_mutation_outcome(
+                claimed,
+                st,
+                request.request_id,
+                "rejected",
+                error="engine stopped before mutation was applied",
+            )
+            continue
+
+        try:
+            if request.type == "play":
+                play_effect = apply_play_mutation(buf, st, request)
+                effect = play_effect or effect
+                invalidate_held_chunk = invalidate_held_chunk or play_effect == "select"
+                result_id = request.id
+            elif request.type == "clear":
+                if not do_clear(buf, st):
+                    raise MutationOutcomeUnconfirmed("clear result was unconfirmed")
+                effect = "clear"
+                invalidate_held_chunk = True
+                result_id = None
+            else:
+                assert request.id is not None
+                action = (
+                    "move_history"
+                    if request.type == "move" and request.section == "history"
+                    else request.type
+                )
+                apply_queue_command(
+                    buf,
+                    st,
+                    action,
+                    request.id,
+                    request.before_id,
+                )
+                waiting_changed = (
+                    request.type == "archive"
+                    or request.type == "move" and request.section == "waiting"
+                )
+                if waiting_changed:
+                    if effect is None:
+                        effect = "queue_changed"
+                    invalidate_held_chunk = True
+                result_id = None
         except MutationOutcomeUnconfirmed as error:
             st.stop.set()
-            log(f"QUEUE {action} outcome is unconfirmed for {chunk_id}: {error}")
-            acknowledged = publish_queue_ack(
-                request_id,
-                error="queue command result was unconfirmed",
+            log(
+                f"MUTATION {request.type} outcome is unconfirmed for "
+                f"{request.id or request.request_id}: {error}"
             )
-            retire_claim(claimed, acknowledged)
-            for pending_claim in claimed_requests[index + 1 :]:
-                pending = read_queue_claim(pending_claim)
-                if pending is None:
-                    continue
-                _, _, _, pending_request_id = pending
-                retire_claim(
-                    pending_claim,
-                    publish_queue_ack(
-                        pending_request_id,
-                        error="engine stopped after an unconfirmed queue command",
-                    ),
-                )
+            _publish_mutation_outcome(
+                claimed,
+                st,
+                request.request_id,
+                "unconfirmed",
+                error=str(error),
+            )
             break
         except (OSError, RuntimeError, ValueError) as error:
-            log(f"QUEUE {action} rejected for {chunk_id}: {error}")
-            acknowledged = publish_queue_ack(request_id, error=str(error))
+            log(
+                f"MUTATION {request.type} rejected for "
+                f"{request.id or request.request_id}: {error}"
+            )
+            _publish_mutation_outcome(
+                claimed,
+                st,
+                request.request_id,
+                "rejected",
+                error=str(error),
+            )
         else:
-            changed = True
-            acknowledged = publish_queue_ack(request_id)
-        retire_claim(claimed, acknowledged)
-    if changed and held_chunk_name is not None:
+            if not _publish_mutation_outcome(
+                claimed,
+                st,
+                request.request_id,
+                "committed",
+                result_id=result_id,
+            ):
+                break
+    if invalidate_held_chunk and held_chunk_name is not None:
         invalidate_claim(st, held_chunk_name)
-    return changed
+    return effect
 
 
-def reject_pending_requests(reason: str) -> None:
-    """Give every caller a terminal answer before this engine exits."""
-    for claimed in claim_play_requests():
-        request = read_play_claim(claimed)
-        if request is not None:
-            _, _, request_id = request
-            retire_claim(
-                claimed,
-                publish_play_ack(request_id, error=reason),
+def reject_pending_requests(reason: str, st: State) -> None:
+    """Give every published mutation a terminal result before the engine exits."""
+    while not st.stop.is_set():
+        claimed = claim_next_mutation_request()
+        if claimed is None:
+            return
+        request_id = request_id_from_claim_path(claimed)
+        if request_id is None:
+            claimed.unlink(missing_ok=True)
+            continue
+        try:
+            request = read_mutation_claim(claimed)
+        except ValueError as error:
+            rejection = str(error)
+        else:
+            rejection = (
+                reason
+                if request.request_id == request_id
+                else "request ID does not match its mutation filename"
             )
-    for claimed in claim_queue_requests():
-        request = read_queue_claim(claimed)
-        if request is not None:
-            _, _, _, request_id = request
-            retire_claim(
-                claimed,
-                publish_queue_ack(request_id, error=reason),
-            )
+        if not _publish_mutation_outcome(
+            claimed,
+            st,
+            request_id,
+            "rejected",
+            error=rejection,
+            playback_state="stopped",
+        ):
+            return
 
 
 def _claimed(st: State, name: str, generation: int | None = None) -> bool:
@@ -2609,7 +2671,7 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
     """Producer: claim the next queued chunk, split it into sentence-aligned pieces,
     synthesize each, and bank playback entries in buf (blocking when the buffer
     is full - natural backpressure). Abandons a chunk's
-    remaining pieces when CLEAR/SKIP unclaims it."""
+    remaining pieces when clear or skip unclaims it."""
     while not st.stop.is_set():
         if consume(WARMUP):
             warmup(kokoro)
@@ -2728,19 +2790,18 @@ def gap_wait(seconds: float, buf: "queue.Queue", st: State) -> str | None:
             return "fatal"
         consume_continue(st)
         if consume_control(INTERRUPT):
-            reject_pending_requests("engine interrupted before command was applied")
+            reject_pending_requests("engine interrupted before command was applied", st)
             return "interrupt"
-        if process_play_request(buf, st) == "select":
-            return "select"
-        if consume_ordered_control(CLEAR, st):
-            return "clear" if do_clear(buf, st) else "fatal"
-        if consume_control(STOP):
-            reject_pending_requests("engine stopped before command was applied")
-            return "stop"
         with st.lock:
             held_chunk_name = st.playing
-        if process_queue_requests(buf, st, held_chunk_name):
+        mutation_effect = process_mutation_requests(buf, st, held_chunk_name)
+        if mutation_effect in {"select", "clear"}:
+            return mutation_effect
+        if mutation_effect == "queue_changed":
             return "queue_changed"
+        if consume_control(STOP):
+            reject_pending_requests("engine stopped before command was applied", st)
+            return "stop"
         if st.stop.is_set():
             return "fatal"
         if consume_control(SKIP):
@@ -2779,7 +2840,6 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
         finished_callback=playback.mark_done,
     )
     stream.start()
-    record_started(st, public_id_for_path(path))
     publish_status(
         "paused" if PAUSE.exists() else "playing",
         st,
@@ -2809,25 +2869,26 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
                     force=True,
                 )
             if consume_control(INTERRUPT):
-                reject_pending_requests("engine interrupted before command was applied")
                 stream.abort()
+                reject_pending_requests(
+                    "engine interrupted before command was applied", st
+                )
                 return "interrupt"
             consume_continue(st)
-            if process_play_request(buf, st) == "select":
+            mutation_effect = process_mutation_requests(buf, st)
+            if mutation_effect == "select":
                 stream.abort()
                 return "select"
-            if consume_ordered_control(CLEAR, st):
+            if mutation_effect == "clear":
                 stream.abort()
-                return "clear" if do_clear(buf, st) else "fatal"
+                return "clear"
             if not st.saw_stop and control_requested(STOP):
                 st.saw_stop = True
             if st.saw_stop:
-                reject_pending_requests("engine is stopping")
-            else:
-                process_queue_requests(buf, st)
-                if st.stop.is_set():
-                    stream.abort()
-                    return "fatal"
+                reject_pending_requests("engine is stopping", st)
+            if st.stop.is_set():
+                stream.abort()
+                return "fatal"
             if consume_control(SKIP):
                 stream.abort()
                 return "skip"
@@ -2899,12 +2960,35 @@ def clear_current_playback(st: State) -> None:
     st.current_piece_end = None
 
 
-def run_engine_loop() -> None:
+def settle_stale_mutation_claims(st: State) -> None:
+    """Report crash-interrupted claims without guessing whether they committed."""
+    for claimed in sorted(BASE.glob(f"{MUTATION.stem}.*.claim")):
+        request_id = request_id_from_claim_path(claimed)
+        if request_id is None:
+            claimed.unlink(missing_ok=True)
+            continue
+        if mutation_result_path(request_id).exists():
+            claimed.unlink(missing_ok=True)
+            continue
+        _publish_mutation_outcome(
+            claimed,
+            st,
+            request_id,
+            "unconfirmed",
+            error="engine restarted while mutation result was unconfirmed",
+        )
+
+
+def run_engine_loop(
+    timeline_revision: int = 0,
+    timeline_fingerprint_seed: str | None = None,
+) -> None:
     QUEUE.mkdir(parents=True, exist_ok=True)
     SPOKEN.mkdir(parents=True, exist_ok=True)
     repair_interrupted_timeline_transition()
-    st = State()
+    st = State(timeline_revision, timeline_fingerprint_seed)
     publish_status("loading", st, force=True)
+    settle_stale_mutation_claims(st)
     if not MODEL_PATH.exists() or not VOICES_PATH.exists():
         publish_status("setup_required", st, force=True)
         sys.stderr.write(f"missing kokoro files at {MODEL_DIR}\n")
@@ -2961,28 +3045,27 @@ def run_engine_loop() -> None:
                 return
             consume_continue(st)
             if consume_control(INTERRUPT):
-                reject_pending_requests("engine interrupted before command was applied")
+                reject_pending_requests(
+                    "engine interrupted before command was applied", st
+                )
                 log("INTERRUPT (idle); exiting")
                 return
-            process_play_request(buf, st)
+            process_mutation_requests(buf, st)
             if st.stop.is_set():
                 log("engine stopping after a storage failure")
-                return
-            if consume_ordered_control(CLEAR, st) and not do_clear(buf, st):
-                log("engine stopping after CLEAR could not finish")
                 return
             with st.lock:
                 playing = st.playing
             if not playing and (st.saw_stop or consume_control(STOP)):
-                reject_pending_requests("engine stopped before command was applied")
+                reject_pending_requests(
+                    "engine stopped before command was applied", st
+                )
                 log("STOP (idle); exiting")
                 return
             if playing and not st.saw_stop and control_requested(STOP):
                 st.saw_stop = True
             if st.saw_stop:
-                reject_pending_requests("engine is stopping")
-            else:
-                process_queue_requests(buf, st)
+                reject_pending_requests("engine is stopping", st)
             if st.stop.is_set():
                 log("engine stopping after a storage failure")
                 return
@@ -3034,7 +3117,8 @@ def run_engine_loop() -> None:
             if stale:
                 continue
 
-            if process_queue_requests(buf, st, path.name):
+            mutation_effect = process_mutation_requests(buf, st, path.name)
+            if mutation_effect is not None:
                 continue
 
             if first and not session_first and not selected:
@@ -3119,45 +3203,30 @@ def clear_transient_signals() -> None:
         STOP,
         INTERRUPT,
         SKIP,
-        CLEAR,
         CONTINUE,
-        PLAY,
-        QUEUE_COMMAND,
         WARMUP,
     ):
         signal.unlink(missing_ok=True)
-    for temporary in BASE.glob(f"{PLAY.stem}.*.tmp"):
+    for temporary in BASE.glob(f"{MUTATION.stem}.*.tmp"):
         temporary.unlink(missing_ok=True)
-    for temporary in BASE.glob(f"{QUEUE_COMMAND.stem}.*.tmp"):
-        temporary.unlink(missing_ok=True)
-    for claimed in BASE.glob(f"{PLAY.stem}.*.claim"):
-        request = read_play_claim(claimed)
-        if request is not None:
-            _, _, request_id = request
-            if play_ack_path(request_id).exists():
-                claimed.unlink(missing_ok=True)
-                continue
-            retire_claim(
-                claimed,
-                publish_play_ack(
-                    request_id, error="engine restarted while command result was unconfirmed"
-                ),
-            )
-    for claimed in BASE.glob(f"{QUEUE_COMMAND.stem}.*.claim"):
-        request = read_queue_claim(claimed)
-        if request is not None:
-            _, _, _, request_id = request
-            if queue_ack_path(request_id).exists():
-                claimed.unlink(missing_ok=True)
-                continue
-            retire_claim(
-                claimed,
-                publish_queue_ack(
-                    request_id, error="engine restarted while command result was unconfirmed"
-                ),
-            )
-    prune_play_acknowledgements()
-    prune_queue_acknowledgements()
+
+    # Protocol 12 has one mutation stream, so no protocol 11 request may survive
+    for pattern in (
+        "CLEAR",
+        "PLAY.json",
+        "PLAY.*.json",
+        "PLAY.*.tmp",
+        "PLAY.*.claim",
+        "PLAY_ACK.*.json",
+        "QUEUE_COMMAND.json",
+        "QUEUE_COMMAND.*.json",
+        "QUEUE_COMMAND.*.tmp",
+        "QUEUE_COMMAND.*.claim",
+        "QUEUE_ACK.*.json",
+    ):
+        for artifact in BASE.glob(pattern):
+            artifact.unlink(missing_ok=True)
+    prune_mutation_results()
 
 
 def serve() -> None:
@@ -3166,9 +3235,10 @@ def serve() -> None:
     if not instance_lock.acquire():
         return
     try:
+        timeline_revision, timeline_fingerprint_seed = load_timeline_revision_seed()
         STATUS.unlink(missing_ok=True)
         clear_transient_signals()
-        run_engine_loop()
+        run_engine_loop(timeline_revision, timeline_fingerprint_seed)
     finally:
         instance_lock.release()
 
@@ -3254,11 +3324,11 @@ def print_status() -> None:
         json.dumps(
             {
                 "version": STATUS_VERSION,
+                "timeline_revision": 0,
                 "state": "stopped",
                 "updated_at": 0,
                 "engine_pid": None,
                 "current": current,
-                "recent_starts": [],
                 "queue_count": len(queue_items),
                 "queue": queue_items,
                 "history_count": len(list(SPOKEN.glob("*.txt"))),
@@ -3310,6 +3380,8 @@ def cli(argv: list[str] | None = None) -> int:
         "delete", help="permanently delete one History chunk"
     )
     delete_command.add_argument("chunk_id", help="History chunk ID from status output")
+    mutate = commands.add_parser("mutate", help=argparse.SUPPRESS)
+    mutate.add_argument("mutation_json", help=argparse.SUPPRESS)
     commands.add_parser("skip", help="skip the current chunk")
     commands.add_parser("clear", help="move Current and Waiting speech to History")
     commands.add_parser("stop", help="finish the current chunk and stop")
@@ -3339,26 +3411,48 @@ def cli(argv: list[str] | None = None) -> int:
             resume()
         elif args.command == "play":
             start_engine()
-            request_id = request_play(args.chunk_id, args.voice)
-            print(json.dumps(wait_for_play_ack(request_id)))
+            request_id = request_mutation(
+                build_mutation_request("play", id=args.chunk_id, voice=args.voice)
+            )
+            print(json.dumps(wait_for_mutation_result(request_id), ensure_ascii=False))
         elif args.command in {"move", "move-history", "archive", "delete"}:
             start_engine()
-            action = "move_history" if args.command == "move-history" else args.command
-            request_id = request_queue_command(
-                action,
-                args.chunk_id,
-                args.before_id if action in {"move", "move_history"} else None,
+            if args.command in {"move", "move-history"}:
+                request = build_mutation_request(
+                    "move",
+                    section="history" if args.command == "move-history" else "waiting",
+                    id=args.chunk_id,
+                    before_id=args.before_id,
+                )
+            else:
+                request = build_mutation_request(args.command, id=args.chunk_id)
+            request_id = request_mutation(request)
+            print(
+                json.dumps(
+                    wait_for_mutation_result(request_id),
+                    ensure_ascii=False,
+                )
             )
-            wait_for_queue_ack(request_id)
+        elif args.command == "mutate":
+            request_id = secrets.token_hex(12)
+            try:
+                mutation_payload = json.loads(args.mutation_json)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"invalid mutation JSON: {error}") from error
+            request = parse_cli_mutation(mutation_payload, request_id)
+            start_engine()
+            request_mutation(request)
+            print(json.dumps(wait_for_mutation_result(request_id), ensure_ascii=False))
+        elif args.command == "clear":
+            start_engine()
+            request_id = request_mutation(build_mutation_request("clear"))
+            print(json.dumps(wait_for_mutation_result(request_id), ensure_ascii=False))
         else:
             signal = {
                 "skip": SKIP,
-                "clear": CLEAR,
                 "stop": STOP,
                 "interrupt": INTERRUPT,
             }[args.command]
-            if args.command == "clear":
-                start_engine()
             send_control(signal)
     except (RuntimeError, ValueError) as error:
         parser.error(str(error))

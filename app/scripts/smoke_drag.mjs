@@ -43,6 +43,12 @@ function runEngine(...args) {
   }).trim();
 }
 
+function mutateTimeline(mutation) {
+  const result = JSON.parse(runEngine("mutate", JSON.stringify(mutation)));
+  assert.equal(result.outcome, "committed", result.error);
+  return result;
+}
+
 function status() {
   const snapshot = JSON.parse(readFileSync(path.join(runtime, "status.json"), "utf8"));
   const rows = [
@@ -54,9 +60,9 @@ function status() {
     assert.match(row.id, /^sp_[0-9a-f]{32}$/, "Status leaked an invalid Speechicle ID");
     assert(!Object.hasOwn(row, "filename"), "Status leaked an internal filename");
   }
-  for (const start of snapshot.recent_starts) {
-    assert.match(start.id, /^sp_[0-9a-f]{32}$/, "Recent starts leaked an invalid Speechicle ID");
-  }
+  assert.equal(snapshot.version, 12, "Pointer smoke requires the current status schema");
+  assert(Number.isInteger(snapshot.timeline_revision));
+  assert(snapshot.timeline_revision >= 0);
   return snapshot;
 }
 
@@ -1081,7 +1087,7 @@ try {
       rows.slice(0, 2).map((row) => row.getAttribute("data-item-id"))
     ),
     [secondHistoryId, firstHistoryId],
-    "Releasing a History reorder must preserve its optimistic order",
+    "Releasing a History reorder must preserve its drag preview order",
   );
   assert.equal(
     await page.locator(`[data-item-id="${firstHistoryId}"]`).getAttribute("data-smoke-node"),
@@ -1348,7 +1354,7 @@ try {
     await page.locator("#playback-card").evaluate((card) => card.classList.contains("is-expanded")),
     "The progressing playback card did not expand",
   );
-  runEngine("clear");
+  mutateTimeline({ type: "clear" });
   await waitFor(
     () => status().current === null && status().queue_count === 0,
     "The background follow-along fixture did not clear",

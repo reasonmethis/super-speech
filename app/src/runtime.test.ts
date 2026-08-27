@@ -2,26 +2,24 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   ENGINE_STATUS_VERSION,
-  activeTimelineIds,
-  clearRequestWasApplied,
+  adoptTimelineSnapshot,
   compatibleEngineIsRunning,
   currentPieceSegments,
   engineProcessIsLive,
   isSpeechicleId,
   moveQueueItemBefore,
-  pendingPlaybackState,
-  playAcceptanceState,
   playbackPresentation,
   parseEngineStatus,
   parseEngineProcessStatus,
-  parsePlayAcceptance,
+  parseTimelineMutation,
+  parseTimelineMutationResult,
   runtimeStateForSnapshot,
   statusAfterTransientRead,
   statusForEngineProcess,
   statusAfterPauseCommand,
   timelineItems,
-  timelineItemsAtBoundary,
   type EngineStatus,
+  type RuntimeStatus,
 } from "./runtime.ts";
 
 function speechicleId(value: number): string {
@@ -30,11 +28,11 @@ function speechicleId(value: number): string {
 
 const status: EngineStatus = {
   version: ENGINE_STATUS_VERSION,
+  timeline_revision: 3,
   state: "stopped",
   updated_at: 1,
   engine_pid: 41,
   current: null,
-  recent_starts: [],
   queue_count: 0,
   queue: [],
   history_count: 0,
@@ -73,8 +71,15 @@ test("an incompatible external engine cannot leave the app loading forever", () 
 });
 
 test("accepts a complete current-version status", () => {
-  assert.equal(ENGINE_STATUS_VERSION, 11);
+  assert.equal(ENGINE_STATUS_VERSION, 12);
   assert.equal(parseEngineStatus(status), status);
+});
+
+test("requires a nonnegative integer timeline revision", () => {
+  assert.equal(parseEngineStatus({ ...status, timeline_revision: -1 }), null);
+  assert.equal(parseEngineStatus({ ...status, timeline_revision: 1.5 }), null);
+  const { timeline_revision: _revision, ...missingRevision } = status;
+  assert.equal(parseEngineStatus(missingRevision), null);
 });
 
 test("accepts only stable public Speechicle IDs", () => {
@@ -100,13 +105,6 @@ test("rejects invalid IDs and internal filenames in public status rows", () => {
       ...status,
       history_count: 1,
       history: [{ ...valid, filename: "001-af_heart-say.txt" }],
-    }),
-    null,
-  );
-  assert.equal(
-    parseEngineStatus({
-      ...status,
-      recent_starts: [{ id: "old-name", started_at: 1 }],
     }),
     null,
   );
@@ -272,144 +270,6 @@ test("extracts the current Unicode piece with code-point offsets", () => {
   });
 });
 
-test("active timeline IDs include Current and Waiting", () => {
-  const waiting = { id: speechicleId(2), text: "Wait", voice: "af_heart" };
-  const current = {
-    id: speechicleId(1),
-    text: "Current",
-    voice: "af_heart",
-    piece: 0,
-    piece_count: 1,
-    piece_start: null,
-    piece_end: null,
-    elapsed_seconds: 0,
-  };
-  assert.deepEqual(
-    [...activeTimelineIds({ current, queue: [waiting] })],
-    [current.id, waiting.id],
-  );
-  assert.deepEqual([...activeTimelineIds({ current: null, queue: [] })], []);
-});
-
-test("clear confirmation requires a newer status without the baseline IDs", () => {
-  const baseline = new Set([speechicleId(7)]);
-  const selected = {
-    id: speechicleId(7),
-    text: "Selected",
-    voice: "af_heart",
-    piece: 0,
-    piece_count: 1,
-    piece_start: null,
-    piece_end: null,
-    elapsed_seconds: 0,
-  };
-
-  assert.equal(
-    clearRequestWasApplied(
-      { ...status, updated_at: 10, current: null, queue: [] },
-      baseline,
-      10,
-    ),
-    false,
-  );
-  assert.equal(
-    clearRequestWasApplied(
-      { ...status, updated_at: 10.5, current: null, queue: [] },
-      baseline,
-      11,
-    ),
-    false,
-  );
-  assert.equal(
-    clearRequestWasApplied(
-      { ...status, updated_at: 11, current: selected, queue: [] },
-      baseline,
-      10,
-    ),
-    false,
-  );
-  assert.equal(
-    clearRequestWasApplied(
-      { ...status, updated_at: 12, current: null, queue: [] },
-      baseline,
-      10,
-    ),
-    true,
-  );
-});
-
-test("normalizes an engine play acknowledgement", () => {
-  const id = speechicleId(8);
-  assert.deepEqual(parsePlayAcceptance({ id, accepted_at: 12.5 }), {
-    id,
-    acceptedAt: 12.5,
-  });
-  assert.equal(parsePlayAcceptance({ id }), null);
-  assert.equal(parsePlayAcceptance({ id: "008-bm_fable-say", accepted_at: 12.5 }), null);
-});
-
-test("does not mistake an existing History row for started playback", () => {
-  const archived = {
-    id: speechicleId(8),
-    text: "Play this again",
-    voice: "bm_fable",
-  };
-  const acceptance = { id: archived.id, acceptedAt: 12 };
-
-  assert.equal(
-    playAcceptanceState(
-      { ...status, state: "paused", updated_at: 11, history_count: 1, history: [archived] },
-      acceptance,
-    ),
-    "pending",
-  );
-  const preparing = {
-    ...archived,
-    piece: 0,
-    piece_count: 1,
-    piece_start: null,
-    piece_end: null,
-    elapsed_seconds: 0,
-  };
-  assert.equal(
-    playAcceptanceState(
-      { ...status, state: "stopped", updated_at: 13, current: preparing },
-      acceptance,
-    ),
-    "failed",
-  );
-  assert.equal(
-    playAcceptanceState(
-      { ...status, state: "playing", updated_at: 13, current: { ...archived, piece: 1, piece_count: 1, piece_start: 0, piece_end: archived.text.length, elapsed_seconds: 0 }, history_count: 1, history: [archived] },
-      acceptance,
-    ),
-    "pending",
-  );
-  assert.equal(
-    playAcceptanceState(
-      { ...status, updated_at: 13, history_count: 1, history: [archived] },
-      acceptance,
-    ),
-    "failed",
-  );
-  assert.equal(
-    playAcceptanceState(
-      {
-        ...status,
-        updated_at: 13,
-        recent_starts: [
-          { id: speechicleId(9), started_at: 13 },
-          { id: archived.id, started_at: 12.5 },
-        ],
-        history_count: 1,
-        history: [archived],
-      },
-      acceptance,
-    ),
-    "applied",
-  );
-});
-
 test("makes active playback states impossible without active speech", () => {
   const waiting = {
     id: speechicleId(2),
@@ -474,41 +334,6 @@ test("reflects pause commands immediately without creating an empty paused state
   assert.equal(
     statusAfterPauseCommand({ ...active, state: "loading", engine_running: false }, true).state,
     "stopped",
-  );
-});
-
-test("keeps an accepted selection paused until the user resumes it", () => {
-  const selected = {
-    id: speechicleId(7),
-    text: "Selected",
-    voice: "bm_fable",
-  };
-
-  assert.deepEqual(
-    playbackPresentation({
-      ...status,
-      state: "paused",
-      history_count: 1,
-      history: [selected],
-    }, { item: selected, state: "paused" }),
-    { state: "paused", item: selected },
-  );
-});
-
-test("a fresh external transport command updates an accepted selection", () => {
-  const acceptance = { id: speechicleId(7), acceptedAt: 12 };
-
-  assert.equal(
-    pendingPlaybackState({ ...status, state: "paused", updated_at: 11 }, acceptance, "playing"),
-    "playing",
-  );
-  assert.equal(
-    pendingPlaybackState({ ...status, state: "paused", updated_at: 13 }, acceptance, "playing"),
-    "paused",
-  );
-  assert.equal(
-    pendingPlaybackState({ ...status, state: "playing", updated_at: 14 }, acceptance, "paused"),
-    "playing",
   );
 });
 
@@ -614,68 +439,6 @@ test("keeps row order stable when current speech enters history", () => {
   );
 });
 
-test("projects a selected History row as the boundary without moving any card", () => {
-  const history = [5, 4, 3, 2, 1].map((value) => ({
-    id: speechicleId(value),
-    text: String(value),
-    voice: "af_heart",
-  }));
-
-  for (const selectedIndex of history.keys()) {
-    const projected = timelineItemsAtBoundary(
-      { current: null, queue: [], history },
-      history[selectedIndex],
-    );
-    assert.deepEqual(
-      projected.map(({ id }) => id),
-      history.map(({ id }) => id),
-    );
-    assert.deepEqual(
-      projected.map(({ kind }) => kind),
-      history.map((_, index) =>
-        index < selectedIndex
-          ? "upcoming"
-          : index === selectedIndex
-            ? "current"
-            : "history"
-      ),
-    );
-  }
-});
-
-test("keeps a voice-changed selection in the same stable row", () => {
-  const original = {
-    id: speechicleId(3),
-    text: "Same words",
-    voice: "af_heart",
-  };
-  const changed = {
-    ...original,
-    voice: "bm_fable",
-  };
-  const projected = timelineItemsAtBoundary(
-    {
-      current: null,
-      queue: [],
-      history: [
-        { ...original, id: speechicleId(4) },
-        original,
-        { ...original, id: speechicleId(2) },
-      ],
-    },
-    changed,
-  );
-
-  assert.deepEqual(projected.map(({ id }) => id), [
-    speechicleId(4),
-    changed.id,
-    speechicleId(2),
-  ]);
-  assert.equal(projected[1].kind, "current");
-  assert.equal(projected[1].id, original.id);
-  assert.equal(projected[1].voice, "bm_fable");
-});
-
 test("moves a queue item before a stable ID or to the end", () => {
   const items = [{ id: "one" }, { id: "two" }, { id: "three" }];
 
@@ -691,4 +454,193 @@ test("moves a queue item before a stable ID or to the end", () => {
     moveQueueItemBefore(items, "two", "missing").map(({ id }) => id),
     ["one", "two", "three"],
   );
+});
+
+test("validates every timeline mutation variant", () => {
+  const id = speechicleId(8);
+  const beforeId = speechicleId(9);
+  const mutations = [
+    { type: "play", id },
+    { type: "play", id, voice: "bm_fable" },
+    { type: "move", section: "waiting", id, beforeId },
+    { type: "move", section: "history", id, beforeId: null },
+    { type: "archive", id },
+    { type: "delete", id },
+    { type: "clear" },
+  ];
+  for (const mutation of mutations) {
+    assert.deepEqual(parseTimelineMutation(mutation), mutation);
+  }
+
+  assert.equal(parseTimelineMutation({ type: "play", id: "old-name" }), null);
+  assert.equal(parseTimelineMutation({ type: "play", id, voice: "" }), null);
+  assert.equal(parseTimelineMutation({ type: "play", id, voice: "Heart" }), null);
+  assert.equal(parseTimelineMutation({ type: "clear", id }), null);
+  assert.equal(parseTimelineMutation({ type: "archive", id, beforeId: null }), null);
+  assert.equal(
+    parseTimelineMutation({ type: "move", section: "current", id, beforeId: null }),
+    null,
+  );
+  assert.equal(
+    parseTimelineMutation({ type: "move", section: "waiting", id }),
+    null,
+  );
+  assert.equal(parseTimelineMutation({ type: "unknown", id }), null);
+});
+
+test("normalizes committed and failed mutation results", () => {
+  const id = speechicleId(8);
+  const request1 = "1".repeat(24);
+  const request2 = "2".repeat(24);
+  assert.deepEqual(
+    parseTimelineMutationResult({
+      outcome: "committed",
+      request_id: request1,
+      result_id: id,
+      snapshot: status,
+    }),
+    {
+      outcome: "committed",
+      requestId: request1,
+      resultId: id,
+      snapshot: status,
+    },
+  );
+  for (const outcome of ["rejected", "unconfirmed"] as const) {
+    assert.deepEqual(
+      parseTimelineMutationResult({
+        outcome,
+        request_id: request2,
+        error: "Could not commit",
+        snapshot: status,
+      }),
+      {
+        outcome,
+        requestId: request2,
+        error: "Could not commit",
+        snapshot: status,
+      },
+    );
+  }
+  assert.equal(
+    parseTimelineMutationResult({
+      outcome: "committed",
+      request_id: "3".repeat(24),
+      result_id: "old-name",
+      snapshot: status,
+    }),
+    null,
+  );
+  assert.equal(
+    parseTimelineMutationResult({
+      outcome: "committed",
+      request_id: "4".repeat(24),
+      snapshot: status,
+      extra: true,
+    }),
+    null,
+  );
+  assert.equal(
+    parseTimelineMutationResult({
+      outcome: "rejected",
+      request_id: "5".repeat(24),
+      snapshot: status,
+    }),
+    null,
+  );
+  assert.equal(
+    parseTimelineMutationResult({
+      outcome: "committed",
+      request_id: "6".repeat(24),
+      error: "Contradictory",
+      snapshot: status,
+    }),
+    null,
+  );
+  assert.equal(
+    parseTimelineMutationResult({
+      outcome: "unconfirmed",
+      request_id: "7".repeat(24),
+      result_id: id,
+      error: "Contradictory",
+      snapshot: status,
+    }),
+    null,
+  );
+  assert.equal(
+    parseTimelineMutationResult({
+      outcome: "committed",
+      request_id: "8".repeat(24),
+      snapshot: { ...status, version: ENGINE_STATUS_VERSION - 1 },
+    }),
+    null,
+  );
+  assert.equal(
+    parseTimelineMutationResult({
+      outcome: "committed",
+      request_id: "not-a-request-id",
+      snapshot: status,
+    }),
+    null,
+  );
+});
+
+test("adopts timeline snapshots by revision and then publication time", () => {
+  const current: RuntimeStatus = {
+    ...status,
+    timeline_revision: 5,
+    updated_at: 20,
+    state: "idle",
+    engine_running: true,
+    installed: true,
+  };
+  const olderRevision = {
+    ...current,
+    timeline_revision: 4,
+    updated_at: 100,
+  };
+  const olderPublication = { ...current, updated_at: 19 };
+  const newerPublication = { ...current, updated_at: 21 };
+  const newerRevision = {
+    ...current,
+    timeline_revision: 6,
+    updated_at: 1,
+  };
+
+  assert.equal(adoptTimelineSnapshot(current, olderRevision), current);
+  assert.equal(adoptTimelineSnapshot(current, olderPublication), current);
+  assert.equal(adoptTimelineSnapshot(current, newerPublication), newerPublication);
+  assert.equal(adoptTimelineSnapshot(current, newerRevision), newerRevision);
+});
+
+test("a stale poll cannot roll back a committed snapshot", () => {
+  const current: RuntimeStatus = {
+    ...status,
+    timeline_revision: 8,
+    updated_at: 80,
+    state: "idle",
+    engine_running: true,
+    installed: true,
+  };
+  const stalePoll = {
+    ...current,
+    timeline_revision: 7,
+    updated_at: 90,
+    history_count: 1,
+    history: [{ id: speechicleId(4), text: "Old", voice: "af_heart" }],
+  };
+  assert.equal(adoptTimelineSnapshot(current, stalePoll), current);
+
+  const stoppedPoll = {
+    ...stalePoll,
+    state: "stopped" as const,
+    engine_pid: null,
+    engine_running: false,
+  };
+  assert.deepEqual(adoptTimelineSnapshot(current, stoppedPoll), {
+    ...current,
+    state: "stopped",
+    engine_pid: null,
+    engine_running: false,
+  });
 });

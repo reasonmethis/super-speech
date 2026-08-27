@@ -6,9 +6,11 @@ export type RuntimeState =
   | "setup_required"
   | "stopped";
 
-export const ENGINE_STATUS_VERSION = 11 as const;
+export const ENGINE_STATUS_VERSION = 12 as const;
 
 const SPEECHICLE_ID = /^sp_[0-9a-f]{32}$/;
+const MUTATION_REQUEST_ID = /^[0-9a-f]{24}$/;
+const KOKORO_VOICE_ID = /^[ab][fm]_[a-z0-9_]+$/;
 
 export function isSpeechicleId(value: unknown): value is string {
   return typeof value === "string" && SPEECHICLE_ID.test(value);
@@ -80,18 +82,13 @@ export function currentPieceSegments(
   };
 }
 
-export interface StartedItem {
-  id: string;
-  started_at: number;
-}
-
 export interface EngineStatus {
   version: typeof ENGINE_STATUS_VERSION;
+  timeline_revision: number;
   state: RuntimeState;
   updated_at: number;
   engine_pid: number | null;
   current: CurrentItem | null;
-  recent_starts: StartedItem[];
   queue_count: number;
   queue: QueueItem[];
   history_count: number;
@@ -170,51 +167,6 @@ export interface TimelineItem extends QueueItem {
   position: number | null;
 }
 
-export interface PlayAcceptance {
-  id: string;
-  acceptedAt: number;
-}
-
-export type PlayAcceptanceState = "pending" | "applied" | "failed";
-
-export function pendingPlaybackState(
-  status: EngineStatus,
-  acceptance: PlayAcceptance | null,
-  current: "playing" | "paused",
-): "playing" | "paused" {
-  return acceptance &&
-      status.updated_at >= acceptance.acceptedAt &&
-      (status.state === "playing" || status.state === "paused")
-    ? status.state
-    : current;
-}
-
-export function playAcceptanceState(
-  status: EngineStatus,
-  acceptance: PlayAcceptance,
-): PlayAcceptanceState {
-  if (
-    status.recent_starts.some(
-      ({ id, started_at }) => id === acceptance.id && started_at >= acceptance.acceptedAt,
-    )
-  ) {
-    return "applied";
-  }
-  if (status.updated_at < acceptance.acceptedAt) {
-    return "pending";
-  }
-  if (status.state === "stopped") {
-    return "failed";
-  }
-  if (
-    status.current?.id === acceptance.id ||
-    status.queue.some(({ id }) => id === acceptance.id)
-  ) {
-    return "pending";
-  }
-  return "failed";
-}
-
 export type PlaybackPresentation =
   | { state: "playing" | "paused"; item: QueueItem }
   | { state: "loading"; item: QueueItem | null }
@@ -224,16 +176,6 @@ export type PendingPlayback = {
   item: QueueItem;
   state: "playing" | "paused";
 };
-
-export function parsePlayAcceptance(value: unknown): PlayAcceptance | null {
-  if (!value || typeof value !== "object") {
-    return null;
-  }
-  const acceptance = value as Record<string, unknown>;
-  return isSpeechicleId(acceptance.id) && typeof acceptance.accepted_at === "number"
-    ? { id: acceptance.id, acceptedAt: acceptance.accepted_at }
-    : null;
-}
 
 export function playbackPresentation(
   status: EngineStatus,
@@ -319,14 +261,6 @@ function isCurrentItem(value: unknown): value is CurrentItem {
     end <= length;
 }
 
-function isStartedItem(value: unknown): value is StartedItem {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const item = value as Partial<StartedItem>;
-  return isSpeechicleId(item.id) && typeof item.started_at === "number";
-}
-
 function playbackBoundaryMatchesState(value: Record<string, unknown>): boolean {
   const hasCurrent = value.current !== null;
   if (value.state === "playing" || value.state === "paused") {
@@ -349,10 +283,10 @@ function hasStatusCore(value: Record<string, unknown>): boolean {
     typeof value.state === "string" &&
     RUNTIME_STATES.has(value.state as RuntimeState) &&
     typeof value.updated_at === "number" &&
+    Number.isInteger(value.timeline_revision) &&
+    (value.timeline_revision as number) >= 0 &&
     (value.engine_pid === null || typeof value.engine_pid === "number") &&
     current !== undefined &&
-    Array.isArray(value.recent_starts) &&
-    value.recent_starts.every(isStartedItem) &&
     Number.isInteger(value.queue_count) &&
     queue !== null &&
     (current !== null || queue.length === 0) &&
@@ -445,48 +379,6 @@ export function timelineItems(
   ];
 }
 
-export function activeTimelineIds(
-  status: Pick<EngineStatus, "current" | "queue">,
-): Set<string> {
-  return new Set([
-    ...(status.current ? [status.current.id] : []),
-    ...status.queue.map(({ id }) => id),
-  ]);
-}
-
-export function clearRequestWasApplied(
-  status: Pick<EngineStatus, "updated_at" | "current" | "queue">,
-  baselineIds: ReadonlySet<string>,
-  requestedAfter: number,
-): boolean {
-  if (baselineIds.size === 0 || status.updated_at <= requestedAfter) {
-    return false;
-  }
-  const activeIds = activeTimelineIds(status);
-  return [...baselineIds].every((id) => !activeIds.has(id));
-}
-
-/** Reclassify one existing row as Current without changing visual order */
-export function timelineItemsAtBoundary(
-  status: Pick<EngineStatus, "current" | "queue" | "history">,
-  boundary: QueueItem,
-): TimelineItem[] {
-  const items = timelineItems(status);
-  const boundaryIndex = items.findIndex(({ id }) => id === boundary.id);
-  if (boundaryIndex < 0) {
-    return items;
-  }
-  return items.map((item, index) => {
-    if (index < boundaryIndex) {
-      return { ...item, kind: "upcoming", position: boundaryIndex - index };
-    }
-    if (index === boundaryIndex) {
-      return timelineItem(boundary, "current", null);
-    }
-    return { ...item, kind: "history", position: null };
-  });
-}
-
 export function moveQueueItemBefore<T extends { id: string }>(
   items: readonly T[],
   id: string,
@@ -514,17 +406,194 @@ export interface VersionInfo {
   engine: string;
 }
 
+export type TimelineMutation =
+  | { type: "play"; id: string; voice?: string }
+  | {
+    type: "move";
+    section: "waiting" | "history";
+    id: string;
+    beforeId: string | null;
+  }
+  | { type: "archive"; id: string }
+  | { type: "delete"; id: string }
+  | { type: "clear" };
+
+export type TimelineMutationResult<TSnapshot extends EngineStatus = EngineStatus> =
+  | {
+    outcome: "committed";
+    requestId: string;
+    resultId?: string;
+    snapshot: TSnapshot;
+  }
+  | {
+    outcome: "rejected" | "unconfirmed";
+    requestId: string;
+    error: string;
+    snapshot: TSnapshot;
+  };
+
+function isNonemptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isKokoroVoiceId(value: unknown): value is string {
+  return typeof value === "string" && KOKORO_VOICE_ID.test(value);
+}
+
+function isMutationRequestId(value: unknown): value is string {
+  return typeof value === "string" && MUTATION_REQUEST_ID.test(value);
+}
+
+function hasOnlyFields(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+): boolean {
+  const allowedFields = new Set(allowed);
+  return Object.keys(value).every((field) => allowedFields.has(field));
+}
+
+export function parseTimelineMutation(value: unknown): TimelineMutation | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const mutation = value as Record<string, unknown>;
+  if (mutation.type === "clear") {
+    return hasOnlyFields(mutation, ["type"]) ? { type: "clear" } : null;
+  }
+  if (!isSpeechicleId(mutation.id)) {
+    return null;
+  }
+  if (mutation.type === "play") {
+    if (
+      !hasOnlyFields(mutation, ["type", "id", "voice"]) ||
+      (mutation.voice !== undefined && !isKokoroVoiceId(mutation.voice))
+    ) {
+      return null;
+    }
+    return mutation.voice === undefined
+      ? { type: "play", id: mutation.id }
+      : { type: "play", id: mutation.id, voice: mutation.voice };
+  }
+  if (mutation.type === "move") {
+    if (
+      !hasOnlyFields(mutation, ["type", "section", "id", "beforeId"]) ||
+      (mutation.section !== "waiting" && mutation.section !== "history") ||
+      (mutation.beforeId !== null && !isSpeechicleId(mutation.beforeId))
+    ) {
+      return null;
+    }
+    return {
+      type: "move",
+      section: mutation.section,
+      id: mutation.id,
+      beforeId: mutation.beforeId,
+    };
+  }
+  if (mutation.type === "archive" || mutation.type === "delete") {
+    return hasOnlyFields(mutation, ["type", "id"])
+      ? { type: mutation.type, id: mutation.id }
+      : null;
+  }
+  return null;
+}
+
+export function parseTimelineMutationResult(
+  value: unknown,
+): TimelineMutationResult | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const result = value as Record<string, unknown>;
+  const snapshot = parseEngineStatus(result.snapshot);
+  if (!snapshot || !isMutationRequestId(result.request_id)) {
+    return null;
+  }
+  if (result.outcome === "committed") {
+    if (
+      !hasOnlyFields(result, [
+        "outcome",
+        "request_id",
+        "result_id",
+        "error",
+        "snapshot",
+      ]) ||
+      (result.error !== undefined && result.error !== null) ||
+      result.result_id !== undefined &&
+      result.result_id !== null &&
+      !isSpeechicleId(result.result_id)
+    ) {
+      return null;
+    }
+    return {
+      outcome: "committed",
+      requestId: result.request_id,
+      ...(typeof result.result_id === "string" ? { resultId: result.result_id } : {}),
+      snapshot,
+    };
+  }
+  if (
+    (result.outcome === "rejected" || result.outcome === "unconfirmed") &&
+    hasOnlyFields(result, [
+      "outcome",
+      "request_id",
+      "result_id",
+      "error",
+      "snapshot",
+    ]) &&
+    (result.result_id === undefined || result.result_id === null) &&
+    isNonemptyString(result.error)
+  ) {
+    return {
+      outcome: result.outcome,
+      requestId: result.request_id,
+      error: result.error,
+      snapshot,
+    };
+  }
+  return null;
+}
+
+export function adoptTimelineSnapshot(
+  current: RuntimeStatus,
+  candidate: RuntimeStatus,
+): RuntimeStatus {
+  // Prefer committed timeline order over the clock time of a stale poll
+  const timelineIsOlder = candidate.timeline_revision < current.timeline_revision || (
+    candidate.timeline_revision === current.timeline_revision &&
+    candidate.updated_at < current.updated_at
+  );
+  if (!timelineIsOlder) {
+    return candidate;
+  }
+  if (
+    candidate.engine_running === current.engine_running &&
+    candidate.installed === current.installed
+  ) {
+    return current;
+  }
+  return {
+    ...current,
+    state: runtimeStateForSnapshot(
+      candidate.installed,
+      candidate.engine_running,
+      current.state === "setup_required" || current.state === "stopped"
+        ? undefined
+        : current.state,
+    ),
+    engine_pid: candidate.engine_pid,
+    engine_running: candidate.engine_running,
+    installed: candidate.installed,
+  };
+}
+
 export interface DesktopApi {
   getStatus(): Promise<RuntimeStatus>;
   getVersions(): Promise<VersionInfo>;
   setPaused(paused: boolean): Promise<RuntimeStatus>;
-  playChunk(id: string, voice?: string): Promise<PlayAcceptance>;
-  moveQueueItem(id: string, beforeId: string | null): Promise<void>;
-  moveHistoryItem(id: string, beforeId: string | null): Promise<void>;
-  archiveQueueItem(id: string): Promise<void>;
-  deleteHistoryItem(id: string): Promise<void>;
+  mutateTimeline(
+    mutation: TimelineMutation,
+  ): Promise<TimelineMutationResult<RuntimeStatus>>;
   copyText(text: string): Promise<void>;
-  clearQueue(): Promise<void>;
   openSetup(): Promise<void>;
   minimize(): Promise<void>;
   toggleMaximize(): Promise<void>;
@@ -543,13 +612,8 @@ export const IPC_CHANNELS = {
   getStatus: "runtime:get-status",
   getVersions: "runtime:get-versions",
   setPaused: "runtime:set-paused",
-  playChunk: "runtime:play-chunk",
-  moveQueueItem: "runtime:move-queue-item",
-  moveHistoryItem: "runtime:move-history-item",
-  archiveQueueItem: "runtime:archive-queue-item",
-  deleteHistoryItem: "runtime:delete-history-item",
+  mutateTimeline: "runtime:mutate-timeline",
   copyText: "runtime:copy-text",
-  clearQueue: "runtime:clear-queue",
   openSetup: "app:open-setup",
   minimize: "window:minimize",
   toggleMaximize: "window:toggle-maximize",
@@ -559,13 +623,13 @@ export const IPC_CHANNELS = {
 
 export const INITIAL_STATUS: RuntimeStatus = {
   version: ENGINE_STATUS_VERSION,
+  timeline_revision: 0,
   state: "loading",
   updated_at: 0,
   engine_pid: null,
   engine_running: false,
   installed: true,
   current: null,
-  recent_starts: [],
   queue_count: 0,
   queue: [],
   history_count: 0,

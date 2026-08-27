@@ -51,7 +51,11 @@ def read_status(environment: dict[str, str]) -> dict[str, Any]:
         text=True,
     )
     status = json.loads(result.stdout)
-    if status.get("version") != 11 or "filename" in result.stdout:
+    if (
+        status.get("version") != 12
+        or not isinstance(status.get("timeline_revision"), int)
+        or "filename" in result.stdout
+    ):
         raise RuntimeError("frozen engine exposed an invalid public status shape")
     return status
 
@@ -145,10 +149,14 @@ def main() -> None:
                 capture_output=True,
                 text=True,
             )
-            replay_id = json.loads(replay_result.stdout).get("id")
-            if replay_id != speechicle_id:
+            replay_payload = json.loads(replay_result.stdout)
+            if (
+                replay_payload.get("outcome") != "committed"
+                or replay_payload.get("result_id") != speechicle_id
+                or replay_payload.get("snapshot", {}).get("version") != 12
+            ):
                 raise RuntimeError(
-                    "frozen engine returned an invalid replay acknowledgement"
+                    "frozen engine returned an invalid replay result"
                 )
             wait_for_status(
                 environment,
