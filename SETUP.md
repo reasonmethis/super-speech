@@ -75,6 +75,12 @@ Confirm that the speech item moves from the skill's `runtime/queue/` to
 `runtime/log.txt`, fix the reported dependency, model, or audio-device error,
 and retry the same `speak` command.
 
+`runtime/log.txt` is the engine's event log in both installation modes. The
+desktop app also writes `engine.log` beside its runtime files; that second file
+captures the child process's raw stdout and stderr, so it is useful when the
+engine exits before it can write a normal event. Headless mode has no Electron
+child process and therefore no `engine.log`.
+
 ## Switching between headless and desktop modes
 
 The skill prefers a valid desktop engine manifest when the app is installed.
@@ -92,8 +98,8 @@ Run `super-speech-engine status` and use an exact `id` from `current`, `queue`,
 or the bounded `history` list:
 
 ```powershell
-& $engine play '014-af_heart-say'
-& $engine play '014-af_heart-say' --voice bm_fable
+& $engine play 'sp_0123456789abcdef0123456789abcdef'
+& $engine play 'sp_0123456789abcdef0123456789abcdef' --voice bm_fable
 ```
 
 The same command works in desktop and headless installations. Selecting an
@@ -112,11 +118,11 @@ Use exact IDs to reorder Waiting or recent History items, archive Waiting, or
 delete History:
 
 ```powershell
-& $engine move '016-af_bella-say' '015-bm_fable-say'
-& $engine move '015-bm_fable-say'
-& $engine move-history '014-af_heart-say' '013-bm_george-say'
-& $engine archive '016-af_bella-say'
-& $engine delete '014-af_heart-say'
+& $engine move 'sp_11111111111111111111111111111111' 'sp_22222222222222222222222222222222'
+& $engine move 'sp_22222222222222222222222222222222'
+& $engine move-history 'sp_33333333333333333333333333333333' 'sp_44444444444444444444444444444444'
+& $engine archive 'sp_11111111111111111111111111111111'
+& $engine delete 'sp_33333333333333333333333333333333'
 ```
 
 The first command inserts one item before another. Omitting the second ID moves

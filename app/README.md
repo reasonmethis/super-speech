@@ -28,6 +28,26 @@ History row makes it Current in place and promotes every row above it to Waiting
 The renderer rejects a runtime snapshot that contains Waiting without Current,
 or Playing, Paused, or Idle states that contradict that boundary.
 
+The shared terms and exact state rules live in
+[Desktop architecture](../ARCHITECTURE.md#vocabulary). In short, a Speechicle is
+one user-visible timeline item, a piece is one internal synthesis segment, and
+Current is the boundary between Waiting and History.
+
+## Code map
+
+- `electron/main.ts` supervises the Python engine and owns tray, window, install
+  manifest, and IPC behavior
+- `electron/preload.ts` exposes the narrow sandboxed renderer bridge
+- `src/runtime.ts` validates engine snapshots and defines the desktop contract
+- `src/main.ts` renders the window and handles playback, menus, and gestures
+- `src/queue-drag-model.ts` contains the pure drag state machine
+- `src/*.test.ts` covers those data and gesture rules without audio
+- `scripts/smoke_electron.mjs` drives the packaged UI with silent audio
+- `scripts/smoke_installed.mjs` verifies the installed app and engine supervisor
+
+The Python ownership map is in
+[Desktop architecture](../ARCHITECTURE.md#code-map).
+
 ## Prerequisites
 
 Release builds require Node.js 22+ and Python 3.12. These are build-time tools
@@ -83,16 +103,16 @@ with silent audio and verifies the result in both the renderer and the engine
 queue.
 
 Runtime state has one transport authority. Engine liveness gates playback. An
-explicit Play action starts in Playing immediately, while a later Pause remains
-authoritative during preparation. The engine publishes a first-piece receipt so
-an archived row alone cannot be mistaken for successful replay. Timeline
-mutations cannot remove or reorder the item currently being selected.
-Failed optimistic mutations reconcile from the engine rather than restoring an
-older renderer snapshot.
+explicit Play action is shown as Playing immediately, while a later Pause stays
+authoritative during preparation. Play, move, archive, delete, and clear all use
+one engine mutation contract. Each result carries the authoritative status
+snapshot, so the renderer does not infer success or restore an older local copy.
+A monotonic timeline revision prevents late status polls from undoing a
+committed result.
 
 ## Engine verification
 
-The engine smoke test synthesizes and plays a silent-timing chunk with an
+The engine smoke test synthesizes and plays a silent-timing Speechicle with an
 isolated runtime. It still exercises model loading, phonemization, ONNX
 inference, PortAudio, queue archival, and shutdown.
 

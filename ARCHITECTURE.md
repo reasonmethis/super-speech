@@ -33,6 +33,41 @@ directory contains its private Python environment, models, queue, status, and
 logs. It installs the same module that is frozen into the desktop sidecar. The
 app is UI and supervision on top of the engine, not a second drainer.
 
+## Vocabulary
+
+- A **Speechicle** is one `speak` request. It stays one timeline item and one
+  replay target
+- A **piece** is a sentence-sized part synthesized inside a Speechicle. Pieces
+  reduce startup delay but never become separate timeline items
+- **Current** is the one Speechicle at the playback boundary. It remains Current
+  while it is being prepared, spoken, paused, or waiting between pieces
+- **Waiting** contains the Speechicles that will play after Current
+- **History** contains completed, skipped, and cleared Speechicles
+- The **playback boundary** is Current's place in the ordered timeline. Moving
+  that boundary changes which Speechicles are Waiting and which are History
+- A **row** is only the card that represents a Speechicle in the desktop UI
+
+## Code map
+
+- `skills/super-speech/engine/super_speech_engine.py` owns the engine session,
+  synthesis, playback, timeline persistence, commands, and status publication
+- `skills/super-speech/engine/pauseable_audio.py` owns sample-accurate pause and
+  resume inside the audio callback
+- `skills/super-speech/engine/speechicle_identity.py` owns stable public IDs and
+  migration from older filename-based identities
+- `skills/super-speech/engine/mutation_protocol.py` validates the one timeline
+  mutation wire format
+- `app/electron/main.ts` owns the engine child process, tray, window, install
+  manifest, and renderer IPC
+- `app/src/runtime.ts` validates engine snapshots and defines the shared desktop
+  data contract
+- `app/src/main.ts` renders the window and handles playback, menus, and gestures
+- `app/src/queue-drag-model.ts` is the pure drag-and-drop state machine
+- `tests/test_pauseable_audio.py` covers the Python engine and its durable
+  recovery paths
+- `app/src/*.test.ts` covers the desktop data and gesture models without audio
+- `app/scripts/smoke_*.mjs` covers packaged Electron behavior with silent audio
+
 ## Options considered
 
 ### Python-only app
@@ -69,106 +104,100 @@ migrated its desktop app from Tauri to Electron. Keeping Tauri would retain a
 known maintenance risk while saving little relative to model and inference
 runtime sizes.
 
-## Playback protocol
+## Timeline and playback
 
-`super-speech-engine status` publishes a version 10 snapshot with the current
-speech item, the complete upcoming queue, and up to 50 recent archived items in
-their saved display order. A
-speech item is one `speak` invocation, one timeline row, and one replay target.
-Sentence-aligned pieces are an internal synthesis and buffering detail, not separate
-history entries. The current item remains active while the engine waits for its
-next rendered piece. While a piece is active, `piece_start` and `piece_end`
-identify its zero-based, end-exclusive Unicode code-point range in the complete
-Current text. Before the first piece starts, `piece` is 0 and both ranges are
-null. Active pieces use `piece` values from 1 through `piece_count`. Every entry
-has an opaque `id`. The total `history_count`
-can exceed the bounded
-`history` array.
-`queue_count` always matches the complete `queue` array. Queued work always has
-exactly one playback-boundary item in `current`, including during synthesis,
-inter-piece gaps, and a stopped process. A snapshot with Waiting rows but no
-Current row is invalid. A bounded
-`recent_starts` receipt list lets the renderer distinguish speech that actually
-began from an archived replay that failed before its first audio piece.
-The archive currently includes completed, skipped, and cleared items, so the
-UI calls it History rather than claiming every entry played to completion.
-If status publication fails continuously, the engine writes `status.failed`
-before stopping. Electron treats that marker as an explicit invalidation and
-does not reuse an older timeline snapshot as though it were current.
+### Status snapshot
 
-`super-speech-engine play <id> [--voice <voice>]` is the one selection command.
-The optional voice changes the same row in place while preserving its text, gap,
-and timeline position. The engine, not
-Electron, validates the identifier and owns every queue or archive mutation:
+`super-speech-engine status` publishes one version 12 snapshot. It contains
+Current, the complete Waiting list, and up to 50 recent History rows. The total
+`history_count` may be larger than that bounded History list. Every Speechicle
+has an opaque ID such as `sp_0123456789abcdef0123456789abcdef`. Text filenames
+and numeric storage sequences are private and may change without changing the
+public ID.
 
-- selecting the current item resumes it from the same sample when paused
-- selecting an upcoming item archives the current item and every older waiting
-  item before it, then plays the selection without reordering newer items
-- selecting an archived item moves the playback boundary to that row; it and
-  every History row above it become the active sequence, while all cards retain
-  their screen order
+Current stays present while the engine prepares audio, speaks, pauses, or waits
+between pieces. Before its first piece starts, `piece` is 0 and `piece_start`
+and `piece_end` are null. During a piece, those two fields give its zero-based,
+end-exclusive Unicode code-point range inside the complete text. The renderer
+uses that range for follow-along highlighting.
 
-Selection invalidates rendered pieces that no longer match the chosen order.
-Each selection uses an atomic request file and a private acknowledgement that
-reports the exact resulting queue ID or an engine rejection. If several
-requests arrive before one poll, the engine rejects the superseded requests
-and accepts the newest one. A request remains recoverable until its
-acknowledgement is durable; an unclaimed timeout cancels the request before the
-caller reports failure. No HTTP, WebSocket,
-second queue, or renderer playback state machine is needed.
-Immediate control files carry the lock owner's process ID. A delayed Stop,
-Interrupt, Skip, or Clear command is discarded if a successor engine has taken
-ownership, so a command cannot cross an engine restart boundary.
-If Play or Clear and Stop are pending together, their file publication times
-decide which command wins. A newer Play or Clear cancels the older graceful
-Stop; a newer Stop prevents the older command from starting.
+The status shape enforces these rules:
 
-Queue order is stored separately from the opaque chunk filenames. The engine
-filters that saved order against live queue files and appends new arrivals, so
-dragging never renames an ID and concurrent `speak` calls remain safe.
-`move <id> [before-id]` changes that order, while `archive <id>` moves one
-waiting item into History and `delete <id>` permanently removes one History
-item. History display order is likewise stored in `history-order.json`, and
-`move-history <id> [before-id]` reorders the bounded recent History view without
-renaming or moving archive files. These commands use unique request files and
-exact acknowledgements. Queue text is written under a temporary name and becomes
-visible to the worker only after an atomic replace. The engine
-invalidates buffered waiting audio after queue-order mutations while preserving
-every rendered piece of the current item. If a queue file cannot be archived,
-the engine stops and leaves that durable file visible for the next engine process
-to retry instead of retaining an unreleasable live claim.
+- Waiting cannot exist without Current
+- Playing and Paused cannot exist without Current
+- Idle cannot have Current
+- Current, Waiting, and History cannot contain the same ID twice
+- `queue_count` equals the number of Waiting rows
 
-`clear` archives Current and every Waiting row as one recoverable batch. The
-engine records the intended final Queue and History orders before moving any
-row, so startup can finish an interrupted operation without exposing a partial
-timeline. A known in-process failure restores the complete prior layout. An
-unconfirmed rollback leaves the intent for startup recovery and stops the
-engine rather than continuing from ambiguous storage.
+Loading, Setup required, and Stopped describe process lifecycle. They may still
+show Current so the user does not lose the playback boundary while the engine is
+starting or stopped. If status publication keeps failing, the engine writes
+`status.failed` and stops. Electron treats that marker as invalidation, not as
+permission to keep showing an older snapshot.
 
-Moving the playback boundary into History uses the same complete-on-restart
-principle. Its promotion intent records every History-to-Queue move, the final
-orders, and any temporary backup of a legacy duplicate. Recovery completes the
-boundary change and removes those backups before deleting the intent.
-The engine never overwrites a retained transaction intent. It completes that
-intent first or rejects the new mutation until recovery can finish.
+Each snapshot also has a `timeline_revision`. The engine increments it only when
+row identity, row order, a row's voice, or the History total changes. Piece
+progress, pause state, and timestamps do not increment it. The engine seeds the
+counter from its last valid version 12 status when it restarts. The renderer
+uses the revision first and `updated_at` second, so a late status poll cannot
+replace a mutation result with an older timeline.
 
-The engine status keeps waiting items in playback order, oldest first. The
-desktop timeline displays that list in reverse so new arrivals enter at the top,
-then places the current item above newest-first History. Section dividers and a
-Speechicles heading identify the timeline, and a new current ID is scrolled into
-view once instead of on every status poll. When current playback
-finishes, the same row therefore crosses the divider without changing its
-position relative to the other rows. Waiting and History drags translate back
-into `move` and `move-history` commands. The renderer applies the result
-immediately and reloads the authoritative snapshot if the engine rejects the command. Current
-speech is not reorderable. The status producer derives active state from the
-same current and queue snapshot, and the renderer rejects snapshots whose state,
-Current, and Waiting fields contradict the playback boundary. Playing and Paused
-therefore cannot exist without an active item, and Waiting cannot exist without
-Current. The process lifecycle remains authoritative: a dead engine is Stopped,
-and an accepted selection may change the displayed item but
-cannot override Paused. Timeline mutations cannot target a selection that is
-still starting.
+### Timeline mutations
+
+Play, move, archive, delete, and clear all use one command shape and one durable
+FIFO stream. The public CLI commands and the desktop app both enter that same
+path. The engine claims one request at a time, applies it, publishes the new
+status, and then publishes a matching result. Every result is one of:
+
+- `committed`: the change took effect
+- `rejected`: the engine made no requested change and explains why
+- `unconfirmed`: storage may have changed but the engine cannot prove the final
+  result, so it stops instead of continuing from an uncertain timeline
+
+Every result includes its request ID and the authoritative status snapshot.
+Play also returns the selected Speechicle ID. The renderer adopts that snapshot
+instead of guessing success from matching text or rebuilding the timeline on
+its own. A drag preview moves existing row nodes only for visual feedback; it
+does not become application state.
+
+`play <id> [--voice <voice>]` moves the playback boundary without changing the
+visible row order:
+
+- playing Current resumes it from the same sample when it is paused
+- playing a Waiting row moves Current and each older Waiting row into History
+- playing a History row makes that row Current and makes each row above it
+  Waiting
+- choosing another voice changes that Speechicle in place and keeps its ID and
+  text
+
+Changing the playback boundary discards buffered audio that belongs to the old
+order. Current audio remains buffered when a simple Waiting or History reorder
+does not change the boundary.
+
+`move`, `move-history`, `archive`, `delete`, and `clear` use the same mutation
+result contract. Queue and History order live in `queue-order.json` and
+`history-order.json`, keyed by stable public IDs. The identity catalog in
+`speechicle-index.json` maps those IDs to private storage sequences. New text is
+written to a temporary file and becomes visible only through an atomic replace,
+so concurrent `speak` calls cannot expose half-written rows.
+
+Clear and History promotion can touch several files. Before either operation,
+the engine writes the intended final layout to `timeline-intent.json`. Startup
+finishes an interrupted intent before accepting another mutation. A known
+in-process failure restores the old layout. An uncertain rollback keeps the
+intent and stops the engine so the next process can recover it.
+
+Pause, Resume, Skip, Stop, and Interrupt are immediate controls rather than
+timeline mutations. Their signal files name the engine process that owns the
+runtime lock, so a delayed control cannot affect a replacement process. A
+mutation and a graceful Stop are ordered by publication time: a newer mutation
+cancels an older Stop, while a newer Stop rejects the older mutation.
+
+The engine stores Waiting in playback order, oldest first. The desktop reverses
+that list, places Current below it, then places newest-first History below
+Current. A row therefore crosses the Current-History divider without jumping
+when playback finishes. A new Current row is scrolled into view once; piece
+updates do not take scrolling away from the user. Current is not draggable.
 
 ## Distribution boundaries
 

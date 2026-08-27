@@ -2,9 +2,9 @@
 
 Start with the canonical project overview in [README.md](README.md).
 
-This is the ordered backlog for taking the version-zero controller into a
-public Super Speech app. Each section is meant to be runnable as a focused
-work session without having to reconstruct the product decisions.
+This roadmap tracks finished foundations and the remaining work for a public
+Super Speech release. Checked items describe the current product. Unchecked
+items are future work, ordered by priority.
 
 ## Version zero
 
