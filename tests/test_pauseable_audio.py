@@ -57,6 +57,8 @@ def configure_runtime(engine, tmp_path: Path) -> None:
     engine.TIMELINE_LOCK = tmp_path / "timeline.lock"
     engine.TIMELINE_INTENT = tmp_path / "timeline-intent.json"
     engine.IDENTITY_INDEX = tmp_path / "speechicle-index.json"
+    engine.PLAYBACK_COMMAND_LOCK = tmp_path / "playback-command.lock"
+    engine.PLAYBACK_COMMAND_SEQUENCE = tmp_path / "playback-command-sequence.json"
     engine._identity_cache_path = None
     engine._identity_cache = None
     engine._identity_ready_path = None
@@ -806,11 +808,191 @@ def test_reset_waiting_buffer_keeps_queue_first_claim_without_cached_progress(
     _, current_generation = engine._record_claim(state, current)
     engine._record_claim(state, waiting)
 
-    assert engine._reset_waiting_buffer(buffered, state) == 1
+    assert engine._reset_waiting_buffer(buffered, state, current.name) == 1
 
     assert buffered.get_nowait() == (current, "current piece")
     assert buffered.empty()
     assert state.claims == {current.name: current_generation}
+
+
+@pytest.mark.parametrize("action", ["move", "archive"])
+def test_waiting_mutation_does_not_reread_storage_after_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    action: str,
+) -> None:
+    engine = load_engine(f"super_speech_engine_post_commit_reset_{action}")
+    configure_runtime(engine, tmp_path)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    second = engine.QUEUE / "002-bm_fable-say.txt"
+    third = engine.QUEUE / "003-af_bella-say.txt"
+    for path in (current, second, third):
+        path.write_text(path.stem, encoding="utf-8")
+    state = engine.State()
+    engine._record_claim(state, current)
+    original_queue_files = engine.queue_files_in_order
+
+    def fail_disk_read() -> list[Path]:
+        raise RuntimeError("injected post-commit disk read")
+
+    if action == "archive":
+        original_commit = engine.archive
+
+        def commit_archive(path: Path) -> bool:
+            committed = original_commit(path)
+            monkeypatch.setattr(engine, "queue_files_in_order", fail_disk_read)
+            return committed
+
+        monkeypatch.setattr(engine, "archive", commit_archive)
+        request = build_mutation(
+            engine,
+            "archive",
+            id=speechicle_id(engine, second),
+        )
+        engine.apply_archive_mutation(queue.Queue(), state, request)
+    else:
+        original_commit = engine.save_queue_order
+
+        def commit_move(paths: list[Path]) -> None:
+            original_commit(paths)
+            monkeypatch.setattr(engine, "queue_files_in_order", fail_disk_read)
+
+        monkeypatch.setattr(engine, "save_queue_order", commit_move)
+        request = build_mutation(
+            engine,
+            "move",
+            section="waiting",
+            id=speechicle_id(engine, third),
+            before_id=speechicle_id(engine, second),
+        )
+        engine.apply_waiting_move_mutation(queue.Queue(), state, request)
+
+    monkeypatch.setattr(engine, "queue_files_in_order", original_queue_files)
+    if action == "archive":
+        assert not second.exists()
+        assert (engine.SPOKEN / second.name).exists()
+    else:
+        assert engine.queue_files_in_order() == [current, third, second]
+
+
+@pytest.mark.parametrize("action", ["move", "archive"])
+def test_post_commit_waiting_reset_failure_is_never_reported_as_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    action: str,
+) -> None:
+    engine = load_engine(f"super_speech_engine_waiting_unconfirmed_{action}")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    second = engine.QUEUE / "002-bm_fable-say.txt"
+    third = engine.QUEUE / "003-af_bella-say.txt"
+    for path in (current, second, third):
+        path.write_text(path.stem, encoding="utf-8")
+    if action == "archive":
+        request_id = request_mutation(
+            engine,
+            "archive",
+            id=speechicle_id(engine, second),
+        )
+    else:
+        request_id = request_mutation(
+            engine,
+            "move",
+            section="waiting",
+            id=speechicle_id(engine, third),
+            before_id=speechicle_id(engine, second),
+        )
+    monkeypatch.setattr(
+        engine,
+        "_reset_waiting_buffer",
+        lambda *_args: (_ for _ in ()).throw(OSError("injected reset failure")),
+    )
+    state = engine.State()
+
+    engine.process_mutation_requests(queue.Queue(), state)
+
+    result = engine.wait_for_mutation_result(request_id, timeout=0.1)
+    assert result["outcome"] == "unconfirmed"
+    assert state.stop.is_set()
+    if action == "archive":
+        assert not second.exists()
+        assert (engine.SPOKEN / second.name).exists()
+    else:
+        assert engine.queue_files_in_order() == [current, third, second]
+
+
+def test_waiting_move_temp_write_failure_is_rejected_without_stopping_engine(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_move_precommit_failure")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    second = engine.QUEUE / "002-bm_fable-say.txt"
+    third = engine.QUEUE / "003-af_bella-say.txt"
+    for path in (current, second, third):
+        path.write_text(path.stem, encoding="utf-8")
+    request_id = request_mutation(
+        engine,
+        "move",
+        section="waiting",
+        id=speechicle_id(engine, third),
+        before_id=speechicle_id(engine, second),
+    )
+    original_write = Path.write_text
+
+    def fail_order_temp(path: Path, *args, **kwargs) -> int:
+        if path.parent == engine.BASE and path.name.startswith(
+            f"{engine.QUEUE_ORDER.name}."
+        ):
+            raise PermissionError("injected pre-replace failure")
+        return original_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_order_temp)
+    state = engine.State()
+
+    engine.process_mutation_requests(queue.Queue(), state)
+
+    result = rejected_result(engine, request_id)
+    assert "injected pre-replace failure" in str(result["error"])
+    assert not state.stop.is_set()
+    assert engine.queue_files_in_order() == [current, second, third]
+
+
+def test_waiting_move_accepts_verified_replace_success_after_replace_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_move_verified_replace")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    second = engine.QUEUE / "002-bm_fable-say.txt"
+    third = engine.QUEUE / "003-af_bella-say.txt"
+    for path in (current, second, third):
+        path.write_text(path.stem, encoding="utf-8")
+    request_id = request_mutation(
+        engine,
+        "move",
+        section="waiting",
+        id=speechicle_id(engine, third),
+        before_id=speechicle_id(engine, second),
+    )
+    original_replace = engine.os.replace
+
+    def replace_then_report_error(source, destination) -> None:
+        original_replace(source, destination)
+        if Path(destination) == engine.QUEUE_ORDER:
+            raise PermissionError("ambiguous replace result")
+
+    monkeypatch.setattr(engine.os, "replace", replace_then_report_error)
+
+    engine.process_mutation_requests(queue.Queue(), engine.State())
+
+    committed_result(engine, request_id)
+    assert engine.queue_files_in_order() == [current, third, second]
 
 
 @pytest.mark.parametrize("action", ["move", "archive"])
@@ -1465,6 +1647,176 @@ def test_pause_and_resume_commands_share_the_runtime_signal(tmp_path: Path) -> N
     assert not engine.PAUSE.exists()
 
 
+def test_playback_command_sequence_persists_across_engine_reload(
+    tmp_path: Path,
+) -> None:
+    first = load_engine("super_speech_engine_command_sequence_first")
+    configure_runtime(first, tmp_path)
+
+    assert first.publish_ordered_marker(first.PAUSE) == 1
+    assert first.resume() is None
+
+    restarted = load_engine("super_speech_engine_command_sequence_restarted")
+    configure_runtime(restarted, tmp_path)
+    assert restarted.publish_ordered_marker(restarted.STOP) == 3
+
+    marker = json.loads(restarted.STOP.read_text(encoding="utf-8"))
+    counter = json.loads(
+        restarted.PLAYBACK_COMMAND_SEQUENCE.read_text(encoding="utf-8")
+    )
+    assert marker["command_sequence"] == 3
+    assert counter == {"version": 1, "last_sequence": 3}
+
+
+def test_invalid_playback_command_sequence_stops_new_publication(
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_invalid_command_sequence")
+    configure_runtime(engine, tmp_path)
+    engine.PLAYBACK_COMMAND_SEQUENCE.write_text("{", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="sequence is unavailable"):
+        engine.publish_ordered_marker(engine.PAUSE)
+
+    assert not engine.PAUSE.exists()
+    assert engine.PLAYBACK_COMMAND_SEQUENCE.read_text(encoding="utf-8") == "{"
+
+
+def test_missing_counter_recovers_pending_commands_before_allocating(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_recovered_command_sequence")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+
+    assert engine.publish_ordered_marker(engine.PAUSE) == 1
+    first_id = request_mutation(engine, "clear")
+    second_id = request_mutation(engine, "clear")
+    engine.PLAYBACK_COMMAND_SEQUENCE.unlink()
+
+    assert engine.publish_ordered_marker(engine.CONTINUE) == 4
+
+    pending = {
+        json.loads(path.read_text(encoding="utf-8"))["command_sequence"]
+        for path in engine.BASE.glob("MUTATION.*.json")
+    }
+    assert pending == {2, 3}
+    assert {first_id, second_id} == {
+        path.name.split(".")[-2]
+        for path in engine.BASE.glob("MUTATION.*.json")
+    }
+    marker = json.loads(engine.CONTINUE.read_text(encoding="utf-8"))
+    assert marker["command_sequence"] == 4
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "{",
+        "[]",
+        "{}",
+        '{"command_sequence":0}',
+        '{"engine_pid":null}',
+        '{"engine_pid":1,"unexpected":true}',
+    ],
+)
+def test_malformed_ordered_marker_fails_closed(
+    tmp_path: Path,
+    payload: str,
+) -> None:
+    engine = load_engine("super_speech_engine_invalid_ordered_marker")
+    configure_runtime(engine, tmp_path)
+    engine.STOP.write_text(payload, encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="STOP marker"):
+        engine.ordered_marker_requested(engine.STOP)
+
+
+def test_ordered_marker_read_retries_a_transient_storage_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_transient_marker_read")
+    configure_runtime(engine, tmp_path)
+    engine.STOP.write_text("", encoding="utf-8")
+    original_read = Path.read_text
+    attempts = 0
+
+    def transient_read(path: Path, *args, **kwargs) -> str:
+        nonlocal attempts
+        if path == engine.STOP and attempts < 2:
+            attempts += 1
+            raise PermissionError("temporarily locked")
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", transient_read)
+
+    assert engine.ordered_marker_requested(engine.STOP)
+    assert attempts == 2
+
+
+def test_unreadable_stop_prevents_destructive_mutation_admission(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_unreadable_stop")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    current.write_text("Current", encoding="utf-8")
+    request_mutation(engine, "clear")
+    engine.publish_ordered_marker(engine.STOP)
+    original_read = Path.read_text
+
+    def unreadable_stop(path: Path, *args, **kwargs) -> str:
+        if path == engine.STOP:
+            raise PermissionError("locked")
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable_stop)
+
+    with pytest.raises(RuntimeError, match="STOP marker is unavailable"):
+        engine.process_mutation_requests(queue.Queue(), engine.State())
+
+    assert current.exists()
+    assert not (engine.SPOKEN / current.name).exists()
+
+
+def test_concurrent_mutation_publishers_receive_unique_ordered_sequences(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_concurrent_command_sequence")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    barrier = threading.Barrier(8)
+    failures: list[Exception] = []
+
+    def publish() -> None:
+        try:
+            barrier.wait()
+            request_mutation(engine, "clear")
+        except Exception as error:
+            failures.append(error)
+
+    publishers = [threading.Thread(target=publish) for _ in range(8)]
+    for publisher in publishers:
+        publisher.start()
+    for publisher in publishers:
+        publisher.join(2)
+
+    assert not failures
+    assert all(not publisher.is_alive() for publisher in publishers)
+    payloads = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in engine.BASE.glob("MUTATION.*.json")
+    ]
+    assert sorted(payload["command_sequence"] for payload in payloads) == list(
+        range(1, 9)
+    )
+
+
 def test_scoped_control_cannot_affect_a_successor_engine(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_scoped_control")
     configure_runtime(engine, tmp_path)
@@ -1622,18 +1974,10 @@ def test_playing_current_chunk_resumes_without_reordering(
     assert result["result_id"] == speechicle_id(engine, current)
 
 
-@pytest.mark.parametrize(
-    ("play_time", "pause_time", "pause_remains"),
-    [
-        (2_000_000_000, 1_000_000_000, False),
-        (1_000_000_000, 2_000_000_000, True),
-    ],
-)
+@pytest.mark.parametrize("pause_remains", [False, True])
 def test_play_and_pause_apply_in_publication_order(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    play_time: int,
-    pause_time: int,
     pause_remains: bool,
 ) -> None:
     engine = load_engine(f"super_speech_engine_ordered_pause_{pause_remains}")
@@ -1643,19 +1987,91 @@ def test_play_and_pause_apply_in_publication_order(
     current.write_text("Current", encoding="utf-8")
     state = engine.State()
     set_current(engine, state, current)
-    request_id = request_mutation(
-        engine, "play", id=speechicle_id(engine, current), voice=None
-    )
+    if pause_remains:
+        request_id = request_mutation(
+            engine, "play", id=speechicle_id(engine, current), voice=None
+        )
+        engine.publish_ordered_marker(engine.PAUSE)
+    else:
+        engine.publish_ordered_marker(engine.PAUSE)
+        request_id = request_mutation(
+            engine, "play", id=speechicle_id(engine, current), voice=None
+        )
     request_path = next(engine.BASE.glob(f"MUTATION.*.{request_id}.json"))
-    engine.PAUSE.touch()
-    os.utime(request_path, ns=(play_time, play_time))
-    os.utime(engine.PAUSE, ns=(pause_time, pause_time))
+    os.utime(request_path, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(engine.PAUSE, ns=(1_000_000_000, 1_000_000_000))
 
     assert engine.process_mutation_requests(queue.Queue(), state) is None
 
     result = committed_result(engine, request_id)
     assert engine.PAUSE.exists() is pause_remains
     assert result["snapshot"]["state"] == ("paused" if pause_remains else "playing")
+
+
+def test_pause_published_while_play_commits_is_not_removed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_pause_during_play")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    current.write_text("Current", encoding="utf-8")
+    state = engine.State()
+    set_current(engine, state, current)
+    request_id = request_mutation(
+        engine, "play", id=speechicle_id(engine, current), voice=None
+    )
+    original_apply = engine.apply_play_mutation
+
+    def apply_then_pause(buffer, current_state, request):
+        result = original_apply(buffer, current_state, request)
+        engine.publish_ordered_marker(engine.PAUSE)
+        return result
+
+    monkeypatch.setattr(engine, "apply_play_mutation", apply_then_pause)
+
+    engine.process_mutation_requests(queue.Queue(), state)
+
+    committed_result(engine, request_id)
+    assert engine.PAUSE.exists()
+
+
+def test_legacy_pause_is_preserved_by_legacy_play_and_replaced_by_new_play(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_legacy_pause_upgrade")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    current.write_text("Current", encoding="utf-8")
+    state = engine.State()
+    set_current(engine, state, current)
+    public_id = speechicle_id(engine, current)
+    engine.PAUSE.touch()
+    legacy_request_id = "a" * 24
+    (engine.BASE / f"MUTATION.1.{legacy_request_id}.json").write_text(
+        json.dumps(
+            {
+                "request_id": legacy_request_id,
+                "type": "play",
+                "id": public_id,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    engine.process_mutation_requests(queue.Queue(), state)
+
+    committed_result(engine, legacy_request_id)
+    assert engine.PAUSE.exists()
+
+    request_id = request_mutation(engine, "play", id=public_id, voice=None)
+    engine.process_mutation_requests(queue.Queue(), state)
+
+    committed_result(engine, request_id)
+    assert not engine.PAUSE.exists()
 
 
 def test_playing_queue_first_resumes_when_cached_projection_is_missing(
@@ -3244,15 +3660,10 @@ def test_fatal_engine_stop_ends_a_gap_before_the_next_chunk(tmp_path: Path) -> N
     assert engine.gap_wait(1.0, queue.Queue(), state) == "fatal"
 
 
-@pytest.mark.parametrize(
-    ("clear_time", "stop_time", "expected"),
-    [(1_000_000_000, 2_000_000_000, "stop"), (2_000_000_000, 1_000_000_000, "clear")],
-)
+@pytest.mark.parametrize("expected", ["stop", "clear"])
 def test_clear_and_stop_follow_publication_order_during_a_gap(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    clear_time: int,
-    stop_time: int,
     expected: str,
 ) -> None:
     engine = load_engine(f"super_speech_engine_clear_stop_order_{expected}")
@@ -3263,11 +3674,15 @@ def test_clear_and_stop_follow_publication_order_during_a_gap(
     current.write_text("Current", encoding="utf-8")
     state = engine.State()
     set_current(engine, state, current)
-    request_id = request_mutation(engine, "clear")
+    if expected == "stop":
+        request_id = request_mutation(engine, "clear")
+        engine.publish_ordered_marker(engine.STOP)
+    else:
+        engine.publish_ordered_marker(engine.STOP)
+        request_id = request_mutation(engine, "clear")
     request = next(engine.BASE.glob(f"MUTATION.*.{request_id}.json"))
-    engine.STOP.touch()
-    os.utime(request, ns=(clear_time, clear_time))
-    os.utime(engine.STOP, ns=(stop_time, stop_time))
+    os.utime(request, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(engine.STOP, ns=(1_000_000_000, 1_000_000_000))
 
     assert engine.gap_wait(0.01, queue.Queue(), state) == expected
     if expected == "stop":
@@ -3285,8 +3700,8 @@ def test_new_speech_cancels_a_pending_graceful_stop(tmp_path: Path) -> None:
     engine.SIGNAL_TICK = 0.001
     state = engine.State()
     state.saw_stop = True
-    engine.STOP.touch()
-    engine.CONTINUE.touch()
+    engine.publish_ordered_marker(engine.STOP)
+    engine.publish_ordered_marker(engine.CONTINUE)
 
     assert engine.gap_wait(0.001, queue.Queue(), state) is None
     assert not state.saw_stop
@@ -3307,18 +3722,19 @@ def test_play_and_stop_follow_publication_order(
     state = engine.State()
     set_current(engine, state, current)
     state.saw_stop = True
-    request_id = request_mutation(
-        engine, "play", id=speechicle_id(engine, current), voice=None
-    )
+    if play_is_newer:
+        engine.publish_ordered_marker(engine.STOP)
+        request_id = request_mutation(
+            engine, "play", id=speechicle_id(engine, current), voice=None
+        )
+    else:
+        request_id = request_mutation(
+            engine, "play", id=speechicle_id(engine, current), voice=None
+        )
+        engine.publish_ordered_marker(engine.STOP)
     request = next(engine.BASE.glob(f"MUTATION.*.{request_id}.json"))
-    engine.STOP.touch()
-    play_time, stop_time = (
-        (2_000_000_000, 1_000_000_000)
-        if play_is_newer
-        else (1_000_000_000, 2_000_000_000)
-    )
-    os.utime(request, ns=(play_time, play_time))
-    os.utime(engine.STOP, ns=(stop_time, stop_time))
+    os.utime(request, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(engine.STOP, ns=(1_000_000_000, 1_000_000_000))
 
     engine.process_mutation_requests(queue.Queue(), state)
 
@@ -3335,6 +3751,33 @@ def test_play_and_stop_follow_publication_order(
         assert state.saw_stop
 
 
+def test_stop_published_while_mutation_commits_survives_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_stop_during_mutation")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    history = engine.SPOKEN / "001-af_heart-say.txt"
+    history.write_text("Delete", encoding="utf-8")
+    request_id = request_mutation(
+        engine, "delete", id=speechicle_id(engine, history)
+    )
+    original_apply = engine.apply_delete_mutation
+
+    def apply_then_stop(request) -> None:
+        original_apply(request)
+        engine.publish_ordered_marker(engine.STOP)
+
+    monkeypatch.setattr(engine, "apply_delete_mutation", apply_then_stop)
+
+    engine.process_mutation_requests(queue.Queue(), engine.State())
+
+    committed_result(engine, request_id)
+    assert not history.exists()
+    assert engine.STOP.exists()
+
+
 def test_a_newer_stop_is_not_canceled_by_an_older_new_work_notice(
     tmp_path: Path,
 ) -> None:
@@ -3342,10 +3785,10 @@ def test_a_newer_stop_is_not_canceled_by_an_older_new_work_notice(
     configure_runtime(engine, tmp_path)
     engine.SIGNAL_TICK = 0.001
     state = engine.State()
-    engine.CONTINUE.touch()
-    engine.STOP.touch()
+    engine.publish_ordered_marker(engine.CONTINUE)
+    engine.publish_ordered_marker(engine.STOP)
     os.utime(engine.CONTINUE, ns=(1_000_000_000, 1_000_000_000))
-    os.utime(engine.STOP, ns=(2_000_000_000, 2_000_000_000))
+    os.utime(engine.STOP, ns=(1_000_000_000, 1_000_000_000))
 
     assert engine.gap_wait(0.01, queue.Queue(), state) == "stop"
     assert not engine.CONTINUE.exists()
@@ -4751,7 +5194,14 @@ def test_public_status_contains_no_storage_filenames(tmp_path: Path) -> None:
             {"request_id": "d" * 24, "type": "delete", "id": f"sp_{'1' * 32}"},
             "DeleteMutation",
         ),
-        ({"request_id": "e" * 24, "type": "clear"}, "ClearMutation"),
+        (
+            {
+                "request_id": "e" * 24,
+                "type": "clear",
+                "command_sequence": 7,
+            },
+            "ClearMutation",
+        ),
     ],
 )
 def test_mutation_envelope_accepts_each_variant(
@@ -4796,6 +5246,8 @@ def test_mutation_variants_only_expose_their_valid_fields() -> None:
             "before_id": None,
         },
         {"request_id": "a" * 24, "type": "clear", "id": f"sp_{'1' * 32}"},
+        {"request_id": "a" * 24, "type": "clear", "command_sequence": 0},
+        {"request_id": "a" * 24, "type": "clear", "command_sequence": True},
     ],
 )
 def test_mutation_envelope_rejects_invalid_shapes(payload: object) -> None:
@@ -4803,6 +5255,35 @@ def test_mutation_envelope_rejects_invalid_shapes(payload: object) -> None:
 
     with pytest.raises(ValueError):
         engine.parse_durable_mutation(payload)
+
+
+@pytest.mark.parametrize(
+    ("order_token", "payload_sequence"),
+    [
+        ("s00000000000000000002", 1),
+        ("s00000000000000000002", None),
+        ("1", 1),
+    ],
+)
+def test_mutation_claim_rejects_filename_payload_sequence_mismatch(
+    tmp_path: Path,
+    order_token: str,
+    payload_sequence: int | None,
+) -> None:
+    engine = load_engine("super_speech_engine_claim_sequence_mismatch")
+    configure_runtime(engine, tmp_path)
+    request_id = "a" * 24
+    claim = engine.BASE / f"MUTATION.{order_token}.{request_id}.claim"
+    payload: dict[str, object] = {
+        "request_id": request_id,
+        "type": "clear",
+    }
+    if payload_sequence is not None:
+        payload["command_sequence"] = payload_sequence
+    claim.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="does not match its filename"):
+        engine.read_mutation_claim(claim)
 
 
 def test_mutations_commit_and_publish_results_in_one_fifo_order(

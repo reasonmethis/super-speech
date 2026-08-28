@@ -108,6 +108,8 @@ INSTANCE_LOCK = BASE / "engine.lock"
 TIMELINE_LOCK = BASE / "timeline.lock"
 TIMELINE_INTENT = BASE / "timeline-intent.json"
 IDENTITY_INDEX = BASE / "speechicle-index.json"
+PLAYBACK_COMMAND_LOCK = BASE / "playback-command.lock"
+PLAYBACK_COMMAND_SEQUENCE = BASE / "playback-command-sequence.json"
 
 
 def default_model_directory() -> Path:
@@ -204,6 +206,7 @@ class EngineInstanceLock(InterprocessFileLock):
 
 
 _timeline_lock_local = threading.local()
+_playback_command_lock_local = threading.local()
 
 
 @contextmanager
@@ -228,6 +231,31 @@ def timeline_mutation_lock(timeout: float = 10.0):
         yield
     finally:
         _timeline_lock_local.depth = 0
+        lock.release()
+
+
+@contextmanager
+def playback_command_lock(timeout: float = 10.0):
+    """Serialize publication and acceptance of ordered playback commands."""
+    depth = getattr(_playback_command_lock_local, "depth", 0)
+    if depth:
+        _playback_command_lock_local.depth = depth + 1
+        try:
+            yield
+        finally:
+            _playback_command_lock_local.depth -= 1
+        return
+    lock = InterprocessFileLock(PLAYBACK_COMMAND_LOCK)
+    deadline = time.monotonic() + timeout
+    try:
+        while not lock.acquire():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("timed out waiting for the playback command lock")
+            time.sleep(0.01)
+        _playback_command_lock_local.depth = 1
+        yield
+    finally:
+        _playback_command_lock_local.depth = 0
         lock.release()
 
 
@@ -486,14 +514,32 @@ def _write_order_payload(path: Path, ids: list[str], version: int) -> None:
     temporary = path.with_name(
         f"{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp"
     )
+    payload = {"version": version, "ids": ids}
     try:
         temporary.write_text(
-            json.dumps({"version": version, "ids": ids}), encoding="utf-8"
+            json.dumps(payload), encoding="utf-8"
         )
-        os.replace(temporary, path)
+        try:
+            os.replace(temporary, path)
+        except OSError as replace_error:
+            try:
+                stored = json.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                raise replace_error
+            except OSError as read_error:
+                raise MutationOutcomeUnconfirmed(
+                    f"could not confirm whether {path.name} was replaced"
+                ) from read_error
+            except json.JSONDecodeError:
+                raise replace_error
+            if stored != payload:
+                raise replace_error
         _order_cache[path] = ids
     finally:
-        temporary.unlink(missing_ok=True)
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _load_identity_catalog(*, refresh: bool = False) -> IdentityCatalog:
@@ -850,6 +896,185 @@ def consume_control(signal: Path) -> bool:
     return True
 
 
+@dataclass(frozen=True)
+class OrderedMarker:
+    sequence: int
+    engine_pid: int | None
+
+
+def _mutation_artifact_sequence(path: Path) -> int | None:
+    parts = path.name.split(".")
+    if (
+        len(parts) != 4
+        or parts[0] != MUTATION.stem
+        or parts[-1] not in {"json", "claim"}
+    ):
+        raise ValueError("invalid mutation filename")
+    order_token = parts[1]
+    if order_token.isdigit():
+        return None
+    match = re.fullmatch(r"s(\d{20,})", order_token)
+    if match is None or int(match.group(1)) <= 0:
+        raise ValueError("invalid mutation command sequence in filename")
+    return int(match.group(1))
+
+
+def _read_marker_unlocked(signal: Path) -> OrderedMarker | None:
+    last_error: OSError | None = None
+    for attempt in range(3):
+        try:
+            text = signal.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            last_error = error
+            if attempt < 2:
+                time.sleep(0.01)
+                continue
+            raise RuntimeError(f"{signal.name} marker is unavailable") from error
+        break
+    else:
+        raise RuntimeError(f"{signal.name} marker is unavailable") from last_error
+    if text == "":
+        return OrderedMarker(0, None)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"{signal.name} marker is invalid") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{signal.name} marker is invalid")
+    keys = set(payload)
+    target_pid = payload.get("engine_pid")
+    if "engine_pid" in payload and (
+        not isinstance(target_pid, int)
+        or isinstance(target_pid, bool)
+        or target_pid <= 0
+    ):
+        raise RuntimeError(f"{signal.name} marker has an invalid engine PID")
+    if keys == {"engine_pid"}:
+        return OrderedMarker(0, target_pid)
+    if keys not in ({"command_sequence"}, {"command_sequence", "engine_pid"}):
+        raise RuntimeError(f"{signal.name} marker is invalid")
+    sequence = payload.get("command_sequence")
+    if (
+        not isinstance(sequence, int)
+        or isinstance(sequence, bool)
+        or sequence <= 0
+    ):
+        raise RuntimeError(f"{signal.name} marker has an invalid command sequence")
+    return OrderedMarker(sequence, target_pid)
+
+
+def _recover_command_sequence_unlocked() -> int:
+    recovered = 0
+    for signal in (PAUSE, STOP, CONTINUE):
+        marker = _read_marker_unlocked(signal)
+        if marker is not None:
+            recovered = max(recovered, marker.sequence)
+    for pattern in (f"{MUTATION.stem}.*.json", f"{MUTATION.stem}.*.claim"):
+        for artifact in BASE.glob(pattern):
+            try:
+                sequence = _mutation_artifact_sequence(artifact)
+            except ValueError as error:
+                raise RuntimeError(
+                    "could not recover playback command sequence"
+                ) from error
+            if sequence is not None:
+                recovered = max(recovered, sequence)
+    return recovered
+
+
+def _read_command_sequence_unlocked() -> int:
+    try:
+        payload = json.loads(PLAYBACK_COMMAND_SEQUENCE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return _recover_command_sequence_unlocked()
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("playback command sequence is unavailable") from error
+    if (
+        not isinstance(payload, dict)
+        or payload.get("version") != 1
+        or not isinstance(payload.get("last_sequence"), int)
+        or isinstance(payload.get("last_sequence"), bool)
+        or payload["last_sequence"] < 0
+    ):
+        raise RuntimeError("playback command sequence is invalid")
+    return payload["last_sequence"]
+
+
+def _allocate_command_sequence_unlocked() -> int:
+    sequence = _read_command_sequence_unlocked() + 1
+    temporary = PLAYBACK_COMMAND_SEQUENCE.with_name(
+        f".{PLAYBACK_COMMAND_SEQUENCE.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    try:
+        temporary.write_text(
+            json.dumps(
+                {"version": 1, "last_sequence": sequence},
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        os.replace(temporary, PLAYBACK_COMMAND_SEQUENCE)
+    except OSError as error:
+        raise RuntimeError("could not advance playback command sequence") from error
+    finally:
+        temporary.unlink(missing_ok=True)
+    return sequence
+
+
+def _ordered_marker_sequence_unlocked(signal: Path) -> int | None:
+    marker = _read_marker_unlocked(signal)
+    if marker is None:
+        return None
+    target_pid = marker.engine_pid
+    if target_pid is not None and target_pid != os.getpid():
+        signal.unlink(missing_ok=True)
+        log(f"ignored stale {signal.name} for engine {target_pid}")
+        return None
+    return marker.sequence
+
+
+def _publish_ordered_marker_unlocked(
+    signal: Path,
+    *,
+    engine_pid: int | None = None,
+) -> int:
+    sequence = _allocate_command_sequence_unlocked()
+    payload: dict[str, object] = {"command_sequence": sequence}
+    if engine_pid is not None:
+        payload["engine_pid"] = engine_pid
+    temporary = signal.with_name(
+        f".{signal.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    try:
+        temporary.write_text(
+            json.dumps(payload, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        os.replace(temporary, signal)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return sequence
+
+
+def publish_ordered_marker(
+    signal: Path,
+    *,
+    engine_pid: int | None = None,
+) -> int:
+    with playback_command_lock():
+        return _publish_ordered_marker_unlocked(signal, engine_pid=engine_pid)
+
+
+def remove_ordered_marker(signal: Path) -> int:
+    """Publish an ordered removal, used by Resume."""
+    with playback_command_lock():
+        sequence = _allocate_command_sequence_unlocked()
+        signal.unlink(missing_ok=True)
+        return sequence
+
+
 def mutation_result_path(request_id: str) -> Path:
     validate_request_id(request_id)
     return BASE / f"MUTATION_RESULT.{request_id}.json"
@@ -861,20 +1086,24 @@ def request_mutation(request: MutationRequest) -> str:
         raise RuntimeError("engine is not running")
 
     BASE.mkdir(parents=True, exist_ok=True)
-    request_path = MUTATION.with_name(
-        f"{MUTATION.stem}.{time.time_ns()}.{request.request_id}.json"
-    )
-    temp_path = request_path.with_name(
-        f"{request_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-    )
-    try:
-        temp_path.write_text(
-            json.dumps(request.to_payload(), separators=(",", ":")),
-            encoding="utf-8",
+    with playback_command_lock():
+        sequence = _allocate_command_sequence_unlocked()
+        request_path = MUTATION.with_name(
+            f"{MUTATION.stem}.s{sequence:020d}.{request.request_id}.json"
         )
-        os.replace(temp_path, request_path)
-    finally:
-        temp_path.unlink(missing_ok=True)
+        temp_path = request_path.with_name(
+            f"{request_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        payload = request.to_payload()
+        payload["command_sequence"] = sequence
+        try:
+            temp_path.write_text(
+                json.dumps(payload, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            os.replace(temp_path, request_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
     return request.request_id
 
 
@@ -909,7 +1138,11 @@ def read_mutation_claim(claimed: Path) -> MutationRequest:
         raise ValueError(f"could not read mutation: {error}") from error
     except json.JSONDecodeError as error:
         raise ValueError(f"invalid mutation JSON: {error}") from error
-    return parse_durable_mutation(payload)
+    request = parse_durable_mutation(payload)
+    filename_sequence = _mutation_artifact_sequence(claimed)
+    if filename_sequence != request.command_sequence:
+        raise ValueError("mutation command sequence does not match its filename")
+    return request
 
 
 def request_id_from_claim_path(claimed: Path) -> str | None:
@@ -1736,60 +1969,83 @@ def clear_current_playback(st: State, expected_filename: str | None) -> bool:
         return True
 
 
-def command_cancels_graceful_stop(command: Path, st: State) -> bool:
-    """Return whether command is newer than any graceful Stop request."""
-    if not control_requested(STOP):
+def _command_allowed_by_graceful_stop_unlocked(
+    command_sequence: int | None,
+    st: State,
+) -> bool:
+    """Return whether no graceful Stop is newer than this command."""
+    stop_sequence = _ordered_marker_sequence_unlocked(STOP)
+    if stop_sequence is None:
         return not st.saw_stop
-    try:
-        command_time = command.stat().st_mtime_ns
-        stop_time = STOP.stat().st_mtime_ns
-    except OSError:
+    return command_sequence is not None and stop_sequence < command_sequence
+
+
+def command_allowed_by_graceful_stop(
+    command_sequence: int | None,
+    st: State,
+) -> bool:
+    with playback_command_lock():
+        return _command_allowed_by_graceful_stop_unlocked(command_sequence, st)
+
+
+def _remove_marker_before_unlocked(
+    signal: Path,
+    command_sequence: int | None,
+) -> bool:
+    marker_sequence = _ordered_marker_sequence_unlocked(signal)
+    if (
+        marker_sequence is None
+        or command_sequence is None
+        or marker_sequence >= command_sequence
+    ):
         return False
-    if stop_time > command_time:
-        return False
-    try:
-        if STOP.stat().st_mtime_ns <= command_time:
-            STOP.unlink(missing_ok=True)
-    except OSError:
-        pass
-    st.saw_stop = False
+    signal.unlink(missing_ok=True)
     return True
 
 
-def consume_ordered_control(signal: Path, st: State) -> bool:
-    """Consume a control signal and let a newer graceful Stop win."""
-    if not control_requested(signal):
-        return False
-    accepted = command_cancels_graceful_stop(signal, st)
-    signal.unlink(missing_ok=True)
-    return accepted
+def finalize_accepted_command(
+    command_sequence: int | None,
+    st: State,
+    *,
+    resume: bool = False,
+) -> None:
+    """Remove only markers older than one successfully committed command."""
+    try:
+        with playback_command_lock():
+            if _remove_marker_before_unlocked(STOP, command_sequence):
+                st.saw_stop = False
+            if resume:
+                _remove_marker_before_unlocked(PAUSE, command_sequence)
+    except (OSError, RuntimeError) as error:
+        raise MutationOutcomeUnconfirmed(
+            "mutation committed but playback marker cleanup failed"
+        ) from error
+
+
+def ordered_marker_requested(signal: Path) -> bool:
+    with playback_command_lock():
+        return _ordered_marker_sequence_unlocked(signal) is not None
+
+
+def consume_ordered_marker(signal: Path) -> bool:
+    with playback_command_lock():
+        if _ordered_marker_sequence_unlocked(signal) is None:
+            return False
+        signal.unlink(missing_ok=True)
+        return True
 
 
 def consume_continue(st: State) -> bool:
     """Consume new-work notice and cancel only an older graceful Stop."""
-    if not CONTINUE.exists():
-        return False
-    accepted = command_cancels_graceful_stop(CONTINUE, st)
-    CONTINUE.unlink(missing_ok=True)
-    return accepted
-
-
-def consume_pause_older_than(command: Path) -> None:
-    """Resume only when Pause was published before this accepted command."""
-    try:
-        command_time = command.stat().st_mtime_ns
-        pause_time = PAUSE.stat().st_mtime_ns
-    except FileNotFoundError:
-        return
-    except OSError:
-        return
-    if pause_time > command_time:
-        return
-    try:
-        if PAUSE.stat().st_mtime_ns <= command_time:
-            PAUSE.unlink(missing_ok=True)
-    except OSError:
-        pass
+    with playback_command_lock():
+        sequence = _ordered_marker_sequence_unlocked(CONTINUE)
+        if sequence is None:
+            return False
+        accepted = _command_allowed_by_graceful_stop_unlocked(sequence, st)
+        if accepted and _remove_marker_before_unlocked(STOP, sequence):
+            st.saw_stop = False
+        CONTINUE.unlink(missing_ok=True)
+        return accepted
 
 
 _last_status_write_monotonic = 0.0
@@ -2553,12 +2809,14 @@ def _discard_buffer(buf: "queue.Queue") -> int:
             return discarded
 
 
-def _reset_waiting_buffer(buf: "queue.Queue", st: State) -> int:
-    """Drop rendered waiting audio while preserving every current-chunk piece."""
-    ordered_queue = queue_files_in_order()
-    current_name = ordered_queue[0].name if ordered_queue else None
+def _reset_waiting_buffer(
+    buf: "queue.Queue",
+    st: State,
+    current_name: str,
+) -> int:
+    """Drop rendered Waiting audio while preserving captured Current pieces."""
     with st.lock:
-        current_generation = st.claims.get(current_name) if current_name else None
+        current_generation = st.claims.get(current_name)
         kept = []
         discarded = 0
         while True:
@@ -2566,7 +2824,7 @@ def _reset_waiting_buffer(buf: "queue.Queue", st: State) -> int:
                 entry = buf.get_nowait()
             except queue.Empty:
                 break
-            if current_name and entry[0].name == current_name:
+            if entry[0].name == current_name:
                 kept.append(entry)
             else:
                 discarded += 1
@@ -2578,7 +2836,7 @@ def _reset_waiting_buffer(buf: "queue.Queue", st: State) -> int:
             for name, generation in st.claims.items()
             if name in kept_names
         }
-        if current_name and current_generation is not None:
+        if current_generation is not None:
             st.claims[current_name] = current_generation
         return discarded
 
@@ -2764,14 +3022,8 @@ def do_clear(buf: "queue.Queue", st: State) -> bool:
             return False
         st.claims.clear()
         st.skip_name = None
-        st.saw_stop = False
         current_name = st.current.filename if st.current is not None else None
         clear_current_playback(st, current_name)
-        try:
-            PAUSE.unlink(missing_ok=True)
-            STOP.unlink(missing_ok=True)
-        except OSError as error:
-            log(f"could not clear a playback marker: {error}")
     log(f"clear; archived {len(ordered)} row(s), dropped {discarded} piece(s)")
     return True
 
@@ -2859,6 +3111,19 @@ def _waiting_mutation_source(chunk_id: str) -> tuple[list[Path], Path]:
     return ordered, source
 
 
+def _finish_waiting_mutation(
+    buf: "queue.Queue",
+    st: State,
+    current_name: str,
+) -> int:
+    try:
+        return _reset_waiting_buffer(buf, st, current_name)
+    except (OSError, RuntimeError, queue.Full) as error:
+        raise MutationOutcomeUnconfirmed(
+            "Waiting mutation committed but its audio buffer reset was unconfirmed"
+        ) from error
+
+
 def apply_archive_mutation(
     buf: "queue.Queue",
     st: State,
@@ -2866,10 +3131,11 @@ def apply_archive_mutation(
 ) -> None:
     """Move one Waiting row to History without changing Current."""
     ensure_identity_catalog()
-    _, source = _waiting_mutation_source(request.id)
+    ordered, source = _waiting_mutation_source(request.id)
+    current_name = ordered[0].name
     if not archive(source):
         raise RuntimeError(f"could not archive waiting chunk: {request.id}")
-    discarded = _reset_waiting_buffer(buf, st)
+    discarded = _finish_waiting_mutation(buf, st, current_name)
     log(f"QUEUE archive {source.name}; discarded {discarded} banked piece(s)")
 
 
@@ -2903,7 +3169,7 @@ def apply_waiting_move_mutation(
             )
         ordered.insert(ordered.index(destination), source)
     save_queue_order(ordered)
-    discarded = _reset_waiting_buffer(buf, st)
+    discarded = _finish_waiting_mutation(buf, st, current_path.name)
     log(
         f"QUEUE move {source.name} before {request.before_id or 'end'}; "
         f"discarded {discarded} banked piece(s)"
@@ -2986,7 +3252,7 @@ def process_mutation_requests(
                 error="request ID does not match its mutation filename",
             )
             continue
-        if not command_cancels_graceful_stop(claimed, st):
+        if not command_allowed_by_graceful_stop(request.command_sequence, st):
             _publish_mutation_outcome(
                 claimed,
                 st,
@@ -3003,7 +3269,6 @@ def process_mutation_requests(
         try:
             if isinstance(request, PlayMutation):
                 play_effect = apply_play_mutation(buf, st, request)
-                consume_pause_older_than(claimed)
                 effect = play_effect or effect
                 invalidate_held_chunk = invalidate_held_chunk or play_effect == "select"
                 result_id = request.id
@@ -3027,6 +3292,11 @@ def process_mutation_requests(
                 apply_delete_mutation(request)
             else:
                 assert_never(request)
+            finalize_accepted_command(
+                request.command_sequence,
+                st,
+                resume=isinstance(request, (PlayMutation, ClearMutation)),
+            )
         except MutationOutcomeUnconfirmed as error:
             st.stop.set()
             log(
@@ -3293,7 +3563,7 @@ def gap_wait(seconds: float, buf: "queue.Queue", st: State) -> str | None:
             held_chunk_name is None or not _claimed(st, held_chunk_name)
         ):
             return "queue_changed"
-        if consume_control(STOP):
+        if consume_ordered_marker(STOP):
             reject_pending_requests("engine stopped before command was applied", st)
             return "stop"
         if st.stop.is_set():
@@ -3376,7 +3646,7 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
             if mutation_effect == "clear":
                 stream.abort()
                 return "clear"
-            if not st.saw_stop and control_requested(STOP):
+            if not st.saw_stop and ordered_marker_requested(STOP):
                 st.saw_stop = True
             if st.saw_stop:
                 reject_pending_requests("engine is stopping", st)
@@ -3537,13 +3807,13 @@ def run_engine_loop(
                 return
             with st.lock:
                 playing = st.current.filename if st.current is not None else None
-            if not playing and (st.saw_stop or consume_control(STOP)):
+            if not playing and (st.saw_stop or consume_ordered_marker(STOP)):
                 reject_pending_requests(
                     "engine stopped before command was applied", st
                 )
                 log("STOP (idle); exiting")
                 return
-            if playing and not st.saw_stop and control_requested(STOP):
+            if playing and not st.saw_stop and ordered_marker_requested(STOP):
                 st.saw_stop = True
             if st.saw_stop:
                 reject_pending_requests("engine is stopping", st)
@@ -3666,7 +3936,7 @@ def run_engine_loop(
                 if consume_continue(st):
                     log("STOP canceled by newly queued speech")
                 else:
-                    consume_control(STOP)
+                    consume_ordered_marker(STOP)
                     log("exiting on stop")
                     return
 
@@ -3685,13 +3955,10 @@ def run_engine_loop(
 
 
 def clear_transient_signals() -> None:
-    for signal in (
-        STOP,
-        INTERRUPT,
-        SKIP,
-        CONTINUE,
-        WARMUP,
-    ):
+    with playback_command_lock():
+        for signal in (STOP, CONTINUE):
+            signal.unlink(missing_ok=True)
+    for signal in (INTERRUPT, SKIP, WARMUP):
         signal.unlink(missing_ok=True)
     for temporary in BASE.glob(f"{MUTATION.stem}.*.tmp"):
         temporary.unlink(missing_ok=True)
@@ -3738,6 +4005,9 @@ def send_control(signal: Path) -> None:
         raise RuntimeError("engine status is unavailable") from error
     if not process_exists(engine_pid):
         raise RuntimeError("engine process is not running")
+    if signal == STOP:
+        publish_ordered_marker(signal, engine_pid=engine_pid)
+        return
     temp_path = signal.with_name(f"{signal.name}.{os.getpid()}.{time.time_ns()}.tmp")
     try:
         temp_path.write_text(json.dumps({"engine_pid": engine_pid}), encoding="utf-8")
@@ -3747,7 +4017,7 @@ def send_control(signal: Path) -> None:
 
 
 def resume() -> None:
-    PAUSE.unlink(missing_ok=True)
+    remove_ordered_marker(PAUSE)
 
 
 def _contains_private_status_field(value: object) -> bool:
@@ -3880,7 +4150,7 @@ def cli(argv: list[str] | None = None) -> int:
         elif args.command == "speak":
             start_engine()
             queued = enqueue_text(args.text, args.voice, args.gap_ms)
-            CONTINUE.touch()
+            publish_ordered_marker(CONTINUE)
             if not wait_for_queue_acceptance():
                 sys.stderr.write(
                     "speech remains queued; playback will begin when the engine is ready\n"
@@ -3892,7 +4162,7 @@ def cli(argv: list[str] | None = None) -> int:
             print_status()
         elif args.command == "pause":
             BASE.mkdir(parents=True, exist_ok=True)
-            PAUSE.touch()
+            publish_ordered_marker(PAUSE)
         elif args.command == "resume":
             resume()
         elif args.command == "play":

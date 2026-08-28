@@ -20,6 +20,7 @@ class PlayMutation:
     request_id: str
     id: str
     voice: str | None
+    command_sequence: int | None = None
     type: Literal["play"] = field(default="play", init=False)
 
     def to_payload(self) -> dict[str, object]:
@@ -30,6 +31,8 @@ class PlayMutation:
         }
         if self.voice is not None:
             payload["voice"] = self.voice
+        if self.command_sequence is not None:
+            payload["command_sequence"] = self.command_sequence
         return payload
 
 
@@ -41,16 +44,20 @@ class MoveMutation:
     section: Literal["waiting", "history"]
     id: str
     before_id: str | None
+    command_sequence: int | None = None
     type: Literal["move"] = field(default="move", init=False)
 
     def to_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "request_id": self.request_id,
             "type": self.type,
             "section": self.section,
             "id": self.id,
             "before_id": self.before_id,
         }
+        if self.command_sequence is not None:
+            payload["command_sequence"] = self.command_sequence
+        return payload
 
 
 @dataclass(frozen=True)
@@ -59,14 +66,18 @@ class ArchiveMutation:
 
     request_id: str
     id: str
+    command_sequence: int | None = None
     type: Literal["archive"] = field(default="archive", init=False)
 
     def to_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "request_id": self.request_id,
             "type": self.type,
             "id": self.id,
         }
+        if self.command_sequence is not None:
+            payload["command_sequence"] = self.command_sequence
+        return payload
 
 
 @dataclass(frozen=True)
@@ -75,14 +86,18 @@ class DeleteMutation:
 
     request_id: str
     id: str
+    command_sequence: int | None = None
     type: Literal["delete"] = field(default="delete", init=False)
 
     def to_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "request_id": self.request_id,
             "type": self.type,
             "id": self.id,
         }
+        if self.command_sequence is not None:
+            payload["command_sequence"] = self.command_sequence
+        return payload
 
 
 @dataclass(frozen=True)
@@ -90,13 +105,17 @@ class ClearMutation:
     """Move Current and every Waiting Speechicle to History."""
 
     request_id: str
+    command_sequence: int | None = None
     type: Literal["clear"] = field(default="clear", init=False)
 
     def to_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "request_id": self.request_id,
             "type": self.type,
         }
+        if self.command_sequence is not None:
+            payload["command_sequence"] = self.command_sequence
+        return payload
 
 
 MutationRequest: TypeAlias = (
@@ -124,6 +143,14 @@ def _validate_voice(value: object) -> str | None:
     return value
 
 
+def _validate_command_sequence(value: object) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError("invalid playback command sequence")
+    return value
+
+
 def parse_durable_mutation(payload: object) -> MutationRequest:
     """Parse the flat JSON object stored in a MUTATION request file."""
     if not isinstance(payload, dict):
@@ -132,17 +159,30 @@ def parse_durable_mutation(payload: object) -> MutationRequest:
     if mutation_type not in MUTATION_TYPES:
         raise ValueError("invalid mutation type")
     request_id = validate_request_id(payload.get("request_id"))
+    command_sequence = _validate_command_sequence(payload.get("command_sequence"))
 
     if mutation_type == "play":
-        _reject_extra_fields(payload, {"request_id", "type", "id", "voice"})
+        _reject_extra_fields(
+            payload,
+            {"request_id", "type", "id", "voice", "command_sequence"},
+        )
         return PlayMutation(
             request_id=request_id,
             id=_validate_id(payload.get("id")),
             voice=_validate_voice(payload.get("voice")),
+            command_sequence=command_sequence,
         )
     if mutation_type == "move":
         _reject_extra_fields(
-            payload, {"request_id", "type", "section", "id", "before_id"}
+            payload,
+            {
+                "request_id",
+                "type",
+                "section",
+                "id",
+                "before_id",
+                "command_sequence",
+            },
         )
         section = payload.get("section")
         if section != "waiting" and section != "history":
@@ -158,22 +198,32 @@ def parse_durable_mutation(payload: object) -> MutationRequest:
             section=section,
             id=_validate_id(payload.get("id")),
             before_id=before_id,
+            command_sequence=command_sequence,
         )
     if mutation_type == "archive":
-        _reject_extra_fields(payload, {"request_id", "type", "id"})
+        _reject_extra_fields(
+            payload, {"request_id", "type", "id", "command_sequence"}
+        )
         return ArchiveMutation(
             request_id=request_id,
             id=_validate_id(payload.get("id")),
+            command_sequence=command_sequence,
         )
     if mutation_type == "delete":
-        _reject_extra_fields(payload, {"request_id", "type", "id"})
+        _reject_extra_fields(
+            payload, {"request_id", "type", "id", "command_sequence"}
+        )
         return DeleteMutation(
             request_id=request_id,
             id=_validate_id(payload.get("id")),
+            command_sequence=command_sequence,
         )
 
-    _reject_extra_fields(payload, {"request_id", "type"})
-    return ClearMutation(request_id=request_id)
+    _reject_extra_fields(payload, {"request_id", "type", "command_sequence"})
+    return ClearMutation(
+        request_id=request_id,
+        command_sequence=command_sequence,
+    )
 
 
 def parse_cli_mutation(payload: object, request_id: str) -> MutationRequest:
