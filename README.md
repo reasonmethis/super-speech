@@ -1,99 +1,84 @@
 # Super Speech
 
-Super Speech gives AI coding agents private local voice replies. Kokoro speech
-synthesis runs entirely on the user's computer with no cloud service, API key,
-or per-word billing.
+Super Speech gives AI coding agents private voice replies. Kokoro speech
+synthesis runs on the user's computer, without an API key or per-word bill.
 
-This README is the canonical project entry point. The narrower documents cover
-[desktop architecture](ARCHITECTURE.md), [app development](app/README.md), the
-[product backlog](BACKLOG.md), [headless setup](SETUP.md), and the
-[agent-facing skill contract](skills/super-speech/SKILL.md).
+One agent reply becomes one Speechicle in the app. A Speechicle stays one row
+and one replay target even though the engine prepares it in smaller pieces.
 
-## Install
+## Choose an installation
 
-On Windows, download and run the latest x64 setup file from
-[GitHub Releases](https://github.com/reasonmethis/super-speech/releases/latest).
-The installer includes:
+### Desktop app
 
-- the Electron tray app and status window
-- a frozen Python speech engine
-- the Kokoro v1.0 model and all bundled voices
-- ONNX Runtime, eSpeak NG, phonemization, and audio libraries
-- the canonical Super Speech skill bundle for existing Codex and Claude installations
+Choose the desktop app for a tray icon, pause and resume controls, a visible
+timeline, replay, reordering, voice changes, and Light or Dark appearance. The
+installer contains the app, speech engine, model, voices, and agent skill. It
+does not need a separate Python or Node.js installation.
 
-The installed app does not need Python, Node.js, Git Bash, Rust, this repository,
-or a model download. First launch starts the engine and writes its local paths to
-`~/.super-speech/install.json`. It installs the agent skill only when the
-corresponding `.codex` or `.claude` directory already exists. Updates replace a
-previously managed skill only when the user has not modified it.
+The Windows x64 installer is tested locally from this repository. A public
+download has not been published yet. The Electron app is designed to support
+macOS, but the current macOS engine requires Apple Silicon and macOS 14 or
+newer, and that package has not been tested on Mac hardware.
 
-The Windows x64 package is verified. Electron and the process boundary are
-designed for macOS, but the pinned ONNX Runtime currently limits the Python
-engine to Apple Silicon on macOS 14 or newer. That bundle has not yet been
-tested on Apple Silicon hardware.
+See [app/README.md](app/README.md) to build and test the desktop app.
 
-## Use
+### Headless skill
+
+Choose the headless skill when spoken replies are useful but the desktop UI is
+not. It installs the same speech engine, model, and voices inside the skill
+folder. Python 3.11, 3.12, or 3.13 is required for installation.
+
+See [SETUP.md](SETUP.md) for the complete headless installation guide.
+
+## Use Super Speech
 
 Ask your agent:
 
-> Use super-speech for your replies until I tell you otherwise
+> Use Super Speech for your replies until I tell you otherwise
 
-The agent invokes `super-speech-engine speak`, which starts the installed engine
-when needed and queues one Speechicle. A Speechicle is one complete spoken reply.
-It stays one row and one replay target even though the engine synthesizes it in
-smaller sentence-sized pieces.
+The agent sends the complete spoken reply to the platform launcher once. The
+launcher uses the desktop engine when the app is installed. Otherwise, it uses
+the engine packaged inside the headless skill. The app and the skill do not
+have separate queue or playback implementations.
 
-The app and tray control the same engine:
+## Desktop controls
 
 - Pause stops at the current audio sample; Resume continues from that sample
-- Click a row to expand its text, or double-click it to play it
-- Drag Waiting or History rows to reorder them
-- Use the three-dot menu to play, copy, change voice, or delete a row
-- Clear all stops Current and moves all active speech into History
-- Click the main text area to follow the current sentence in a full-window view
-- Use Settings to switch between Dark and Light themes
+- Click a Speechicle to expand its text, or double-click it to play it
+- Drag Waiting and History rows to reorder them
+- Use a row's three-dot menu for the actions that apply there. Current has
+  Pause or Resume; Waiting and History have Play. All rows have Copy text and
+  Change voice. Delete moves Waiting into History and permanently removes
+  History
+- Clear all stops Current and moves active speech into History
+- Click the main text area to follow the current sentence in a larger view
+- Use Settings to switch between Light and Dark appearance
 
-The Speechicles timeline keeps Waiting, Current, and History in one visible
-order. See [Desktop architecture](ARCHITECTURE.md#timeline-and-playback) for the
-exact selection, ordering, persistence, and recovery rules.
+## How it works
 
-In desktop mode, mutable state stays in `~/.super-speech/`. The installed model
-and engine are read-only application resources. A headless installation keeps
-its corresponding runtime inside the installed skill instead.
+The shared Python engine owns text splitting, synthesis, playback, the speech
+timeline, and recovery after an interrupted file change. Electron displays that
+state and sends commands to the same engine.
 
-## Build from source
+Desktop state lives in `~/.super-speech/`. Headless state lives in `runtime/`
+inside the installed skill, so the headless installation is self-contained.
 
-Building a release requires Node.js 22+ and Python 3.12. End users do not need
-either runtime.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the data model, process boundary,
+startup rules, and code map.
 
-```powershell
-cd app
-npm install
-npm run package:win
-```
+## Project guides
 
-The package command installs pinned build dependencies, verifies or stages the
-model files by SHA-256, freezes the engine, builds Electron, and creates the NSIS
-installer. See [app/README.md](app/README.md) for focused build and smoke-test
-commands, including the required installed-build supervision check. Users who
-do not want Electron can install the same engine and skill without the app by
-following [SETUP.md](SETUP.md).
+- [Architecture](ARCHITECTURE.md)
+- [Headless setup](SETUP.md)
+- [Desktop development and packaging](app/README.md)
+- [Agent skill contract](skills/super-speech/SKILL.md)
+- [Product backlog](BACKLOG.md)
 
-## Headless installation
-
-Run `py -3.12 skills/super-speech/scripts/install.py --agent codex` from the
-repository root. Python 3.11 and 3.13 are also supported. This copies the
-complete skill bundle into the Codex skill directory, then creates its Python
-environment, verified model assets, queue, and logs under that installed
-skill's `runtime/` directory. The first install needs network access. For
-Claude, run the same command with `--agent claude`. The desktop build and
-headless skill still use the same authoritative engine source.
-
-## Licensing
+## License and redistribution
 
 The Electron app and original Super Speech source are MIT licensed. The
-self-contained installer is an aggregate containing a separate frozen engine
-with GPL-licensed phonemization and eSpeak NG components, plus Apache-2.0 Kokoro
-model assets and other permissively licensed libraries. See
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) before redistribution or any
-closed-source commercial edition.
+self-contained installer also contains a separate speech engine with
+GPL-licensed phonemization and eSpeak NG components, Apache-2.0 Kokoro model
+files, and other permissively licensed libraries. Read
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) before redistributing the
+installer or building a closed-source commercial edition.

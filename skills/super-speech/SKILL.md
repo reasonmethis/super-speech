@@ -75,15 +75,13 @@ Use `af_heart` unless the user asks for another voice. Useful alternatives:
 - UK female: `bf_emma`, `bf_lily`
 - UK male: `bm_fable`, `bm_george`
 
-The full Kokoro voice list is available in the desktop voice picker.
-
 ## Playback commands
 
 Run commands through the same platform launcher used for `speak`:
 
 | Command | Effect |
 |---|---|
-| `status` | Print the authoritative timeline as JSON |
+| `status` | Print the engine's current timeline as JSON |
 | `pause` | Pause at the current audio sample |
 | `resume` | Continue from the same sample |
 | `play <id> [--voice VOICE]` | Play one exact Speechicle, optionally with another voice |
@@ -96,16 +94,19 @@ Run commands through the same platform launcher used for `speak`:
 | `stop` | Finish Current and stop the engine |
 | `interrupt` | Stop playback and the engine immediately |
 
-Treat IDs as opaque. Copy an exact ID from `status`; never derive one from a
-path or filename. Passing `--voice` to `play` keeps the same text and timeline
-position.
+Treat IDs as random strings that must be copied exactly. Copy an ID from
+`status`; never build one from a path or filename. Passing `--voice` to `play`
+keeps the same text and timeline position.
 
 ## Install or repair headless mode
 
 The desktop installer already includes the engine, model, voices, and this
-skill. It does not require system Python.
+skill. It installs the skill when it finds an existing Codex or Claude
+directory. It does not require system Python.
 
 For headless mode, run the bundled installer with Python 3.11, 3.12, or 3.13:
+
+For a new Codex installation, run:
 
 ```powershell
 py -3.12 "$skill\scripts\install.py" --agent codex
@@ -115,10 +116,21 @@ py -3.12 "$skill\scripts\install.py" --agent codex
 python3 "$SKILL/scripts/install.py" --agent codex
 ```
 
-Use `--agent claude` for Claude Code or `--target <skill-directory>` for a
-custom destination. The headless installer keeps its private environment,
-models, queue, status, and logs under this skill's `runtime/` directory.
+Use `--agent claude` for Claude Code. To repair the skill that is currently
+running these instructions, point the installer back at this exact directory:
 
-For troubleshooting, run `status` through the launcher. The engine event log is
-`runtime/log.txt`. Desktop mode also has `engine.log`, which captures the child
-process's raw output when it exits before writing a normal event.
+```powershell
+py -3.12 "$skill\scripts\install.py" --target "$skill"
+```
+
+```bash
+python3 "$SKILL/scripts/install.py" --target "$SKILL"
+```
+
+The headless installer keeps its private environment, models, queue, status,
+and logs under this skill's `runtime/` directory.
+
+For troubleshooting, run `status` through the launcher. Headless mode logs to
+`<skill>/runtime/log.txt`. Desktop mode logs events to
+`~/.super-speech/log.txt` and raw child output to
+`~/.super-speech/engine.log`.

@@ -1,19 +1,21 @@
-# Super Speech setup
+# Headless setup
 
-[README.md](README.md) is the canonical installation and product guide. This
-document covers the narrower headless workflow.
+This guide installs Super Speech without the Electron app. Start with
+[README.md](README.md) if you are still choosing between desktop and headless
+installations.
 
-Super Speech has one engine implementation with two installation sizes. The desktop installer includes Electron, the engine, models, and agent skill. The headless installer includes only the Python engine, models, and skill. Both expose the same `super-speech-engine` command.
+## Requirements
 
-## Desktop installation
+- Python 3.11, 3.12, or 3.13
+- Network access during the first installation
+- Windows, or Apple Silicon running macOS 14 or newer
 
-On Windows, run the installer described in [README.md](README.md). It does not require Python, Node.js, Git Bash, or a separate model download. First launch starts the engine and installs the Super Speech skill for existing Codex and Claude installations.
+Windows is tested. The macOS requirement comes from the pinned ONNX Runtime
+package, and the macOS build has not yet been tested on hardware.
 
-## Minimal headless installation
+## Install the skill
 
-Use this when the user wants spoken agent replies without the desktop app. Python 3.11, 3.12, or 3.13 and network access for the initial package and model downloads are required. Windows is verified. macOS headless installation currently requires Apple Silicon and macOS 14 or newer because of the pinned ONNX Runtime wheel.
-
-From the repository root, install the Codex skill:
+From the repository root, install for Codex on Windows:
 
 ```powershell
 py -3.12 .\skills\super-speech\scripts\install.py --agent codex
@@ -25,108 +27,72 @@ On macOS:
 python3 skills/super-speech/scripts/install.py --agent codex
 ```
 
-For Claude Code, use `--agent claude`. An agent that has already copied the
-skill folder can pass its absolute skill directory through `--target`. Replace
-`3.12` in the Windows command if Python 3.11 or 3.13 is the installed version.
+Use `--agent claude` for Claude Code. To install into a specific skill folder,
+use `--target <skill-directory>`.
 
-The installer:
+## What the installer creates
 
-- copies the complete skill bundle into the selected agent's skill directory
-- creates a private virtual environment at `runtime/venv/` inside that skill
-- installs `engine/super_speech_engine.py` and its pinned runtime dependencies
-- downloads both Kokoro model files into `runtime/models/` and verifies their SHA-256 hashes
+The installer copies the complete Super Speech skill into the selected agent's
+skill directory. Inside that directory it creates:
 
-The queue, archive, status, controls, and logs are also created under
-that `runtime/` directory when the engine runs. The installation does not
-retain a repository path or write Super Speech files elsewhere.
+- `engine/` with the shared speech engine
+- `scripts/` with the platform launcher and installer
+- `runtime/venv/` with a private Python environment
+- `runtime/models/kokoro/` with two model files verified by SHA-256
+- `runtime/` storage for the queue, History, status, controls, and logs
 
-Re-running the bundled installer stops the local headless engine, updates the
-immutable skill files and Python packages, and preserves `runtime/`. Replacing
-the whole skill directory with another installer will also replace that local
-runtime unless the installer preserves it.
+The installation does not depend on the repository after it finishes. It does
+not put Super Speech runtime files elsewhere on the machine.
 
-## Verify end to end
+## Verify the installation
 
-On Windows:
+On Windows, set `$skill` to the installed directory that contains `SKILL.md`:
 
 ```powershell
-$agentHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
-$skill = Join-Path $agentHome 'skills\super-speech'
-$env:SUPER_SPEECH_HOME = Join-Path $skill 'runtime'
-$env:SUPER_SPEECH_MODEL_DIR = Join-Path $env:SUPER_SPEECH_HOME 'models\kokoro'
-$engine = Join-Path $skill 'runtime\venv\Scripts\super-speech-engine.exe'
-& $engine speak 'Super Speech is set up and working.' --voice af_heart
-& $engine status
+& "$skill\scripts\super-speech.ps1" speak 'Super Speech is set up and working.' --voice af_heart
+& "$skill\scripts\super-speech.ps1" status
 ```
 
-On macOS:
+On macOS, set `SKILL` to that directory:
 
 ```bash
-SKILL="${CODEX_HOME:-$HOME/.codex}/skills/super-speech"
-export SUPER_SPEECH_HOME="$SKILL/runtime"
-export SUPER_SPEECH_MODEL_DIR="$SKILL/runtime/models/kokoro"
-ENGINE="$SKILL/runtime/venv/bin/super-speech-engine"
-"$ENGINE" speak "Super Speech is set up and working." --voice af_heart
-"$ENGINE" status
+"$SKILL/scripts/super-speech.sh" speak "Super Speech is set up and working." --voice af_heart
+"$SKILL/scripts/super-speech.sh" status
 ```
 
-Confirm that the speech item moves from the skill's `runtime/queue/` to
-`runtime/spoken/` and that audio is audible. If playback fails, inspect
-`runtime/log.txt`, fix the reported dependency, model, or audio-device error,
-and retry the same `speak` command.
+Use the launcher for normal commands. Do not set model or runtime environment
+variables manually and do not call the private virtual-environment executable
+directly.
 
-`runtime/log.txt` is the engine's event log in both installation modes. The
-desktop app also writes `engine.log` beside its runtime files; that second file
-captures the child process's raw stdout and stderr, so it is useful when the
-engine exits before it can write a normal event. Headless mode has no Electron
-child process and therefore no `engine.log`.
+## Update or repair
 
-## Switching between headless and desktop modes
-
-The skill prefers a valid desktop engine manifest when the app is installed.
-Otherwise it uses the engine inside its own `runtime/venv/`. The two modes use
-the same commands and engine implementation, but keep separate runtime state.
-Queued headless items do not migrate into the desktop app.
-
-Each runtime allows one engine process to hold its lock. If an older process is
-still running during an upgrade, stop it before verification, then invoke
-`speak`; the new CLI starts the installed engine automatically.
-
-## Select or replay a speech item
-
-Run `super-speech-engine status` and use an exact `id` from `current`, `queue`,
-or the bounded `history` list:
+Run the installed skill's installer again and point it back at the same skill
+folder:
 
 ```powershell
-& $engine play 'sp_0123456789abcdef0123456789abcdef'
-& $engine play 'sp_0123456789abcdef0123456789abcdef' --voice bm_fable
+py -3.12 "$skill\scripts\install.py" --target "$skill"
 ```
 
-The same command works in desktop and headless installations. Selecting an
-upcoming item jumps to that point: the current item and every older waiting item
-before the selection move to History, while newer waiting items keep their order.
-Selecting a History entry moves the playback boundary to that row without
-changing the screen order: the selected row becomes Current, and every row above
-it becomes Waiting. Selection is distinct from pause and resume: pause preserves the exact
-audio sample, while selecting another item ends that paused position. The
-command waits for engine acknowledgement and prints the resulting ID as JSON.
-
-History is an archive, not a completion log. It can contain items that
-finished, were skipped, or were cleared before playback.
-
-Use exact IDs to reorder Waiting or recent History items, archive Waiting, or
-delete History:
-
-```powershell
-& $engine move 'sp_11111111111111111111111111111111' 'sp_22222222222222222222222222222222'
-& $engine move 'sp_22222222222222222222222222222222'
-& $engine move-history 'sp_33333333333333333333333333333333' 'sp_44444444444444444444444444444444'
-& $engine archive 'sp_11111111111111111111111111111111'
-& $engine delete 'sp_33333333333333333333333333333333'
+```bash
+python3 "$SKILL/scripts/install.py" --target "$SKILL"
 ```
 
-The first command inserts one item before another. Omitting the second ID moves
-the item to the end. `archive` moves only that waiting item into History. These
-commands never rename IDs or change current playback. `move-history` persists
-manual ordering within the recent History view. `delete` permanently
-removes one exact History ID without changing the waiting queue.
+Reinstallation stops the headless engine, replaces the files supplied by Super
+Speech, updates Python packages, verifies the models, and preserves `runtime/`.
+
+## If the desktop app is installed later
+
+The launcher prefers a valid desktop installation when it finds one. Desktop
+and headless modes use the same engine code but keep separate runtime folders.
+Existing headless speech does not move into the desktop timeline.
+
+## Troubleshooting
+
+Run `status` through the launcher first. The headless event log is
+`<skill>/runtime/log.txt`.
+
+Desktop mode uses `~/.super-speech/log.txt`. It writes the child process's raw
+output to `~/.super-speech/engine.log` for the child's entire lifetime.
+
+See [skills/super-speech/SKILL.md](skills/super-speech/SKILL.md) for the exact
+playback commands and voice-writing rules.

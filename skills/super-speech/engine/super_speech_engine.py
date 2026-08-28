@@ -362,7 +362,7 @@ def publish_startup_json(
     label: str,
     timeout: float = 5.0,
 ) -> None:
-    """Publish one startup marker through short Windows file locks."""
+    """Retry a startup JSON write for a few seconds after an OS error."""
     started = time.monotonic()
     first_error: OSError | None = None
     while True:

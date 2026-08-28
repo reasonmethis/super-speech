@@ -36,7 +36,7 @@ from speechicle_identity import (
 
 
 class MutationOutcomeUnconfirmed(RuntimeError):
-    """A command may have changed state but cannot report one proven outcome."""
+    """The engine cannot prove what a command changed."""
 
 
 class HeldInstanceLock(Protocol):
@@ -104,7 +104,7 @@ class TimelineMove:
     source: TimelineLocation
     target: TimelineLocation
     backup: TimelineLocation | None = None
-    # A promoted History row wins when Queue still contains the same Speechicle
+    # Keep the Queue copy when promotion finds the same Speechicle already there
     preserve_existing_target: bool = False
 
 
@@ -189,7 +189,7 @@ class TimelineStorage:
     @contextmanager
     def mutation(self, timeout: float | None = 10.0):
         """Serialize a complete storage decision across threads and processes."""
-        # Resident playback waits for a current writer; short-lived commands keep the default limit
+        # The engine waits; a separate command times out so it can return an error
         with self._lock:
             lock = InterprocessFileLock(self.paths.mutation_lock)
             deadline = None if timeout is None else time.monotonic() + timeout
@@ -336,6 +336,7 @@ class TimelineStorage:
                 return []
             except OSError:
                 if path in self._order_cache:
+                    # A prior good order is safer than treating a short read error as empty
                     return list(self._order_cache[path])
                 if attempt < 2:
                     time.sleep(0.01)
@@ -373,6 +374,7 @@ class TimelineStorage:
             missing = sorted(
                 live.values(), key=self.history_sort_key, reverse=True
             )
+            # Newly archived rows belong above older History rows
             return [*missing, *ordered]
 
     def _saved_ids(self, directory: Path, paths: list[Path]) -> list[str]:
@@ -519,6 +521,7 @@ class TimelineStorage:
             namespace, sequence = self._read_sequence_counter()
             if sequence == 0xFFFFFFFFFFFFFFFF:
                 raise RuntimeError("speech sequence counter is exhausted")
+            # Save the number first so a failed Queue write cannot reuse an ID
             self._write_sequence_counter(namespace, sequence + 1)
             public_id = self._derived_public_id(namespace, sequence)
             path = self.paths.queue / SpeechicleFilename(
@@ -802,7 +805,7 @@ class TimelineStorage:
             os.replace(backup, target)
 
     def _execute_plan(self, plan: TimelinePlan) -> None:
-        """Apply one journaled plan, restoring old storage on a known failure."""
+        """Apply one saved plan and try to undo completed steps after an error."""
         self._validate_plan(plan)
         applied_moves: list[TimelineMove] = []
         written_orders: list[Path] = []
@@ -810,8 +813,8 @@ class TimelineStorage:
         try:
             self._write_intent(plan.intent_payload())
             intent_written = True
-            # Publish destination order before a row enters History, but only after it enters Queue
             if plan.kind == "archive":
+                # Save final History positions before the moved rows become visible there
                 self._write_plan_orders(
                     plan, plan.queue_ids, plan.history_ids, written_orders
                 )
@@ -822,6 +825,7 @@ class TimelineStorage:
                 if not self._apply_move(move):
                     applied_moves.pop()
             if plan.kind == "promote":
+                # Do not put a row in Queue order before the file reaches Queue
                 self._write_plan_orders(
                     plan, plan.queue_ids, plan.history_ids, written_orders
                 )
@@ -1011,7 +1015,7 @@ class TimelineStorage:
     def promote_history(
         self, source: Path, voice: str | None = None
     ) -> tuple[Path, int]:
-        """Move the playback boundary to one History row without reordering it."""
+        """Make one History row Current without changing relative row order."""
         with self.mutation(timeout=None):
             self._recover_current_plan()
             history = self.history_files()
@@ -1097,6 +1101,7 @@ class TimelineStorage:
                 return source
             ordered.remove(source)
             if before_id is None:
+                # Move to the bottom of visible History, not behind older hidden rows
                 ordered.insert(min(limit - 1, len(ordered)), source)
             else:
                 destination = next(
@@ -1111,6 +1116,7 @@ class TimelineStorage:
             return source
 
     def waiting_source(self, public_id: str) -> tuple[list[Path], Path]:
+        """Find a Waiting row; Queue's first row is Current, not Waiting."""
         ordered = self.queue_files()
         source = next(
             (path for path in ordered if self.public_id(path) == public_id), None
@@ -1288,7 +1294,7 @@ class TimelineStorage:
         order_version: Literal[1, 2],
         catalog: IdentityCatalog | None,
     ) -> tuple[str, ...]:
-        """Read Queue directly so upgrade adaptation cannot re-enter recovery."""
+        """Read Queue without processing the same saved upgrade again."""
         paths = sorted(self.paths.queue.glob("*.txt"), key=self.queue_sort_key)
         if order_version == 1:
             return tuple(path.stem for path in paths)

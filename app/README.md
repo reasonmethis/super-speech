@@ -1,157 +1,129 @@
 # Super Speech desktop app
 
-Start with the canonical project overview in [../README.md](../README.md).
-This document covers development and packaging for the Electron app.
+This guide covers Electron development, testing, and packaging. Start with the
+[project README](../README.md) for installation choices and
+[ARCHITECTURE.md](../ARCHITECTURE.md) for the engine and timeline design.
 
-The desktop app has three parts. The renderer draws the window with plain
-TypeScript and CSS. Electron main owns the window, tray, and installed app. The
-bundled Python engine owns speech synthesis, queue order, replay, and the current
-audio position.
+Electron owns the window, tray, installer, and engine supervision. The shared
+Python engine owns synthesis, playback, and stored speech.
 
-The renderer cannot use Node.js or access files directly. A sandboxed preload
-bridge gives it a small set of commands for status, playback, voice selection,
-reordering, deletion, clearing, setup, and window controls. Electron main sends
-those commands to the engine CLI. The engine returns the exact result and new
-timeline after each change, so the renderer does not guess what happened.
-
-The renderer projects one timeline with Waiting, Current, and History dividers,
-under the Speechicles heading. It reveals a new current row once, then leaves
-scrolling under user control while status polling preserves the existing row
-nodes. The renderer stores its Dark or Light appearance choice in the app's
-local profile; speech and queue state remain engine-owned.
-
-The compact playback card renders the engine's exact active synthesis piece.
-Clicking its text expands the card over the window, shows the complete Current
-text, and highlights that same piece. The renderer applies the engine's Unicode
-code-point offsets with code-point-aware string slicing, so non-BMP characters
-do not shift the highlight. Escape collapses the card.
-
-Current is the playback boundary rather than an audio-device event. Selecting a
-History row makes it Current in place and promotes every row above it to Waiting.
-The renderer rejects a runtime snapshot that contains Waiting without Current,
-or Playing, Paused, or Idle states that contradict that boundary.
-
-The shared terms and exact state rules live in
-[Desktop architecture](../ARCHITECTURE.md#vocabulary). In short, a Speechicle is
-one user-visible timeline item, a piece is one internal synthesis segment, and
-Current is the boundary between Waiting and History.
+Run the commands in this guide from the `app/` directory unless a section says
+otherwise.
 
 ## Code map
 
-- `electron/main.ts` supervises the Python engine and owns tray, window, install
-  manifest, and IPC behavior
-- `electron/preload.ts` exposes the narrow sandboxed renderer bridge
-- `src/runtime.ts` validates engine snapshots and defines the desktop contract
-- `src/main.ts` renders the window and handles playback, menus, and gestures
-- `src/queue-drag-model.ts` contains the pure drag state machine
-- `src/*.test.ts` covers those data and gesture rules without audio
-- `scripts/smoke_drag.mjs` drives the packaged UI with silent audio
-- `scripts/smoke_installed.mjs` verifies the installed app and engine supervisor
-
-The Python ownership map is in
-[Desktop architecture](../ARCHITECTURE.md#code-map).
+- `electron/main.ts` owns the window, tray, engine process, install manifest,
+  and calls from the renderer
+- `electron/preload.ts` exposes a small approved API to the window
+- `src/runtime.ts` checks engine status and mutation results
+- `src/main.ts` renders the window and handles controls, menus, and gestures
+- `src/queue-drag-model.ts` contains the drag state machine
+- `src/*.test.ts` covers status and drag logic without Electron or audio
+- `scripts/smoke_engine.py` checks the packaged engine with silent audio
+- `scripts/smoke_drag.mjs` drives real Electron pointer input against an
+  isolated silent runtime
+- `scripts/smoke_installed.mjs` checks the installed executable and bundled
+  engine
 
 ## Prerequisites
 
-Release builds require Node.js 22+ and Python 3.12. These are build-time tools
-only. The installed application bundles its runtime dependencies.
+Release builds require Node.js 22.12 or newer and Python 3.12. End users do not
+need either runtime.
+
+## Install development dependencies
 
 ```powershell
 npm install
+py -3.12 -m pip install -r ..\requirements-build.txt
+py -3.12 -m pip install pytest
 ```
 
-## Focused development
+## Run the app locally
 
-Prepare the model and frozen sidecar, then run or check Electron:
+Prepare the engine and model resources, then start the development server:
 
 ```powershell
 npm run resources
 npm run dev
+```
+
+Resource preparation verifies the model hashes and builds the standalone
+engine used by Electron.
+
+## Test changes
+
+Run the fast checks first:
+
+```powershell
+py -3.12 -m pytest -q ..\tests
+npm test
 npm run check
 npm run build
 ```
 
-`SUPER_SPEECH_BUILD_PYTHON` can point at a specific Python 3.12 executable. On
-Windows the resource script otherwise uses `py -3.12`; on macOS it uses
-`python3`.
+- `pytest` runs the Python storage, playback, upgrade, and command tests
+- `npm test` runs pure TypeScript status and drag tests
+- `npm run check` runs TypeScript type checking
+- `npm run build` creates the production renderer and Electron files
 
-The app reads and writes the shared runtime under `~/.super-speech/`. Set
-`SUPER_SPEECH_HOME` to an isolated directory for tests. The engine and model
-paths can be overridden with `SUPER_SPEECH_ENGINE_PATH` and
-`SUPER_SPEECH_MODEL_DIR`.
-
-`npm test` covers status ownership, timeline order, and drag-state transitions
-without starting Electron or touching an audio device. It exercises every queue
-position plus adversarial cancellation and stale-pointer sequences. Renderer
-screenshots can use the browser-only demo status produced when the preload
-bridge is absent.
-
-Run the Electron mouse test after changing queue interactions:
+After engine or packaging changes, run the silent engine smoke test:
 
 ```powershell
-npm run test:drag
-```
-
-It uses real pointer input to reorder Waiting and History cards and archive
-Waiting cards, verifies single-click expansion, double-click-only playback,
-voice changes, row action menus, and stable playback-control geometry. It also
-verifies that Current is initially visible,
-the three timeline sections remain explicit, and menus stay inside the visible
-speech viewport. Waiting and History menus both use `Play`, `Change voice`, and
-`Delete`; History deletion is permanent. The test then checks cancellation when
-the pointer loses its primary button, the window loses focus, or polling
-replaces the timeline. It also verifies compact and expanded follow-along text
-and that Clear all moves
-Current plus Waiting into History. The test runs against a temporary runtime
-with silent audio and verifies the result in both the renderer and the engine
-queue.
-
-Runtime state has one transport authority. Engine liveness gates playback. An
-explicit Play action is shown as Playing immediately, while a later Pause stays
-authoritative during preparation. Play, move, archive, delete, and clear all use
-one engine mutation contract. Each result carries the authoritative status
-snapshot, so the renderer does not infer success or restore an older local copy.
-A monotonic timeline revision prevents late status polls from undoing a
-committed result.
-
-## Engine verification
-
-The engine smoke test synthesizes and plays a silent-timing Speechicle with an
-isolated runtime. It still exercises model loading, phonemization, ONNX
-inference, PortAudio, queue archival, and shutdown.
-
-```powershell
+npm run resources
 py -3.12 scripts/smoke_engine.py
 ```
 
-The Electron binary also supports `--smoke-test`. It waits for the bundled
-engine to become healthy, terminates that engine unexpectedly, verifies that
-the desktop supervisor starts a different engine process, and requires the
-replacement to remain healthy for five seconds.
+After changing renderer interactions, status handling, or engine supervision,
+run the Electron pointer test:
 
-## Packaging
+```powershell
+npm run resources
+npm run test:drag
+```
+
+This test uses the repository build, a staged engine, real Electron pointer
+events, and a temporary runtime. Audio timing is exercised without sending
+sound to the user's speakers.
+
+## Build the installer
 
 ```powershell
 npm run package:win
 ```
 
-This single command installs pinned build dependencies, verifies model hashes,
-freezes the engine, builds Electron, and creates a current-user NSIS installer.
-The package contains the engine, model, voices, complete agent skill bundle,
-third-party notices, and corresponding Super Speech engine source.
+This prepares resources, builds Electron, and writes the current-user NSIS
+installer under `release/<version>/`. Node dependencies must already be
+installed.
 
-After installing that package, verify the installed files rather than the
-repository build:
+The package contains the Electron app, the standalone engine, Kokoro model and
+voices, the agent skill, source required for redistribution, licenses, and
+third-party notices.
+
+## Release checks
+
+Install the newly built package, then test the installed executable rather than
+the repository build:
 
 ```powershell
 npm run test:installed
 ```
 
-This launches the installed app with an isolated runtime and silent audio, then
-runs the engine supervision smoke test above. Treat this as a required release
-check before reopening the app against the user's real queue.
+The installed smoke test uses an isolated runtime and silent audio. It checks
+that the packaged app starts its bundled engine and replaces it after an
+unexpected exit.
 
-Electron Builder is configured for a macOS arm64 DMG, but the native sidecar
-must be built on Apple Silicon running macOS 14 or newer. Windows x64 is the
-currently verified release target. Public releases still require code signing,
-and macOS requires hardware smoke testing, nested signing, and notarization.
+Windows x64 is the tested package target. Public Windows releases still need
+code signing. The macOS arm64 target requires Apple Silicon running macOS 14 or
+newer, hardware testing, nested signing, and notarization. This repository does
+not currently publish either package automatically.
+
+## Test-only environment overrides
+
+- `SUPER_SPEECH_BUILD_PYTHON` selects the Python 3.12 executable used to build
+  the standalone engine
+- `SUPER_SPEECH_HOME` selects an isolated runtime directory
+- `SUPER_SPEECH_ENGINE_PATH` selects a staged engine executable
+- `SUPER_SPEECH_MODEL_DIR` selects the Kokoro model directory
+
+Use these overrides for development and tests. Normal installed use reads the
+paths written by the desktop installer.

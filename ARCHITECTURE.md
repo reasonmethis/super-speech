@@ -1,221 +1,261 @@
-# Desktop architecture
+# Architecture
 
-Start with the canonical project overview in [README.md](README.md). This
-document explains the desktop process boundary and distribution decisions.
+## Scope
 
-## Decision
+This is the main technical guide for both Super Speech installations. Start
+with [README.md](README.md) for the product overview.
 
-Super Speech uses an Electron desktop app with a separate frozen Python speech
-engine.
+The desktop app and headless skill use one Python speech engine. Electron adds
+the window, tray, installer, and process supervision. It does not have another
+queue or playback implementation.
 
-- The Python engine owns synthesis, queue order, playback, the current sample
-  cursor, daemon startup, playback commands, and the atomic `status.json`
-  snapshot
-- Electron main owns the window, tray, installer, and agent integration. While
-  the app is running, it also supervises the engine process it starts
-- Electron main adapts the engine's private status and signal files into a
-  narrow, sandboxed renderer bridge
-- The renderer displays status and sends playback commands through that bridge
-- `super-speech-engine` is the public contract for the app, skills, and headless
-  users. Its `speak` command starts the one engine process and reserves queue
-  numbers atomically
-- Runtime files remain a private, local protocol owned by the engine and read
-  by Electron main. No web server or second playback state machine is needed
+## System at a glance
 
-The desktop installer places the directory-style frozen engine, Kokoro model,
-and voices outside `app.asar`. Its mutable queue, signal, status, and log files
-stay in `~/.super-speech/`. Electron normally stops only a child process it
-owns. At startup, it may interrupt an incompatible older engine holding the
-desktop runtime lock so the bundled engine can replace it safely.
+Four parts work together:
 
-The headless installer creates `runtime/` inside the installed skill. That
-directory contains its private Python environment, models, queue, status, and
-logs. It installs the same module that is frozen into the desktop sidecar. The
-app is UI and supervision on top of the engine, not a second drainer.
+1. The platform launcher is the command that an agent uses
+2. The Python engine stores speech, creates audio, and plays it
+3. Electron main starts and watches the engine, then passes approved commands
+   between the window and the engine
+4. The renderer draws the window from engine status
 
-## Vocabulary
+The launcher uses the desktop engine when `~/.super-speech/install.json` points
+to a valid installation. Otherwise, it uses the private engine inside the
+headless skill.
 
-- A **Speechicle** is one `speak` request. It stays one timeline item and one
-  replay target
-- A **piece** is a sentence-sized part synthesized inside a Speechicle. Pieces
-  reduce startup delay but never become separate timeline items
-- **Current** is the one Speechicle at the playback boundary. It remains Current
-  while it is being prepared, spoken, paused, or waiting between pieces
+## Words used in this guide
+
+- A **Speechicle** is one complete spoken reply. It stays one timeline row and
+  one replay target
+- A **piece** is a smaller sentence-sized part prepared inside a Speechicle
+- **Current** is the one Speechicle at the playback boundary
 - **Waiting** contains the Speechicles that will play after Current
-- **History** contains completed, skipped, and cleared Speechicles
-- The **playback boundary** is Current's place in the ordered timeline. Moving
-  that boundary changes which Speechicles are Waiting and which are History
-- A **row** is only the card that represents a Speechicle in the desktop UI
+- **History** contains Speechicles that finished, were skipped, or were cleared
+- The **playback boundary** is Current's place between Waiting and History
+- A **row** is the card that represents a Speechicle in the desktop window
+
+## One spoken reply from start to finish
+
+1. The agent calls the platform launcher once with the complete spoken reply
+2. The launcher chooses the desktop or headless engine
+3. The engine stores one Speechicle in Queue
+4. The engine splits its text into pieces and prepares them in order
+5. Playback begins as soon as the first piece is ready
+6. Engine status tells the app which piece is current
+7. After the last piece finishes, the stored file moves from Queue to `spoken/`
+   and appears in History
+
+Preparing smaller pieces reduces the delay before speech begins. The pieces do
+not become separate rows and do not change replay behavior.
+
+## Stored data
+
+Desktop state lives in `~/.super-speech/`. Headless state lives in `runtime/`
+inside the installed skill.
+
+Each runtime has three speech directories:
+
+- `queue/` owns Current and Waiting membership
+- `spoken/` owns History membership
+- `failed/` holds speech that could not be prepared
+
+A current filename looks like:
+
+```text
+001-sp_0123456789abcdef0000000000000001-af_heart-g250-say.txt
+```
+
+The filename stores a local sequence, public ID, voice, and optional gap. The
+public ID stays with the Speechicle when it moves or changes voice. Callers copy
+the ID exactly and do not need to understand the filename.
+
+`next-sequence.json` stores a random installation ID and the next number to use.
+Startup creates or repairs it after checking the complete stored timeline.
+Normal `speak` calls then advance this small file without scanning History. The
+installation ID and never-reused number together make each public ID unique. A
+crash after advancing the counter can leave a skipped number, which is safe.
+
+Physical directories decide which section contains a Speechicle.
+`queue-order.json` and `history-order.json` store only the relative display
+order inside their sections. Startup can repair a valid order file that missed
+a completed file move. It can also remove one proven exact Queue and History
+copy left by an old interrupted playback. It stops on malformed data, duplicate
+live sequences, or any duplicate ID whose ownership is unclear.
+
+Older installations may contain `speechicle-index.json`. It is read only while
+upgrading old filenames, then deleted after the new files and order data have
+been checked.
+
+## Timeline and playback rules
+
+The visible window keeps newest Waiting rows above Current and History below
+Current. When Current finishes, the same row crosses into the top of History
+without changing the order of the cards around it.
+
+Selecting a row moves the playback boundary without reordering the list:
+
+- Selecting Current resumes it from the same sample when paused
+- Selecting a Waiting row moves Current and the older Waiting rows below it
+  into History
+- Selecting a History row makes it Current and makes the rows above it Waiting
+- Selecting another voice keeps the same ID, text, and row position
+
+Only a drag changes relative order. Reordering Waiting or History does not
+replace Current or discard its audio.
+
+Current remains Current while its first piece is being prepared, while it is
+playing, while paused, and during a gap between pieces. Idle means there is no
+Current and no Waiting. These rules keep states such as Paused without Current,
+or Waiting without Current, out of engine status and out of the window model.
+
+## Status sent to the app
+
+The engine writes a versioned `status.json` snapshot. Source code owns the exact
+version number and field checks.
+
+Each snapshot contains:
+
+- Current, all Waiting rows, and up to 50 recent History rows
+- The total History count, which may be larger than the visible list
+- Engine process ID, lifecycle state, and publication time
+- A timeline revision that increases when visible identity, order, voice, or
+  History count changes
+- The current piece number and its Unicode text offsets
+
+The renderer uses the piece offsets to show the current sentence without
+changing the text's line breaks. It uses the revision before the publication
+time, so a late status read cannot undo a newer command result.
+
+The engine writes status to a temporary file and then swaps it into place, so
+the app never reads half a snapshot. Short Windows replacement collisions are
+retried. A persistent failure creates `status.failed`; the app then stops
+trusting the previous snapshot.
+
+## Commands and saved timeline changes
+
+Pause and Resume use an ordered `PAUSE` marker, so a paused timeline stays
+paused across an engine restart. Skip, Stop, and Interrupt name the engine
+process they belong to, so an old destructive command cannot affect a
+replacement process.
+
+Play, move, archive, delete, voice change, and clear use one kind of saved change
+file. Requests are stored on disk and handled one at a time in creation order.
+Each result says:
+
+- `committed` when the change finished
+- `rejected` when nothing changed and the engine can explain why
+- `unconfirmed` when storage may have changed but the engine cannot prove the
+  result
+
+An unconfirmed result stops further timeline changes until startup recovery
+finishes the saved plan. The app adopts the engine's result snapshot instead of
+guessing from local UI state.
+
+See [skills/super-speech/SKILL.md](skills/super-speech/SKILL.md) for the exact
+agent commands.
+
+## Startup, locking, and crash recovery
+
+Only the process holding `engine.lock` may prepare the runtime. It first removes
+stale command markers from the previous process, then publishes Loading status
+and a heartbeat. The app can show a real startup state even when an old timeline
+takes time to upgrade.
+
+Preparation runs before normal work:
+
+1. Finish an interrupted old identity or timeline change
+2. Upgrade old filenames and order files when needed
+3. Check the current files and repair safe order gaps
+4. Create or repair the sequence counter
+5. Remove the old identity index
+6. Open the runtime to commands
+
+Agent commands wait for startup checks to finish before touching the timeline.
+
+`TimelineStorage` uses one thread lock and one cross-process `timeline.lock` for
+changes that must agree across several files. Normal enqueue reads only the
+small counter and writes Queue, so its lock time does not grow with History.
+Playback-side moves wait for the current writer rather than killing the engine
+after an arbitrary timeout. Separate command processes still have a time limit,
+so a truly stuck command can report an error.
+
+Multi-file changes first save their intended final layout in
+`timeline-intent.json`. Startup checks that plan and finishes it before another
+timeline change can begin.
+
+## Desktop process boundary
+
+Electron main starts the standalone engine and watches it. If an agent command
+started a compatible engine first, the app uses that same process. If it later
+exits, the app starts a replacement with increasing delays between repeated
+failures.
+
+The preload script exposes a small list of approved functions to the window.
+The renderer cannot read files, start programs, or use Node.js. It receives
+checked status and sends commands through Electron main.
 
 ## Code map
 
-- `skills/super-speech/engine/super_speech_engine.py` owns the engine session,
-  synthesis, playback, timeline persistence, commands, and status publication
+- `skills/super-speech/engine/timeline_storage.py` owns stored speech files,
+  section order, allocation, locks, upgrade plans, and crash recovery
+- `skills/super-speech/engine/file_lock.py` provides the small cross-process lock
+  used by the engine and timeline storage
+- `skills/super-speech/engine/super_speech_engine.py` owns synthesis, playback,
+  commands, engine lifecycle, and status
 - `skills/super-speech/engine/pauseable_audio.py` owns sample-accurate pause and
-  resume inside the audio callback
-- `skills/super-speech/engine/speechicle_identity.py` owns stable public IDs and
-  migration from older filename-based identities
-- `skills/super-speech/engine/mutation_protocol.py` validates the one timeline
-  mutation wire format
-- `app/electron/main.ts` owns the engine child process, tray, window, install
-  manifest, and renderer IPC
-- `app/src/runtime.ts` validates engine snapshots and defines the shared desktop
-  data contract
-- `app/src/main.ts` renders the window and handles playback, menus, and gestures
-- `app/src/queue-drag-model.ts` is the pure drag-and-drop state machine
-- `tests/test_pauseable_audio.py` covers the Python engine and its durable
-  recovery paths
-- `app/src/*.test.ts` covers the desktop data and gesture models without audio
-- `app/scripts/smoke_*.mjs` covers packaged Electron behavior with silent audio
+  resume in the audio callback
+- `skills/super-speech/engine/speechicle_identity.py` describes old-to-current
+  filename upgrades
+- `skills/super-speech/engine/mutation_protocol.py` checks timeline mutation
+  requests and results
+- `app/electron/main.ts` owns the window, tray, engine supervision, installer
+  integration, and calls from the renderer
+- `app/src/runtime.ts` checks engine status and defines the desktop data shapes
+- `app/src/main.ts` renders the window and handles its controls
+- `app/src/queue-drag-model.ts` contains the pure drag state machine
+- `tests/test_timeline_storage.py` covers storage directly
+- `tests/test_pauseable_audio.py` covers engine playback and command behavior
+- `app/src/*.test.ts` covers desktop status and drag logic without audio
+- `app/scripts/smoke_*.mjs` covers real Electron behavior with silent audio
+
+## Distribution and licensing boundaries
+
+- Build the standalone engine separately for Windows x64 and macOS arm64
+- Keep installed code and models read-only, with mutable desktop state in the
+  user's home directory
+- Keep every headless component inside its installed skill folder
+- Ship engine source, dependency notices, and license files with the installer
+- Sign the Electron app, installer, engine, and native libraries for a public
+  Windows release
+- Sign nested macOS code, then notarize the complete app
+
+The standalone engine contains GPL-covered phonemization components. The
+Electron frontend remains a separate MIT process. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dependency details.
 
 ## Options considered
 
 ### Python-only app
 
-This would use one implementation language, but a polished cross-platform tray
-UI would still require Qt/QML or another substantial UI runtime. Qt adds a
-separate packaging and licensing surface. SpotKey's Tkinter and pystray pattern
-is Windows-oriented and does not meet this app's UI goal.
+This would use one language, but a polished cross-platform tray UI would still
+need Qt/QML or another large UI runtime. SpotKey's Tkinter and pystray approach
+is Windows-focused and does not meet this app's UI goal.
 
 ### Electron plus Python
 
-This preserves the working Kokoro, ONNX Runtime, eSpeak, NumPy, and PortAudio
-pipeline. A standalone helper is normal Electron distribution work and keeps
-inference crashes and audio lifetime independent from the renderer.
+This keeps the working Kokoro, ONNX Runtime, eSpeak, NumPy, PortAudio, and
+sample-accurate pause code. The standalone engine also keeps synthesis and audio
+failures outside the renderer.
 
 This is the selected design.
 
 ### Electron and TypeScript only
 
-This would remove Python source but not the native runtime problem. A port would
-still need ONNX Runtime, phonemization, waveform trimming, an audio service,
-queue backpressure, device recovery, and sample-preserving pause. It is a speech
-engine rewrite rather than an installer simplification.
-
-Reconsider it only after a focused prototype matches voice quality,
-pronunciation, cold-start time, synthesis speed, queue gaps, exact resume, and
-signed Windows and macOS packaging.
+This removes Python source but still needs native inference, phonemization,
+audio, device recovery, buffering, and pause behavior. It is an engine rewrite,
+not a packaging shortcut.
 
 ### Tauri plus Python
 
-Tauri added Rust as a third implementation language and duplicated the engine's
-status shape without owning a separate product responsibility. Littlebird also
-migrated its desktop app from Tauri to Electron. Keeping Tauri would retain a
-known maintenance risk while saving little relative to model and inference
-runtime sizes.
-
-## Timeline and playback
-
-### Status snapshot
-
-`super-speech-engine status` publishes one version 12 snapshot. It contains
-Current, the complete Waiting list, and up to 50 recent History rows. The total
-`history_count` may be larger than that bounded History list. Every Speechicle
-has an opaque ID such as `sp_0123456789abcdef0123456789abcdef`. Text filenames
-and numeric storage sequences are private and may change without changing the
-public ID.
-
-Current stays present while the engine prepares audio, speaks, pauses, or waits
-between pieces. Before its first piece starts, `piece` is 0 and `piece_start`
-and `piece_end` are null. During a piece, those two fields give its zero-based,
-end-exclusive Unicode code-point range inside the complete text. The renderer
-uses that range for follow-along highlighting.
-
-The status shape enforces these rules:
-
-- Waiting cannot exist without Current
-- Playing and Paused cannot exist without Current
-- Idle cannot have Current
-- Current, Waiting, and History cannot contain the same ID twice
-- `queue_count` equals the number of Waiting rows
-
-Loading, Setup required, and Stopped describe process lifecycle. They may still
-show Current so the user does not lose the playback boundary while the engine is
-starting or stopped. If status publication keeps failing, the engine writes
-`status.failed` and stops. Electron treats that marker as invalidation, not as
-permission to keep showing an older snapshot.
-
-Each snapshot also has a `timeline_revision`. The engine increments it only when
-row identity, row order, a row's voice, or the History total changes. Piece
-progress, pause state, and timestamps do not increment it. The engine seeds the
-counter from its last valid version 12 status when it restarts. The renderer
-uses the revision first and `updated_at` second, so a late status poll cannot
-replace a mutation result with an older timeline.
-
-### Timeline mutations
-
-Play, move, archive, delete, and clear all use one command shape and one durable
-FIFO stream. The public CLI commands and the desktop app both enter that same
-path. The engine claims one request at a time, applies it, publishes the new
-status, and then publishes a matching result. Every result is one of:
-
-- `committed`: the change took effect
-- `rejected`: the engine made no requested change and explains why
-- `unconfirmed`: storage may have changed but the engine cannot prove the final
-  result, so it stops instead of continuing from an uncertain timeline
-
-Every result includes its request ID and the authoritative status snapshot.
-Play also returns the selected Speechicle ID. The renderer adopts that snapshot
-instead of guessing success from matching text or rebuilding the timeline on
-its own. A drag preview moves existing row nodes only for visual feedback; it
-does not become application state.
-
-`play <id> [--voice <voice>]` moves the playback boundary without changing the
-visible row order:
-
-- playing Current resumes it from the same sample when it is paused
-- playing a Waiting row moves Current and each older Waiting row into History
-- playing a History row makes that row Current and makes each row above it
-  Waiting
-- choosing another voice changes that Speechicle in place and keeps its ID and
-  text
-
-Changing the playback boundary discards buffered audio that belongs to the old
-order. Current audio remains buffered when a simple Waiting or History reorder
-does not change the boundary.
-
-`move`, `move-history`, `archive`, `delete`, and `clear` use the same mutation
-result contract. Queue and History order live in `queue-order.json` and
-`history-order.json`, keyed by stable public IDs. The identity catalog in
-`speechicle-index.json` maps those IDs to private storage sequences. New text is
-written to a temporary file and becomes visible only through an atomic replace,
-so concurrent `speak` calls cannot expose half-written rows.
-
-`speak` does not enter the mutation stream. It makes one complete new
-Speechicle visible at once. If the row is visible before the engine reads the
-timeline, the mutation sees it. Otherwise the new row appears after the
-mutation. No process ever sees part of a row.
-
-Clear and History promotion can touch several files. Before either operation,
-the engine writes the intended final layout to `timeline-intent.json`. Startup
-finishes an interrupted intent before accepting another mutation. A known
-in-process failure restores the old layout. An uncertain rollback keeps the
-intent and stops the engine so the next process can recover it.
-
-Pause, Resume, Skip, Stop, and Interrupt are immediate controls rather than
-timeline mutations. Their signal files name the engine process that owns the
-runtime lock, so a delayed control cannot affect a replacement process. A
-mutation and a graceful Stop are ordered by publication time: a newer mutation
-cancels an older Stop, while a newer Stop rejects the older mutation.
-
-The engine stores Waiting in playback order, oldest first. The desktop reverses
-that list, places Current below it, then places newest-first History below
-Current. A row therefore crosses the Current-History divider without jumping
-when playback finishes. A new Current row is scrolled into view once; piece
-updates do not take scrolling away from the user. Current is not draggable.
-
-## Distribution boundaries
-
-- Build the frozen engine independently for Windows x64 and macOS arm64. The
-  pinned ONNX Runtime requires macOS 14 or newer and does not provide an Intel
-  Mac wheel
-- Use a directory-style sidecar so native libraries do not unpack on every
-  start
-- Keep desktop code and models read-only, with mutable desktop state in the
-  user's home directory. Keep every headless component inside its skill folder
-- Ship corresponding engine source, dependency notices, and license files
-- Sign the Electron shell, installer, engine, and native libraries for public
-  Windows releases
-- Notarize the complete macOS app after nested code signing
-- Treat the frozen engine as GPL-covered because it combines GPL phonemization
-  components; keep the Electron frontend as a separate MIT process
+This adds Rust as a third language without removing the Python engine. It also
+reintroduces a desktop stack that Littlebird already replaced with Electron.
