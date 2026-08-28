@@ -1,0 +1,216 @@
+{
+  "valid": [
+    {
+      "version": 13,
+      "timeline_revision": 0,
+      "state": "idle",
+      "updated_at": 1,
+      "engine_pid": 41,
+      "current": null,
+      "queue_count": 0,
+      "queue": [],
+      "history_count": 0,
+      "history": []
+    },
+    {
+      "version": 13,
+      "timeline_revision": 7,
+      "state": "playing",
+      "updated_at": 2.5,
+      "engine_pid": 42,
+      "current": {
+        "id": "sp_00000000000000000000000000000001",
+        "text": "Hello world",
+        "voice": "af_heart",
+        "piece": 1,
+        "piece_count": 2,
+        "piece_start": 0,
+        "piece_end": 5,
+        "elapsed_seconds": 0.25
+      },
+      "queue_count": 1,
+      "queue": [
+        {
+          "id": "sp_00000000000000000000000000000002",
+          "text": "Next",
+          "voice": "bm_fable"
+        }
+      ],
+      "history_count": 3,
+      "history": [
+        {
+          "id": "sp_00000000000000000000000000000003",
+          "text": "Earlier",
+          "voice": "af_bella"
+        }
+      ]
+    },
+    {
+      "version": 13,
+      "timeline_revision": 8,
+      "state": "paused",
+      "updated_at": 3,
+      "engine_pid": 42,
+      "current": {
+        "id": "sp_00000000000000000000000000000004",
+        "text": "Preparing",
+        "voice": "af_heart",
+        "piece": 0,
+        "piece_count": 1,
+        "piece_start": null,
+        "piece_end": null,
+        "elapsed_seconds": 0
+      },
+      "queue_count": 0,
+      "queue": [],
+      "history_count": 0,
+      "history": []
+    }
+  ],
+  "invalid": [
+    {
+      "version": 13,
+      "timeline_revision": 0,
+      "state": "paused",
+      "updated_at": 1,
+      "engine_pid": 41,
+      "current": null,
+      "queue_count": 0,
+      "queue": [],
+      "history_count": 0,
+      "history": []
+    },
+    {
+      "version": 13,
+      "timeline_revision": 0,
+      "state": "idle",
+      "updated_at": 1,
+      "engine_pid": 41,
+      "current": {
+        "id": "sp_00000000000000000000000000000001",
+        "text": "Current",
+        "voice": "af_heart",
+        "piece": 0,
+        "piece_count": 1,
+        "piece_start": null,
+        "piece_end": null,
+        "elapsed_seconds": 0
+      },
+      "queue_count": 0,
+      "queue": [],
+      "history_count": 0,
+      "history": []
+    },
+    {
+      "version": 13,
+      "timeline_revision": 0,
+      "state": "loading",
+      "updated_at": 1,
+      "engine_pid": 41,
+      "current": null,
+      "queue_count": 1,
+      "queue": [
+        {
+          "id": "sp_00000000000000000000000000000002",
+          "text": "Waiting without Current",
+          "voice": "af_heart"
+        }
+      ],
+      "history_count": 0,
+      "history": []
+    },
+    {
+      "version": 13,
+      "timeline_revision": true,
+      "state": "stopped",
+      "updated_at": 1,
+      "engine_pid": null,
+      "current": null,
+      "queue_count": 0,
+      "queue": [],
+      "history_count": 0,
+      "history": []
+    },
+    {
+      "version": 13,
+      "timeline_revision": 0,
+      "state": "playing",
+      "updated_at": 1,
+      "engine_pid": 41,
+      "current": {
+        "id": "sp_00000000000000000000000000000001",
+        "text": "Short",
+        "voice": "af_heart",
+        "piece": 1,
+        "piece_count": 1,
+        "piece_start": 0,
+        "piece_end": 6,
+        "elapsed_seconds": 0
+      },
+      "queue_count": 0,
+      "queue": [],
+      "history_count": 0,
+      "history": []
+    },
+    {
+      "version": 13,
+      "timeline_revision": 0,
+      "state": "stopped",
+      "updated_at": 1,
+      "engine_pid": null,
+      "current": null,
+      "queue_count": 0,
+      "queue": [],
+      "history_count": 0,
+      "history": [
+        {
+          "id": "sp_00000000000000000000000000000003",
+          "text": "Count mismatch",
+          "voice": "af_heart"
+        }
+      ]
+    },
+    {
+      "version": 13,
+      "timeline_revision": 0,
+      "state": "stopped",
+      "updated_at": 1,
+      "engine_pid": null,
+      "current": null,
+      "queue_count": 0,
+      "queue": [],
+      "history_count": 2,
+      "history": [
+        {
+          "id": "sp_00000000000000000000000000000003",
+          "text": "Duplicate one",
+          "voice": "af_heart"
+        },
+        {
+          "id": "sp_00000000000000000000000000000003",
+          "text": "Duplicate two",
+          "voice": "bm_fable"
+        }
+      ]
+    },
+    {
+      "version": 13,
+      "timeline_revision": 0,
+      "state": "stopped",
+      "updated_at": 1,
+      "engine_pid": null,
+      "current": null,
+      "queue_count": 0,
+      "queue": [],
+      "history_count": 1,
+      "history": [
+        {
+          "id": "001-af_heart-say",
+          "filename": "001-af_heart-say.txt",
+          "text": "Private identity",
+          "voice": "af_heart"
+        }
+      ]
+    }
+  ]
+}

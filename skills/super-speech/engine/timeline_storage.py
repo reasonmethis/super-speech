@@ -39,6 +39,61 @@ class MutationOutcomeUnconfirmed(RuntimeError):
     """The engine cannot prove what a command changed."""
 
 
+def replace_path_with_confirmation(
+    source: Path,
+    target: Path,
+    label: str,
+    *,
+    expected_bytes: bytes | None = None,
+    missing_source_is_rejection: bool = False,
+) -> None:
+    """Replace one file, confirming the visible result after an OS error."""
+    try:
+        os.replace(source, target)
+        return
+    except OSError as error:
+        replace_error = error
+
+    def exists(path: Path) -> bool:
+        try:
+            path.stat()
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise MutationOutcomeUnconfirmed(
+                f"could not confirm whether {label} completed"
+            ) from error
+
+    source_exists = exists(source)
+    target_exists = exists(target)
+    if source_exists and not target_exists:
+        raise replace_error
+    if (
+        missing_source_is_rejection
+        and not source_exists
+        and not target_exists
+        and isinstance(replace_error, FileNotFoundError)
+    ):
+        raise replace_error
+    if not source_exists and target_exists:
+        if expected_bytes is not None:
+            try:
+                matches = target.read_bytes() == expected_bytes
+            except OSError as error:
+                raise MutationOutcomeUnconfirmed(
+                    f"could not confirm whether {label} completed"
+                ) from error
+            if not matches:
+                raise MutationOutcomeUnconfirmed(
+                    f"could not confirm whether {label} completed"
+                ) from replace_error
+        return
+    raise MutationOutcomeUnconfirmed(
+        f"could not confirm whether {label} completed"
+    ) from replace_error
+
+
 class HeldInstanceLock(Protocol):
     """The part of the engine process lock needed by storage preparation."""
 
@@ -87,6 +142,16 @@ class TimelinePaths:
     @property
     def sequence_counter(self) -> Path:
         return self.root / "next-sequence.json"
+
+
+@dataclass(frozen=True, slots=True)
+class TimelineSelection:
+    """Describe where a selected Speechicle is and how playback should react."""
+
+    target: Path
+    origin: Literal["current", "waiting", "history"]
+    restart_playback: bool
+    moved_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -424,8 +489,14 @@ class TimelineStorage:
             f"{self.paths.intent.name}.{os.getpid()}.{threading.get_ident()}.tmp"
         )
         try:
-            temporary.write_text(json.dumps(payload), encoding="utf-8")
-            os.replace(temporary, self.paths.intent)
+            serialized = json.dumps(payload).encode("utf-8")
+            temporary.write_bytes(serialized)
+            replace_path_with_confirmation(
+                temporary,
+                self.paths.intent,
+                "timeline intent publication",
+                expected_bytes=serialized,
+            )
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -531,12 +602,15 @@ class TimelineStorage:
                 f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
             )
             try:
-                temporary.write_text(text, encoding="utf-8")
-                os.replace(temporary, path)
+                serialized = text.encode("utf-8")
+                temporary.write_bytes(serialized)
+                replace_path_with_confirmation(
+                    temporary,
+                    path,
+                    "Queue file publication",
+                    expected_bytes=serialized,
+                )
                 return path
-            except Exception:
-                path.unlink(missing_ok=True)
-                raise
             finally:
                 temporary.unlink(missing_ok=True)
 
@@ -872,7 +946,7 @@ class TimelineStorage:
             except OSError:
                 cleanup_complete = False
         if cleanup_complete:
-            # Keep the plan when a backup remains so startup can finish cleanup
+            # Remove the plan only after every backup is gone
             try:
                 self.paths.intent.unlink(missing_ok=True)
             except OSError:
@@ -1009,7 +1083,11 @@ class TimelineStorage:
                 raise ValueError(f"waiting chunk not found: {source.stem}")
             if target.exists():
                 raise RuntimeError(f"voice target already exists: {target.stem}")
-            os.replace(source, target)
+            replace_path_with_confirmation(
+                source,
+                target,
+                "Queue voice change",
+            )
             return target
 
     def promote_history(
@@ -1075,6 +1153,50 @@ class TimelineStorage:
             self._execute_plan(plan)
             return selected_target, len(promoted)
 
+    def select(self, public_id: str, voice: str | None = None) -> TimelineSelection:
+        """Move the playback boundary without changing the full row sequence."""
+        queue = self.queue_files()
+        target = next(
+            (path for path in queue if self.public_id(path) == public_id),
+            None,
+        )
+        if target is not None:
+            target_index = queue.index(target)
+            origin: Literal["current", "waiting"] = (
+                "current" if target_index == 0 else "waiting"
+            )
+            current_voice = self.canonical_filename(target).voice
+            if origin == "current" and (voice is None or voice == current_voice):
+                return TimelineSelection(target, origin, False, 0)
+
+            original = target
+            voice_changed = voice is not None and voice != current_voice
+            if voice_changed:
+                target = self.replace_queue_voice(original, voice)
+            older = queue[:target_index]
+            try:
+                if not self.archive_many(older):
+                    raise RuntimeError("could not archive older waiting chunks")
+            except (OSError, RuntimeError, ValueError) as error:
+                outcome_unconfirmed = isinstance(error, MutationOutcomeUnconfirmed)
+                if voice_changed:
+                    try:
+                        self.replace_queue_voice(target, current_voice)
+                    except (OSError, RuntimeError, ValueError):
+                        outcome_unconfirmed = True
+                if outcome_unconfirmed:
+                    raise MutationOutcomeUnconfirmed(
+                        "play command result was unconfirmed"
+                    ) from error
+                raise
+            return TimelineSelection(target, origin, True, len(older))
+
+        history_source = self.find(self.paths.history, public_id)
+        if history_source is None:
+            raise ValueError(f"chunk not found: {public_id}")
+        selected, moved_count = self.promote_history(history_source, voice)
+        return TimelineSelection(selected, "history", True, moved_count)
+
     def delete_history(self, public_id: str) -> Path | None:
         with self.mutation(timeout=None):
             self._recover_current_plan()
@@ -1084,7 +1206,6 @@ class TimelineStorage:
             if history_item is None:
                 return None
             history_item.unlink()
-            self.save_history_order()
             self.invalidate_history()
             return history_item
 

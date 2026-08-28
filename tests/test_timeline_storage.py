@@ -83,12 +83,40 @@ def test_counter_gap_after_failed_file_publish_is_never_reused(
 
     with pytest.raises(PermissionError, match="simulated publish failure"):
         storage.reserve("af_heart", None, "Lost before publish")
+    assert not list(storage.paths.queue.glob("*.txt"))
+    assert not list(storage.paths.queue.glob("*.tmp"))
+
     queued = storage.reserve("af_heart", None, "Next")
 
     filename = SpeechicleFilename.parse(queued.name)
     assert filename.sequence == 2
     assert filename.public_id.endswith("0000000000000002")
     assert list(storage.paths.queue.glob("*.txt")) == [queued]
+
+
+def test_committed_queue_publish_survives_a_reported_replace_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    storage = prepared_storage(tmp_path)
+    real_replace = timeline_storage_module.os.replace
+    reported_once = False
+
+    def commit_then_report_error(source: Path, target: Path) -> None:
+        nonlocal reported_once
+        real_replace(source, target)
+        if Path(target).suffix == ".txt" and not reported_once:
+            reported_once = True
+            raise PermissionError("simulated late publish error")
+
+    monkeypatch.setattr(
+        timeline_storage_module.os, "replace", commit_then_report_error
+    )
+
+    queued = storage.reserve("af_heart", None, "Published once")
+
+    assert queued.read_text(encoding="utf-8") == "Published once"
+    assert list(storage.paths.queue.glob("*.txt")) == [queued]
+    assert not list(storage.paths.queue.glob("*.tmp"))
 
 
 def test_prepare_rejects_an_exhausted_sequence_space(tmp_path: Path) -> None:

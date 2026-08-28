@@ -1,28 +1,27 @@
 #!/usr/bin/env python3
 """Local Super Speech engine and command-line interface.
 
-A background synth WORKER thread synthesizes queued chunks continuously and
-banks the rendered audio in a bounded buffer. The MAIN thread consumes that
-buffer, playing each piece through the OS audio driver via sounddevice
-(non-blocking) and staying responsive to control signals every ~20 ms.
+One stored reply is a Speechicle. Older CLI options and internal names call it
+a chunk. A piece is a smaller, sentence-sized part used only for synthesis and
+playback.
 
-Long chunks are split at sentence boundaries into pieces of at most
-SPLIT_CHARS characters; each piece is synthesized and banked separately, so a
-chunk starts playing once its FIRST piece renders (~1-2 s) instead of after
-the whole chunk renders (10-20 s for a 700-char chunk). Pieces of one chunk
-play back-to-back (the ~0.1-0.2 s of play-loop latency between them lands on
-a sentence boundary, where a pause is natural); the configured inter-chunk
-gap applies only before a chunk's first piece. This is what makes the
-queue gap-proof even when a short chunk is followed by a much longer one —
-the synth-ahead cushion only needs to cover one SENTENCE, not one chunk.
+A background worker prepares pieces in order and puts their audio in a bounded
+buffer. The main thread plays that audio through sounddevice while checking
+control signals about every 20 ms. A long Speechicle can start after its first
+piece is ready instead of waiting for every piece to be synthesized.
 
-The CLI is the public control surface. It owns daemon startup, queue numbering,
-and playback signals so desktop and headless installations use identical
-behavior. Signal files in BASE are the engine's private process protocol:
+Pieces in one Speechicle are prepared and played in order. If the next piece is
+not ready, playback waits at that sentence boundary. The configured gap applies
+only before the first piece.
+
+The CLI is the public control surface. It owns daemon startup and playback
+commands so desktop and headless installations use identical behavior. The
+first Speechicle in Queue is Current. Signal files in BASE are the engine's
+private process protocol:
   PAUSE      - pause immediately; keep the current sample position until removed
-  STOP       - finish the current chunk, then exit cleanly
+  STOP       - finish Current if playback began, or exit before it starts
   INTERRUPT  - stop playback immediately and exit
-  SKIP       - stop current chunk (all its remaining pieces), archive it,
+  SKIP       - stop Current and its remaining pieces, archive it,
                continue with next
   CONTINUE   - cancel a graceful stop because new speech was queued
   MUTATION.*.json - play, move, archive, delete, or clear the timeline in one
@@ -32,9 +31,7 @@ behavior. Signal files in BASE are the engine's private process protocol:
 Env:
   SUPER_SPEECH_HOME        - override the runtime home directory
   SUPER_SPEECH_MODEL_DIR   - override the read-only Kokoro model directory
-  SUPER_SPEECH_SILENT      - opt-in: play silence of identical duration instead
-                             of audio (timing is preserved). For measuring gap
-                             behavior without making sound; default off.
+  SUPER_SPEECH_SILENT      - opt-in: preserve timing without making sound
   SUPER_SPEECH_SPLIT_CHARS - internal synthesis-piece target size; 0 disables splitting
 """
 import argparse
@@ -51,7 +48,7 @@ import threading
 import time
 import urllib.request
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NamedTuple, assert_never
 
@@ -70,15 +67,14 @@ from mutation_protocol import (
 )
 from pauseable_audio import PauseableAudio
 from speechicle_identity import (
-    IdentityCatalog,
     SpeechicleFilename,
     is_public_id,
-    write_catalog,
 )
 from timeline_storage import (
     MutationOutcomeUnconfirmed,
     TimelinePaths,
     TimelineStorage,
+    replace_path_with_confirmation,
 )
 
 try:
@@ -101,17 +97,12 @@ INTERRUPT = BASE / "INTERRUPT"
 SKIP = BASE / "SKIP"
 CONTINUE = BASE / "CONTINUE"
 MUTATION = BASE / "MUTATION.json"
-QUEUE_ORDER = TIMELINE_PATHS.queue_order
-HISTORY_ORDER = TIMELINE_PATHS.history_order
 WARMUP = BASE / "WARMUP"
 HEARTBEAT = BASE / "engine.alive"
 STATUS = BASE / "status.json"
 STATUS_FAILURE = BASE / "status.failed"
 STORAGE_READY = BASE / "storage-ready.json"
 INSTANCE_LOCK = BASE / "engine.lock"
-TIMELINE_LOCK = TIMELINE_PATHS.mutation_lock
-TIMELINE_INTENT = TIMELINE_PATHS.intent
-IDENTITY_INDEX = TIMELINE_PATHS.legacy_identity_index
 PLAYBACK_COMMAND_LOCK = BASE / "playback-command.lock"
 PLAYBACK_COMMAND_SEQUENCE = BASE / "playback-command-sequence.json"
 
@@ -439,28 +430,12 @@ def install_models(destination: Path = MODEL_DIR) -> None:
         print(f"installed {target}")
 
 
-def chunk_sequence(path: Path) -> int | None:
-    return timeline.sequence(path)
-
-
 def public_id_for_path(path: Path) -> str:
     return timeline.public_id(path)
 
 
 def queue_files_in_order() -> list[Path]:
     return timeline.queue_files()
-
-
-def history_files_in_order() -> list[Path]:
-    return timeline.history_files()
-
-
-def save_queue_order(paths: list[Path] | None = None) -> None:
-    timeline.save_queue_order(paths)
-
-
-def save_history_order(paths: list[Path] | None = None) -> None:
-    timeline.save_history_order(paths)
 
 
 def enqueue_text(text: str, voice: str, gap_ms: int | None = None) -> Path:
@@ -479,42 +454,10 @@ def history_snapshot() -> tuple[int, list[dict[str, object]]]:
     return timeline.history_snapshot(HISTORY_LIMIT)
 
 
-def invalidate_history() -> None:
-    timeline.invalidate_history()
-
-
 def prepare_timeline_storage(instance_lock: EngineInstanceLock) -> None:
     recovered = timeline.prepare(instance_lock)
     if recovered is not None:
         log(f"recovered pending timeline {recovered} transaction")
-
-
-def _find_chunk(directory: Path, chunk_id: str) -> Path | None:
-    return timeline.find(directory, chunk_id)
-
-
-def _voice_variant_path(source: Path, voice: str) -> Path:
-    if AVAILABLE_VOICES and voice not in AVAILABLE_VOICES:
-        raise ValueError(f"unknown Kokoro voice: {voice}")
-    return timeline.voice_variant(source, voice)
-
-
-def _replace_queue_voice(source: Path, voice: str) -> Path:
-    _voice_variant_path(source, voice)
-    return timeline.replace_queue_voice(source, voice)
-
-
-def promote_history_selection(
-    source: Path, voice: str | None = None
-) -> tuple[Path, int]:
-    if voice is not None:
-        _voice_variant_path(source, voice)
-    try:
-        return timeline.promote_history(source, voice)
-    except MutationOutcomeUnconfirmed:
-        raise
-    except (OSError, RuntimeError, ValueError) as error:
-        raise RuntimeError("could not move History playback boundary") from error
 
 
 def _archive_many(paths: list[Path]) -> bool:
@@ -583,7 +526,7 @@ def gap_from_name(name: str) -> float | None:
 _SENT_RE = re.compile(r"(?<=[.!?…])\s+")
 
 
-FIRST_PIECE_CHARS = 120  # small first piece: its synth is the only wait at a cold start
+FIRST_PIECE_CHARS = 120  # first-piece target; one long sentence may exceed it
 
 
 class SpeechPiece(NamedTuple):
@@ -794,22 +737,47 @@ def _read_command_sequence_unlocked() -> int:
     return payload["last_sequence"]
 
 
+def _replace_command_json_unlocked(
+    temporary: Path,
+    target: Path,
+    payload: dict[str, object],
+    error_message: str,
+) -> None:
+    last_error: OSError | None = None
+    for _ in range(5):
+        try:
+            os.replace(temporary, target)
+            return
+        except OSError as error:
+            last_error = error
+            try:
+                stored = json.loads(target.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                pass
+            else:
+                if stored == payload:
+                    return
+            time.sleep(0.02)
+    raise RuntimeError(error_message) from last_error
+
+
 def _allocate_command_sequence_unlocked() -> int:
     sequence = _read_command_sequence_unlocked() + 1
+    payload: dict[str, object] = {"version": 1, "last_sequence": sequence}
     temporary = PLAYBACK_COMMAND_SEQUENCE.with_name(
         f".{PLAYBACK_COMMAND_SEQUENCE.name}.{os.getpid()}.{threading.get_ident()}.tmp"
     )
     try:
         temporary.write_text(
-            json.dumps(
-                {"version": 1, "last_sequence": sequence},
-                separators=(",", ":"),
-            ),
+            json.dumps(payload, separators=(",", ":")),
             encoding="utf-8",
         )
-        os.replace(temporary, PLAYBACK_COMMAND_SEQUENCE)
-    except OSError as error:
-        raise RuntimeError("could not advance playback command sequence") from error
+        _replace_command_json_unlocked(
+            temporary,
+            PLAYBACK_COMMAND_SEQUENCE,
+            payload,
+            "could not advance playback command sequence",
+        )
     finally:
         temporary.unlink(missing_ok=True)
     return sequence
@@ -844,7 +812,12 @@ def _publish_ordered_marker_unlocked(
             json.dumps(payload, separators=(",", ":")),
             encoding="utf-8",
         )
-        os.replace(temporary, signal)
+        _replace_command_json_unlocked(
+            temporary,
+            signal,
+            payload,
+            f"could not publish {signal.name}",
+        )
     finally:
         temporary.unlink(missing_ok=True)
     return sequence
@@ -893,7 +866,12 @@ def request_mutation(request: MutationRequest) -> str:
                 json.dumps(payload, separators=(",", ":")),
                 encoding="utf-8",
             )
-            os.replace(temp_path, request_path)
+            _replace_command_json_unlocked(
+                temp_path,
+                request_path,
+                payload,
+                "could not publish timeline mutation",
+            )
         finally:
             temp_path.unlink(missing_ok=True)
     return request.request_id
@@ -913,7 +891,12 @@ def claim_next_mutation_request() -> Path | None:
     for request in sorted(BASE.glob(f"{MUTATION.stem}.*.json")):
         claim = request.with_suffix(".claim")
         try:
-            os.replace(request, claim)
+            replace_path_with_confirmation(
+                request,
+                claim,
+                f"mutation claim {request.name}",
+                missing_source_is_rejection=True,
+            )
         except FileNotFoundError:
             continue
         except OSError as error:
@@ -968,18 +951,24 @@ def publish_json_payload(
     return False
 
 
-def publish_mutation_result(
+def _mutation_result_payload(
     request_id: str,
     outcome: str,
     snapshot: dict[str, object],
     *,
     result_id: str | None = None,
     error: str | None = None,
-) -> bool:
+) -> dict[str, object]:
     if outcome not in {"committed", "rejected", "unconfirmed"}:
         raise ValueError("invalid mutation outcome")
     if not _snapshot_is_valid(snapshot):
         raise ValueError("invalid mutation snapshot")
+    if outcome == "committed" and error is not None:
+        raise ValueError("committed mutation cannot contain an error")
+    if outcome != "committed" and not error:
+        raise ValueError("non-committed mutation requires an error")
+    if outcome != "committed" and result_id is not None:
+        raise ValueError("non-committed mutation cannot contain a result ID")
     payload: dict[str, object] = {
         "outcome": outcome,
         "request_id": request_id,
@@ -991,6 +980,24 @@ def publish_mutation_result(
         payload["result_id"] = result_id
     if error is not None:
         payload["error"] = error
+    return payload
+
+
+def publish_mutation_result(
+    request_id: str,
+    outcome: str,
+    snapshot: dict[str, object],
+    *,
+    result_id: str | None = None,
+    error: str | None = None,
+) -> bool:
+    payload = _mutation_result_payload(
+        request_id,
+        outcome,
+        snapshot,
+        result_id=result_id,
+        error=error,
+    )
     return publish_json_payload(
         mutation_result_path(request_id),
         payload,
@@ -1014,10 +1021,15 @@ def cancel_unclaimed_mutation(request_id: str) -> bool:
         for request in BASE.glob(f"{MUTATION.stem}.*.{request_id}.json"):
             cancelled = request.with_suffix(".cancel")
             try:
-                os.replace(request, cancelled)
+                replace_path_with_confirmation(
+                    request,
+                    cancelled,
+                    f"mutation cancellation {request.name}",
+                    missing_source_is_rejection=True,
+                )
             except FileNotFoundError:
                 continue
-            except OSError:
+            except (OSError, MutationOutcomeUnconfirmed):
                 continue
             cancelled.unlink(missing_ok=True)
             return True
@@ -1081,16 +1093,127 @@ def wait_for_json_payload(target: Path, deadline: float) -> dict[str, object] | 
     return None
 
 
-def _snapshot_is_valid(snapshot: object) -> bool:
+def _status_item_is_valid(value: object) -> bool:
     return (
-        isinstance(snapshot, dict)
-        and snapshot.get("version") == STATUS_VERSION
-        and isinstance(snapshot.get("timeline_revision"), int)
-        and snapshot.get("state")
-        in {"idle", "loading", "paused", "playing", "setup_required", "stopped"}
-        and isinstance(snapshot.get("queue"), list)
-        and isinstance(snapshot.get("history"), list)
+        isinstance(value, dict)
+        and is_public_id(value.get("id"))
+        and "filename" not in value
+        and isinstance(value.get("text"), str)
+        and isinstance(value.get("voice"), str)
     )
+
+
+def _current_status_item_is_valid(value: object) -> bool:
+    if not _status_item_is_valid(value):
+        return False
+    assert isinstance(value, dict)
+    piece = value.get("piece")
+    piece_count = value.get("piece_count")
+    elapsed = value.get("elapsed_seconds")
+    if (
+        not isinstance(piece, int)
+        or isinstance(piece, bool)
+        or not isinstance(piece_count, int)
+        or isinstance(piece_count, bool)
+        or piece < 0
+        or piece_count < 1
+        or piece > piece_count
+        or not isinstance(elapsed, (int, float))
+        or isinstance(elapsed, bool)
+    ):
+        return False
+    start = value.get("piece_start")
+    end = value.get("piece_end")
+    if piece == 0:
+        return start is None and end is None
+    return (
+        isinstance(start, int)
+        and not isinstance(start, bool)
+        and isinstance(end, int)
+        and not isinstance(end, bool)
+        and 0 <= start < end <= len(value["text"])
+    )
+
+
+def _snapshot_is_valid(snapshot: object) -> bool:
+    if not isinstance(snapshot, dict):
+        return False
+    current = snapshot.get("current")
+    queue_items = snapshot.get("queue")
+    history_items = snapshot.get("history")
+    queue_count = snapshot.get("queue_count")
+    history_count = snapshot.get("history_count")
+    timeline_revision = snapshot.get("timeline_revision")
+    updated_at = snapshot.get("updated_at")
+    engine_pid = snapshot.get("engine_pid")
+    state = snapshot.get("state")
+    if not (
+        snapshot.get("version") == STATUS_VERSION
+        and state
+        in {"idle", "loading", "paused", "playing", "setup_required", "stopped"}
+        and isinstance(timeline_revision, int)
+        and not isinstance(timeline_revision, bool)
+        and timeline_revision >= 0
+        and isinstance(updated_at, (int, float))
+        and not isinstance(updated_at, bool)
+        and (
+            engine_pid is None
+            or (isinstance(engine_pid, int) and not isinstance(engine_pid, bool))
+        )
+        and (current is None or _current_status_item_is_valid(current))
+        and isinstance(queue_items, list)
+        and all(_status_item_is_valid(item) for item in queue_items)
+        and isinstance(queue_count, int)
+        and not isinstance(queue_count, bool)
+        and queue_count == len(queue_items)
+        and isinstance(history_items, list)
+        and all(_status_item_is_valid(item) for item in history_items)
+        and isinstance(history_count, int)
+        and not isinstance(history_count, bool)
+        and history_count >= len(history_items)
+        and (current is not None or not queue_items)
+        and (state not in {"playing", "paused"} or current is not None)
+        and (state != "idle" or current is None)
+    ):
+        return False
+    active_ids = {
+        *([current["id"]] if isinstance(current, dict) else []),
+        *(item["id"] for item in queue_items),
+    }
+    history_ids = [item["id"] for item in history_items]
+    return (
+        len(active_ids) == len(queue_items) + (1 if current is not None else 0)
+        and len(set(history_ids)) == len(history_ids)
+        and active_ids.isdisjoint(history_ids)
+    )
+
+
+def _status_payload(
+    *,
+    timeline_revision: int,
+    state: str,
+    updated_at: float,
+    engine_pid: int | None,
+    current: dict[str, object] | None,
+    queue_items: list[dict[str, object]],
+    history_count: int,
+    history_items: list[dict[str, object]],
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "version": STATUS_VERSION,
+        "timeline_revision": timeline_revision,
+        "state": state,
+        "updated_at": updated_at,
+        "engine_pid": engine_pid,
+        "current": current,
+        "queue_count": len(queue_items),
+        "queue": queue_items,
+        "history_count": history_count,
+        "history": history_items,
+    }
+    if not _snapshot_is_valid(payload):
+        raise ValueError("invalid engine status payload")
+    return payload
 
 
 def wait_for_mutation_result(
@@ -1117,6 +1240,25 @@ def wait_for_mutation_result(
     return payload
 
 
+def _read_authoritative_status(timeout: float = 1.0) -> dict[str, object]:
+    """Read the latest complete status without consuming its shared file."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            snapshot = json.loads(STATUS.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            time.sleep(0.05)
+            continue
+        if (
+            _snapshot_is_valid(snapshot)
+            and not _contains_private_status_field(snapshot)
+        ):
+            assert isinstance(snapshot, dict)
+            return snapshot
+        time.sleep(0.05)
+    raise RuntimeError("engine status is unavailable")
+
+
 def prune_mutation_results(max_age: float = 300.0) -> None:
     cutoff = time.time() - max_age
     for result in BASE.glob("MUTATION_RESULT.*.json"):
@@ -1134,35 +1276,6 @@ def prune_mutation_results(max_age: float = 300.0) -> None:
             continue
         except OSError as error:
             log(f"could not prune mutation result {result.name}: {error}")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def warmup(kokoro) -> None:
@@ -1184,24 +1297,54 @@ class ActivePiece:
     end: int
 
     def __post_init__(self) -> None:
-        if self.piece <= 0 or self.start < 0 or self.end < self.start:
+        if self.piece <= 0 or self.start < 0 or self.end <= self.start:
             raise ValueError("invalid active piece progress")
 
 
 @dataclass(frozen=True)
 class CurrentProjection:
+    """Cached playback details for the Speechicle at the playback boundary.
+
+    `active_piece` is empty until the first piece starts. It then keeps the most
+    recent piece while the engine waits for the next one. `skip_initial_gap`
+    remembers that an explicit Play command should bypass the gap before a
+    Speechicle begins.
+    """
+
     filename: str
     text: str
     voice: str
-    piece_count: int
+    piece_count: int = field(init=False)
     active_piece: ActivePiece | None = None
     skip_initial_gap: bool = False
 
     def __post_init__(self) -> None:
-        if self.piece_count < 0:
-            raise ValueError("piece count cannot be negative")
-        if self.active_piece is not None and self.active_piece.piece > self.piece_count:
+        object.__setattr__(self, "piece_count", _piece_count(self.text))
+        if self.active_piece is None:
+            return
+        if self.active_piece.piece > self.piece_count:
             raise ValueError("active piece exceeds piece count")
+        if self.active_piece.end > len(self.text):
+            raise ValueError("active piece exceeds Current text")
+
+
+def _current_status_item(
+    path: Path,
+    projection: CurrentProjection,
+    elapsed_seconds: float = 0.0,
+) -> dict[str, object]:
+    """Build Current status fields shared by live and stopped snapshots."""
+    active_piece = projection.active_piece
+    return {
+        "id": public_id_for_path(path),
+        "text": projection.text,
+        "voice": projection.voice,
+        "piece": active_piece.piece if active_piece is not None else 0,
+        "piece_count": projection.piece_count,
+        "piece_start": active_piece.start if active_piece is not None else None,
+        "piece_end": active_piece.end if active_piece is not None else None,
+        "elapsed_seconds": elapsed_seconds,
+    }
 
 
 class State:
@@ -1217,7 +1360,7 @@ class State:
         self.claims: dict[str, int] = {}
         self.next_claim_generation = 0
         # Active playback-boundary item, including synthesis and inter-item gaps
-        self.current: CurrentProjection | None = None
+        self.current_projection: CurrentProjection | None = None
         self.read_failures: dict[str, float] = {}
         self.stop = threading.Event()    # tell the worker to exit
         self.saw_stop = False            # latched STOP - finish current chunk, then exit
@@ -1239,11 +1382,10 @@ def replace_current_projection(
 ) -> None:
     """Replace Current after an authoritative timeline transition."""
     with st.lock:
-        st.current = CurrentProjection(
+        st.current_projection = CurrentProjection(
             filename,
             text,
             voice,
-            _piece_count(text),
             skip_initial_gap=skip_initial_gap,
         )
 
@@ -1256,15 +1398,14 @@ def start_current_playback(
 ) -> bool:
     """Refresh Current for its first buffered piece without replacing another row."""
     with st.lock:
-        if st.current is not None and st.current.filename != filename:
+        if st.current_projection is not None and st.current_projection.filename != filename:
             return False
-        st.current = CurrentProjection(
+        st.current_projection = CurrentProjection(
             filename,
             text,
             voice,
-            _piece_count(text),
             skip_initial_gap=(
-                st.current.skip_initial_gap if st.current is not None else False
+                st.current_projection.skip_initial_gap if st.current_projection is not None else False
             ),
         )
         return True
@@ -1279,16 +1420,12 @@ def update_current_piece(
 ) -> bool:
     """Advance progress only while the buffered piece still owns Current."""
     with st.lock:
-        current = st.current
+        current = st.current_projection
         if current is None or current.filename != expected_filename:
             return False
-        st.current = CurrentProjection(
-            current.filename,
-            current.text,
-            current.voice,
-            current.piece_count,
-            ActivePiece(piece, piece_start, piece_end),
-            current.skip_initial_gap,
+        st.current_projection = replace(
+            current,
+            active_piece=ActivePiece(piece, piece_start, piece_end),
         )
         return True
 
@@ -1296,31 +1433,24 @@ def update_current_piece(
 def consume_initial_gap_skip(st: State, expected_filename: str) -> bool:
     """Consume the one-shot gap skip attached to a selected Current row."""
     with st.lock:
-        current = st.current
+        current = st.current_projection
         if (
             current is None
             or current.filename != expected_filename
             or not current.skip_initial_gap
         ):
             return False
-        st.current = CurrentProjection(
-            current.filename,
-            current.text,
-            current.voice,
-            current.piece_count,
-            current.active_piece,
-            False,
-        )
+        st.current_projection = replace(current, skip_initial_gap=False)
         return True
 
 
 def clear_current_playback(st: State, expected_filename: str | None) -> bool:
     """Clear Current only if it still matches the observed filename."""
     with st.lock:
-        current_filename = st.current.filename if st.current is not None else None
+        current_filename = st.current_projection.filename if st.current_projection is not None else None
         if current_filename != expected_filename:
             return False
-        st.current = None
+        st.current_projection = None
         return True
 
 
@@ -1408,58 +1538,6 @@ _last_status_updated_at = 0.0
 _status_failure_started: float | None = None
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def activate_next_chunk(st: State) -> bool:
     """Give queued work one current item before publishing or synthesizing it."""
     with st.lock:
@@ -1471,11 +1549,11 @@ def activate_next_chunk(st: State) -> bool:
             log(str(error))
             return False
         if not ordered:
-            if st.current is not None:
-                clear_current_playback(st, st.current.filename)
+            if st.current_projection is not None:
+                clear_current_playback(st, st.current_projection.filename)
             return False
         current = ordered[0]
-        if st.current is not None and st.current.filename == current.name:
+        if st.current_projection is not None and st.current_projection.filename == current.name:
             return False
         try:
             text = current.read_text(encoding="utf-8").strip()
@@ -1491,7 +1569,7 @@ def timeline_fingerprint(
     history_count: int,
     history_items: list[dict[str, object]],
 ) -> str:
-    """Hash the ordered timeline fields that define user-visible row placement."""
+    """Hash the ordered row IDs, voices, and History count shown to the user."""
     ordered_rows = {
         "current": (
             {"id": current.get("id"), "voice": current.get("voice")}
@@ -1574,20 +1652,24 @@ def publish_startup_status(timeline_revision: int) -> dict[str, object]:
             assert isinstance(candidate, dict)
             previous = candidate
 
-    payload = {
-        "version": STATUS_VERSION,
-        "timeline_revision": timeline_revision,
-        "state": "loading",
-        "updated_at": time.time(),
-        "engine_pid": os.getpid(),
-        "current": previous.get("current") if previous is not None else None,
-        "queue_count": previous.get("queue_count", 0) if previous is not None else 0,
-        "queue": previous.get("queue", []) if previous is not None else [],
-        "history_count": (
+    payload = _status_payload(
+        timeline_revision=timeline_revision,
+        state="loading",
+        updated_at=time.time(),
+        engine_pid=os.getpid(),
+        current=(
+            previous.get("current") if previous is not None else None
+        ),
+        queue_items=(
+            previous.get("queue", []) if previous is not None else []
+        ),
+        history_count=(
             previous.get("history_count", 0) if previous is not None else 0
         ),
-        "history": previous.get("history", []) if previous is not None else [],
-    }
+        history_items=(
+            previous.get("history", []) if previous is not None else []
+        ),
+    )
     publish_startup_json(STATUS, payload, "startup status")
     heartbeat(force=True)
     return payload
@@ -1614,7 +1696,7 @@ def publish_status(
 
     activate_next_chunk(st)
     with st.lock:
-        current_projection = st.current
+        current_projection = st.current_projection
 
     try:
         ordered_queue = queue_files_in_order()
@@ -1648,28 +1730,22 @@ def publish_status(
                 current_text = current_path.read_text(encoding="utf-8").strip()
             except OSError:
                 current_text = ""
-            current_voice = voice_from_name(current_path.name)
-            piece_count = _piece_count(current_text)
-            active_piece = None
+            status_projection = CurrentProjection(
+                current_path.name,
+                current_text,
+                voice_from_name(current_path.name),
+            )
         else:
-            current_text = current_projection.text
-            current_voice = current_projection.voice
-            piece_count = current_projection.piece_count
-            active_piece = current_projection.active_piece
-        current = {
-            "id": public_id_for_path(current_path),
-            "text": current_text or "",
-            "voice": current_voice or voice_from_name(current_path.name),
-            "piece": active_piece.piece if active_piece is not None else 0,
-            "piece_count": piece_count,
-            "piece_start": active_piece.start if active_piece is not None else None,
-            "piece_end": active_piece.end if active_piece is not None else None,
-            "elapsed_seconds": (
+            status_projection = current_projection
+        current = _current_status_item(
+            current_path,
+            status_projection,
+            (
                 playback.position / sample_rate
                 if is_playing_path and playback is not None and sample_rate
                 else 0.0
             ),
-        }
+        )
 
     if playback_state not in {"loading", "setup_required", "stopped"}:
         has_work = current is not None
@@ -1691,18 +1767,16 @@ def publish_status(
     )
     timeline_revision = _advance_timeline_revision(st, fingerprint)
 
-    payload = {
-        "version": STATUS_VERSION,
-        "timeline_revision": timeline_revision,
-        "state": playback_state,
-        "updated_at": updated_at,
-        "engine_pid": os.getpid(),
-        "current": current,
-        "queue_count": len(queue_items),
-        "queue": queue_items,
-        "history_count": history_count,
-        "history": history_items,
-    }
+    payload = _status_payload(
+        timeline_revision=timeline_revision,
+        state=playback_state,
+        updated_at=updated_at,
+        engine_pid=os.getpid(),
+        current=current,
+        queue_items=queue_items,
+        history_count=history_count,
+        history_items=history_items,
+    )
     temp_path = STATUS.with_name(
         f"{STATUS.name}.{os.getpid()}.{time.time_ns()}.tmp"
     )
@@ -1735,18 +1809,6 @@ def publish_status(
         except OSError:
             pass
     return None
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _discard_buffer(buf: "queue.Queue") -> int:
@@ -1791,20 +1853,6 @@ def _reset_waiting_buffer(
         return discarded
 
 
-def _archive_older_queue_items(target: Path) -> list[Path]:
-    """Archive the current chunk and each older waiting chunk before target."""
-    ordered = queue_files_in_order()
-    try:
-        target_index = ordered.index(target)
-    except ValueError as error:
-        raise ValueError(f"waiting chunk not found: {target.stem}") from error
-
-    archived = ordered[:target_index]
-    if not _archive_many(archived):
-        raise RuntimeError("could not archive older waiting chunks")
-    return archived
-
-
 def apply_play_mutation(
     buf: "queue.Queue",
     st: State,
@@ -1822,86 +1870,26 @@ def _apply_play_mutation_locked(
 ) -> str | None:
     chunk_id = request.id
     requested_voice = request.voice
-
-    ordered_queue = queue_files_in_order()
-    current_path = ordered_queue[0] if ordered_queue else None
-    if (
-        current_path is not None
-        and public_id_for_path(current_path) == chunk_id
-        and (
-            requested_voice is None
-            or requested_voice == voice_from_name(current_path.name)
-        )
+    if requested_voice is not None and (
+        AVAILABLE_VOICES and requested_voice not in AVAILABLE_VOICES
     ):
+        raise ValueError(f"unknown Kokoro voice: {requested_voice}")
+    try:
+        selection = timeline.select(chunk_id, requested_voice)
+    except MutationOutcomeUnconfirmed as error:
+        log(f"selection outcome is unconfirmed for {chunk_id}: {error}")
+        st.stop.set()
+        raise
+    except ValueError as error:
+        log(f"could not select {chunk_id}: {error}")
+        raise
+    except (OSError, RuntimeError) as error:
+        log(f"could not select {chunk_id}: {error}")
+        raise RuntimeError(f"could not select {chunk_id}") from error
+    if not selection.restart_playback:
         log(f"PLAY current {chunk_id}; accepted")
         return None
-
-    target = next(
-        (path for path in ordered_queue if public_id_for_path(path) == chunk_id),
-        None,
-    )
-    replayed_from: Path | None = None
-    promoted_history_count = 0
-    if target is None:
-        replayed_from = _find_chunk(SPOKEN, chunk_id)
-        if replayed_from is not None:
-            try:
-                target, promoted_history_count = promote_history_selection(
-                    replayed_from,
-                    requested_voice,
-                )
-            except MutationOutcomeUnconfirmed as error:
-                log(f"History selection outcome is unconfirmed for {chunk_id}: {error}")
-                st.stop.set()
-                raise
-            except (OSError, RuntimeError, ValueError) as error:
-                log(f"could not replay {chunk_id}: {error}")
-                raise RuntimeError(f"could not replay {chunk_id}") from error
-    if target is None:
-        log(f"PLAY ignored; chunk not found: {chunk_id}")
-        raise ValueError(f"chunk not found: {chunk_id}")
-
-    voice_original: Path | None = None
-    if (
-        replayed_from is None
-        and requested_voice
-        and requested_voice != voice_from_name(target.name)
-    ):
-        original = target
-        voice_original = original
-        try:
-            target = _replace_queue_voice(original, requested_voice)
-        except MutationOutcomeUnconfirmed as error:
-            log(f"voice change outcome is unconfirmed for {chunk_id}: {error}")
-            st.stop.set()
-            raise
-        except (OSError, RuntimeError, ValueError) as error:
-            log(f"could not change voice for {chunk_id}: {error}")
-            raise RuntimeError(f"could not change voice for {chunk_id}") from error
-
-    archived: list[Path] = []
-    if replayed_from is None:
-        try:
-            archived = _archive_older_queue_items(target)
-        except (RuntimeError, ValueError) as error:
-            outcome_unconfirmed = isinstance(error, MutationOutcomeUnconfirmed)
-            if voice_original is not None:
-                rollback_errors = []
-                try:
-                    _replace_queue_voice(target, voice_from_name(voice_original.name))
-                except (OSError, RuntimeError, ValueError) as rollback_error:
-                    rollback_errors.append(str(rollback_error))
-                if rollback_errors:
-                    log(f"voice selection rollback error: {'; '.join(rollback_errors)}")
-                    outcome_unconfirmed = True
-            if outcome_unconfirmed:
-                log(f"selection outcome is unconfirmed for {chunk_id}: {error}")
-                st.stop.set()
-                raise MutationOutcomeUnconfirmed(
-                    "play command result was unconfirmed"
-                ) from error
-            log(f"could not select {chunk_id}: {error}")
-            raise RuntimeError(f"could not select {chunk_id}") from error
+    target = selection.target
 
     try:
         selected_text = target.read_text(encoding="utf-8").strip()
@@ -1924,15 +1912,15 @@ def _apply_play_mutation_locked(
     if public_id_for_path(target) != chunk_id:
         st.stop.set()
         raise MutationOutcomeUnconfirmed("play changed the stable Speechicle ID")
-    if replayed_from is None:
+    if selection.origin != "history":
         log(
-            f"PLAY selected {target.name}; archived {len(archived)} older chunk(s); "
+            f"PLAY selected {target.name}; archived {selection.moved_count} older chunk(s); "
             f"discarded {discarded} banked piece(s)"
         )
     else:
         log(
-            f"PLAY History {replayed_from.name} as {target.name}; "
-            f"promoted {promoted_history_count} item(s); "
+            f"PLAY History {chunk_id} as {target.name}; "
+            f"promoted {selection.moved_count} item(s); "
             f"discarded {discarded} banked piece(s)"
         )
     return "select"
@@ -1969,7 +1957,7 @@ def do_clear(buf: "queue.Queue", st: State) -> bool:
             log("clear could not archive the timeline; stopping")
             return False
         st.claims.clear()
-        current_name = st.current.filename if st.current is not None else None
+        current_name = st.current_projection.filename if st.current_projection is not None else None
         clear_current_playback(st, current_name)
     log(f"clear; archived {len(ordered)} row(s), dropped {discarded} piece(s)")
     return True
@@ -2084,7 +2072,12 @@ def process_mutation_requests(
     effect: str | None = None
     invalidate_held_chunk = False
     while not st.stop.is_set():
-        claimed = claim_next_mutation_request()
+        try:
+            claimed = claim_next_mutation_request()
+        except MutationOutcomeUnconfirmed as error:
+            st.stop.set()
+            log(f"mutation claim outcome is unconfirmed: {error}")
+            break
         if claimed is None:
             break
         request_id = request_id_from_claim_path(claimed)
@@ -2201,7 +2194,12 @@ def process_mutation_requests(
 def reject_pending_requests(reason: str, st: State) -> None:
     """Give every published mutation a terminal result before the engine exits."""
     while not st.stop.is_set():
-        claimed = claim_next_mutation_request()
+        try:
+            claimed = claim_next_mutation_request()
+        except MutationOutcomeUnconfirmed as error:
+            st.stop.set()
+            log(f"mutation claim outcome is unconfirmed: {error}")
+            return
         if claimed is None:
             return
         request_id = request_id_from_claim_path(claimed)
@@ -2663,7 +2661,7 @@ def run_engine_loop(
                 log("engine stopping after a storage failure")
                 return
             with st.lock:
-                playing = st.current.filename if st.current is not None else None
+                playing = st.current_projection.filename if st.current_projection is not None else None
             if not playing and (st.saw_stop or consume_ordered_marker(STOP)):
                 reject_pending_requests(
                     "engine stopped before command was applied", st
@@ -2679,7 +2677,7 @@ def run_engine_loop(
                 return
             if consume_control(SKIP):
                 with st.lock:
-                    current_name = st.current.filename if st.current is not None else None
+                    current_name = st.current_projection.filename if st.current_projection is not None else None
                 current_path = QUEUE / current_name if current_name else None
                 if current_path is not None and current_path.exists():
                     finish_chunk_playback(current_path, "skip", True, st)
@@ -2800,7 +2798,7 @@ def run_engine_loop(
     finally:
         st.stop.set()
         with st.lock:
-            current_name = st.current.filename if st.current is not None else None
+            current_name = st.current_projection.filename if st.current_projection is not None else None
             clear_current_playback(st, current_name)
         publish_status("stopped", st, force=True)
         try:
@@ -2890,8 +2888,9 @@ def _contains_private_status_field(value: object) -> bool:
 
 
 def _stopped_status_payload() -> dict[str, object]:
+    ordered_queue = queue_files_in_order()
     queue_items = []
-    for path in queue_files_in_order():
+    for path in ordered_queue:
         try:
             text = path.read_text(encoding="utf-8").strip()
         except OSError:
@@ -2906,26 +2905,24 @@ def _stopped_status_payload() -> dict[str, object]:
     current = None
     if queue_items:
         boundary = queue_items.pop(0)
-        current = {
-            **boundary,
-            "piece": 0,
-            "piece_count": len(split_text(str(boundary["text"]), SPLIT_CHARS)),
-            "piece_start": None,
-            "piece_end": None,
-            "elapsed_seconds": 0.0,
-        }
-    return {
-        "version": STATUS_VERSION,
-        "timeline_revision": 0,
-        "state": "stopped",
-        "updated_at": 0,
-        "engine_pid": None,
-        "current": current,
-        "queue_count": len(queue_items),
-        "queue": queue_items,
-        "history_count": len(list(SPOKEN.glob("*.txt"))),
-        "history": [],
-    }
+        current_path = ordered_queue[0]
+        projection = CurrentProjection(
+            current_path.name,
+            str(boundary["text"]),
+            str(boundary["voice"]),
+        )
+        current = _current_status_item(current_path, projection)
+    history_count, history_items = history_snapshot()
+    return _status_payload(
+        timeline_revision=0,
+        state="stopped",
+        updated_at=0,
+        engine_pid=None,
+        current=current,
+        queue_items=queue_items,
+        history_count=history_count,
+        history_items=history_items,
+    )
 
 
 def print_status() -> None:
@@ -3075,8 +3072,22 @@ def cli(argv: list[str] | None = None) -> int:
                 raise ValueError(f"invalid mutation JSON: {error}") from error
             request = parse_cli_mutation(mutation_payload, request_id)
             start_engine()
+            previous_snapshot = _read_authoritative_status()
             request_mutation(request)
-            print(json.dumps(wait_for_mutation_result(request_id), ensure_ascii=False))
+            try:
+                result = wait_for_mutation_result(request_id)
+            except MutationOutcomeUnconfirmed as error:
+                try:
+                    snapshot = _read_authoritative_status()
+                except RuntimeError:
+                    snapshot = previous_snapshot
+                result = _mutation_result_payload(
+                    request_id,
+                    "unconfirmed",
+                    snapshot,
+                    error=str(error),
+                )
+            print(json.dumps(result, ensure_ascii=False))
         elif args.command == "clear":
             start_engine()
             request_id = request_mutation(build_mutation_request("clear"))

@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
-import sys
 from pathlib import Path
 
 import pytest
 
-ENGINE_SOURCE = Path(__file__).parents[1] / "skills" / "super-speech" / "engine"
-sys.path.insert(0, str(ENGINE_SOURCE))
+from engine_test_support import configure_runtime as configure_engine_runtime
+from engine_test_support import load_engine
 
 from speechicle_identity import (
     IdentityCatalog,
@@ -20,32 +18,8 @@ from speechicle_identity import (
 import timeline_storage as timeline_storage_module
 
 
-def load_engine(module_name: str):
-    module_path = ENGINE_SOURCE / "super_speech_engine.py"
-    spec = importlib.util.spec_from_file_location(module_name, module_path)
-    assert spec and spec.loader
-    engine = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(engine)
-    return engine
-
-
 def configure_runtime(engine, tmp_path: Path) -> None:
-    engine.BASE = tmp_path
-    engine.QUEUE = tmp_path / "queue"
-    engine.SPOKEN = tmp_path / "spoken"
-    engine.FAILED = tmp_path / "failed"
-    engine.LOG = tmp_path / "log.txt"
-    engine.QUEUE_ORDER = tmp_path / "queue-order.json"
-    engine.HISTORY_ORDER = tmp_path / "history-order.json"
-    engine.STATUS = tmp_path / "status.json"
-    engine.STATUS_FAILURE = tmp_path / "status.failed"
-    engine.STORAGE_READY = tmp_path / "storage-ready.json"
-    engine.INSTANCE_LOCK = tmp_path / "engine.lock"
-    engine.TIMELINE_LOCK = tmp_path / "timeline.lock"
-    engine.TIMELINE_INTENT = tmp_path / "timeline-intent.json"
-    engine.IDENTITY_INDEX = tmp_path / "speechicle-index.json"
-    engine.TIMELINE_PATHS = engine.TimelinePaths(tmp_path)
-    engine.timeline = engine.TimelineStorage(engine.TIMELINE_PATHS, engine.DEFAULT_VOICE)
+    configure_engine_runtime(engine, tmp_path, create_directories=False)
 
 
 def canonical_name(
@@ -84,22 +58,22 @@ def planned_legacy_embed(engine, *, write_intent: bool = True):
     second.write_text("Second", encoding="utf-8")
     third.write_text("Third", encoding="utf-8")
     write_catalog(
-        engine.IDENTITY_INDEX,
+        engine.timeline.paths.legacy_identity_index,
         IdentityCatalog(4, {1: first_id, 2: second_id, 3: third_id}),
     )
-    engine.QUEUE_ORDER.write_text(
+    engine.timeline.paths.queue_order.write_text(
         json.dumps({"version": 2, "ids": [first_id]}), encoding="utf-8"
     )
-    engine.HISTORY_ORDER.write_text(
+    engine.timeline.paths.history_order.write_text(
         json.dumps({"version": 2, "ids": [second_id]}), encoding="utf-8"
     )
     migration = plan_embed_public_ids(
         engine.QUEUE,
         engine.SPOKEN,
         engine.FAILED,
-        engine.QUEUE_ORDER,
-        engine.HISTORY_ORDER,
-        engine.IDENTITY_INDEX,
+        engine.timeline.paths.queue_order,
+        engine.timeline.paths.history_order,
+        engine.timeline.paths.legacy_identity_index,
         engine.DEFAULT_VOICE,
     )
     assert migration is not None
@@ -143,27 +117,27 @@ def test_canonical_preparation_repairs_membership_and_removes_stale_catalog(
     older = engine.SPOKEN / canonical_name(2, "2")
     for path in (current, waiting, newer, older):
         path.write_text(path.stem, encoding="utf-8")
-    engine.QUEUE_ORDER.write_text(
+    engine.timeline.paths.queue_order.write_text(
         json.dumps({"version": 2, "ids": [current.name.split("-")[1], f"sp_{'f' * 32}"]}),
         encoding="utf-8",
     )
-    engine.HISTORY_ORDER.write_text(
+    engine.timeline.paths.history_order.write_text(
         json.dumps({"version": 2, "ids": [older.name.split("-")[1]]}),
         encoding="utf-8",
     )
-    engine.IDENTITY_INDEX.write_text("corrupt stale catalog", encoding="utf-8")
+    engine.timeline.paths.legacy_identity_index.write_text("corrupt stale catalog", encoding="utf-8")
 
     prepare(engine)
 
-    assert read_ids(engine.QUEUE_ORDER) == [
+    assert read_ids(engine.timeline.paths.queue_order) == [
         current.name.split("-")[1],
         waiting.name.split("-")[1],
     ]
-    assert read_ids(engine.HISTORY_ORDER) == [
+    assert read_ids(engine.timeline.paths.history_order) == [
         newer.name.split("-")[1],
         older.name.split("-")[1],
     ]
-    assert not engine.IDENTITY_INDEX.exists()
+    assert not engine.timeline.paths.legacy_identity_index.exists()
 
 
 def test_interrupted_embed_converges_before_deleting_catalog(tmp_path: Path) -> None:
@@ -178,22 +152,22 @@ def test_interrupted_embed_converges_before_deleting_catalog(tmp_path: Path) -> 
     first.write_text("First", encoding="utf-8")
     second.write_text("Second", encoding="utf-8")
     write_catalog(
-        engine.IDENTITY_INDEX,
+        engine.timeline.paths.legacy_identity_index,
         IdentityCatalog(3, {1: first_id, 2: second_id}),
     )
-    engine.QUEUE_ORDER.write_text(
+    engine.timeline.paths.queue_order.write_text(
         json.dumps({"version": 2, "ids": [first_id]}), encoding="utf-8"
     )
-    engine.HISTORY_ORDER.write_text(
+    engine.timeline.paths.history_order.write_text(
         json.dumps({"version": 2, "ids": [second_id]}), encoding="utf-8"
     )
     migration = plan_embed_public_ids(
         engine.QUEUE,
         engine.SPOKEN,
         engine.FAILED,
-        engine.QUEUE_ORDER,
-        engine.HISTORY_ORDER,
-        engine.IDENTITY_INDEX,
+        engine.timeline.paths.queue_order,
+        engine.timeline.paths.history_order,
+        engine.timeline.paths.legacy_identity_index,
         engine.DEFAULT_VOICE,
     )
     assert migration is not None
@@ -209,8 +183,8 @@ def test_interrupted_embed_converges_before_deleting_catalog(tmp_path: Path) -> 
     assert {path.name for path in engine.SPOKEN.glob("*.txt")} == {
         migration.history_files[0].target_name
     }
-    assert not engine.TIMELINE_INTENT.exists()
-    assert not engine.IDENTITY_INDEX.exists()
+    assert not engine.timeline.paths.intent.exists()
+    assert not engine.timeline.paths.legacy_identity_index.exists()
 
 
 @pytest.mark.parametrize(
@@ -269,7 +243,7 @@ def test_embed_recovery_converges_from_each_durable_checkpoint(
         )
     elif checkpoint in {"history_order", "queue_order"}:
         crash_path = (
-            engine.HISTORY_ORDER if checkpoint == "history_order" else engine.QUEUE_ORDER
+            engine.timeline.paths.history_order if checkpoint == "history_order" else engine.timeline.paths.queue_order
         )
 
         def crash_after_order(
@@ -283,7 +257,7 @@ def test_embed_recovery_converges_from_each_durable_checkpoint(
     else:
         def crash_after_catalog_delete(path: Path, *args, **kwargs) -> None:
             real_unlink(path, *args, **kwargs)
-            if path == engine.IDENTITY_INDEX:
+            if path == engine.timeline.paths.legacy_identity_index:
                 raise RuntimeError("simulated crash")
 
         monkeypatch.setattr(Path, "unlink", crash_after_catalog_delete)
@@ -295,7 +269,7 @@ def test_embed_recovery_converges_from_each_durable_checkpoint(
             engine.prepare_timeline_storage(instance_lock)
     finally:
         instance_lock.release()
-    assert engine.TIMELINE_INTENT.exists()
+    assert engine.timeline.paths.intent.exists()
     monkeypatch.undo()
 
     recovered = load_engine(f"embedded_identity_checkpoint_recovered_{checkpoint}")
@@ -311,10 +285,10 @@ def test_embed_recovery_converges_from_each_durable_checkpoint(
     assert {path.name for path in recovered.FAILED.glob("*.txt")} == {
         item.target_name for item in migration.failed_files
     }
-    assert read_ids(recovered.QUEUE_ORDER) == list(migration.queue_ids)
-    assert read_ids(recovered.HISTORY_ORDER) == list(migration.history_ids)
-    assert not recovered.IDENTITY_INDEX.exists()
-    assert not recovered.TIMELINE_INTENT.exists()
+    assert read_ids(recovered.timeline.paths.queue_order) == list(migration.queue_ids)
+    assert read_ids(recovered.timeline.paths.history_order) == list(migration.history_ids)
+    assert not recovered.timeline.paths.legacy_identity_index.exists()
+    assert not recovered.timeline.paths.intent.exists()
 
 
 def test_embed_recovery_is_repeatable_after_journal_cleanup_fails(
@@ -327,7 +301,7 @@ def test_embed_recovery_is_repeatable_after_journal_cleanup_fails(
     real_unlink = Path.unlink
 
     def block_journal(path: Path, *args, **kwargs) -> None:
-        if path == engine.TIMELINE_INTENT:
+        if path == engine.timeline.paths.intent:
             raise PermissionError("journal locked")
         real_unlink(path, *args, **kwargs)
 
@@ -340,13 +314,13 @@ def test_embed_recovery_is_repeatable_after_journal_cleanup_fails(
     finally:
         instance_lock.release()
 
-    assert engine.TIMELINE_INTENT.exists()
-    assert not engine.IDENTITY_INDEX.exists()
+    assert engine.timeline.paths.intent.exists()
+    assert not engine.timeline.paths.legacy_identity_index.exists()
     monkeypatch.setattr(Path, "unlink", real_unlink)
     prepare(engine)
-    assert read_ids(engine.QUEUE_ORDER) == list(migration.queue_ids)
-    assert read_ids(engine.HISTORY_ORDER) == list(migration.history_ids)
-    assert not engine.TIMELINE_INTENT.exists()
+    assert read_ids(engine.timeline.paths.queue_order) == list(migration.queue_ids)
+    assert read_ids(engine.timeline.paths.history_order) == list(migration.history_ids)
+    assert not engine.timeline.paths.intent.exists()
 
 
 def test_embed_hash_mismatch_stops_before_another_file_moves(tmp_path: Path) -> None:
@@ -358,8 +332,8 @@ def test_embed_hash_mismatch_stops_before_another_file_moves(tmp_path: Path) -> 
     moved.write_text("Tampered", encoding="utf-8")
     untouched = engine.SPOKEN / migration.history_files[0].source_name
     original_orders = {
-        engine.QUEUE_ORDER: engine.QUEUE_ORDER.read_bytes(),
-        engine.HISTORY_ORDER: engine.HISTORY_ORDER.read_bytes(),
+        engine.timeline.paths.queue_order: engine.timeline.paths.queue_order.read_bytes(),
+        engine.timeline.paths.history_order: engine.timeline.paths.history_order.read_bytes(),
     }
 
     instance_lock = engine.EngineInstanceLock()
@@ -373,8 +347,8 @@ def test_embed_hash_mismatch_stops_before_another_file_moves(tmp_path: Path) -> 
     assert moved.read_text(encoding="utf-8") == "Tampered"
     assert untouched.read_text(encoding="utf-8") == "Second"
     assert all(path.read_bytes() == payload for path, payload in original_orders.items())
-    assert engine.IDENTITY_INDEX.exists()
-    assert engine.TIMELINE_INTENT.exists()
+    assert engine.timeline.paths.legacy_identity_index.exists()
+    assert engine.timeline.paths.intent.exists()
 
 
 def test_embed_recovery_accepts_an_already_removed_exact_replay_duplicate(
@@ -393,10 +367,10 @@ def test_embed_recovery_accepts_an_already_removed_exact_replay_duplicate(
     duplicate.write_bytes(b"same")
     promoted.write_bytes(b"promoted")
     older.write_bytes(b"older")
-    engine.QUEUE_ORDER.write_text(
+    engine.timeline.paths.queue_order.write_text(
         json.dumps({"version": 1, "ids": [active.stem]}), encoding="utf-8"
     )
-    engine.HISTORY_ORDER.write_text(
+    engine.timeline.paths.history_order.write_text(
         json.dumps(
             {
                 "version": 1,
@@ -409,9 +383,9 @@ def test_embed_recovery_accepts_an_already_removed_exact_replay_duplicate(
         engine.QUEUE,
         engine.SPOKEN,
         engine.FAILED,
-        engine.QUEUE_ORDER,
-        engine.HISTORY_ORDER,
-        engine.IDENTITY_INDEX,
+        engine.timeline.paths.queue_order,
+        engine.timeline.paths.history_order,
+        engine.timeline.paths.legacy_identity_index,
         engine.DEFAULT_VOICE,
     )
     assert migration is not None and len(migration.removals) == 1
@@ -436,14 +410,14 @@ def test_embed_recovery_accepts_an_already_removed_exact_replay_duplicate(
     finally:
         instance_lock.release()
     assert not duplicate.exists()
-    assert engine.TIMELINE_INTENT.exists()
+    assert engine.timeline.paths.intent.exists()
     monkeypatch.undo()
 
     recovered = load_engine("embedded_identity_removed_duplicate_recovered")
     configure_runtime(recovered, tmp_path)
     prepare(recovered)
 
-    assert not recovered.TIMELINE_INTENT.exists()
+    assert not recovered.timeline.paths.intent.exists()
     queue_files = {path.name: path for path in recovered.QUEUE.glob("*.txt")}
     history_files = {path.name: path for path in recovered.SPOKEN.glob("*.txt")}
     assert set(queue_files) == {item.target_name for item in migration.queue_files}
@@ -454,8 +428,8 @@ def test_embed_recovery_accepts_an_already_removed_exact_replay_duplicate(
         path.read_bytes() for path in [*queue_files.values(), *history_files.values()]
     ]
     assert sorted(final_text) == sorted([b"same", b"promoted", b"older"])
-    assert read_ids(recovered.QUEUE_ORDER) == list(migration.queue_ids)
-    assert read_ids(recovered.HISTORY_ORDER) == list(migration.history_ids)
+    assert read_ids(recovered.timeline.paths.queue_order) == list(migration.queue_ids)
+    assert read_ids(recovered.timeline.paths.history_order) == list(migration.history_ids)
 
 
 def test_embed_keeps_catalog_and_journal_until_order_validation_succeeds(
@@ -469,8 +443,8 @@ def test_embed_keeps_catalog_and_journal_until_order_validation_succeeds(
     public_id = f"sp_{'3' * 32}"
     legacy = engine.QUEUE / "003-af_heart-say.txt"
     legacy.write_text("Keep recovery evidence", encoding="utf-8")
-    write_catalog(engine.IDENTITY_INDEX, IdentityCatalog(4, {3: public_id}))
-    engine.QUEUE_ORDER.write_text(
+    write_catalog(engine.timeline.paths.legacy_identity_index, IdentityCatalog(4, {3: public_id}))
+    engine.timeline.paths.queue_order.write_text(
         json.dumps({"version": 2, "ids": [public_id]}), encoding="utf-8"
     )
 
@@ -487,8 +461,8 @@ def test_embed_keeps_catalog_and_journal_until_order_validation_succeeds(
     finally:
         instance_lock.release()
 
-    assert engine.TIMELINE_INTENT.exists()
-    assert engine.IDENTITY_INDEX.exists()
+    assert engine.timeline.paths.intent.exists()
+    assert engine.timeline.paths.legacy_identity_index.exists()
 
 
 def test_catalog_free_allocation_and_metadata_use_canonical_filenames(
@@ -500,7 +474,7 @@ def test_catalog_free_allocation_and_metadata_use_canonical_filenames(
 
     first = engine.enqueue_text("First", "af_heart", 250)
     first_filename = SpeechicleFilename.parse(first.name)
-    assert not engine.IDENTITY_INDEX.exists()
+    assert not engine.timeline.paths.legacy_identity_index.exists()
     assert engine.public_id_for_path(first) == first_filename.public_id
     assert engine.voice_from_name(first.name) == "af_heart"
     assert engine.gap_from_name(first.name) == 0.25
@@ -510,12 +484,12 @@ def test_catalog_free_allocation_and_metadata_use_canonical_filenames(
     second_filename = SpeechicleFilename.parse(second.name)
     assert second_filename.sequence == first_filename.sequence + 1
     assert second_filename.public_id != first_filename.public_id
-    assert engine._find_chunk(engine.QUEUE, second_filename.public_id) == second
-    changed = engine._replace_queue_voice(second, "af_heart")
+    assert engine.timeline.find(engine.QUEUE, second_filename.public_id) == second
+    changed = engine.timeline.replace_queue_voice(second, "af_heart")
     changed_filename = SpeechicleFilename.parse(changed.name)
     assert changed_filename.public_id == second_filename.public_id
     assert changed_filename.voice == "af_heart"
-    assert not engine.IDENTITY_INDEX.exists()
+    assert not engine.timeline.paths.legacy_identity_index.exists()
 
 
 def test_missing_catalog_rejects_pending_v2_plan_before_storage_write(
@@ -544,7 +518,7 @@ def test_missing_catalog_rejects_pending_v2_plan_before_storage_write(
         "queue_ids": [],
         "history_ids": [public_id],
     }
-    engine.TIMELINE_INTENT.write_text(json.dumps(intent), encoding="utf-8")
+    engine.timeline.paths.intent.write_text(json.dumps(intent), encoding="utf-8")
 
     instance_lock = engine.EngineInstanceLock()
     assert instance_lock.acquire()
@@ -556,7 +530,7 @@ def test_missing_catalog_rejects_pending_v2_plan_before_storage_write(
 
     assert source.exists()
     assert not (engine.SPOKEN / source.name).exists()
-    assert json.loads(engine.TIMELINE_INTENT.read_text(encoding="utf-8")) == intent
+    assert json.loads(engine.timeline.paths.intent.read_text(encoding="utf-8")) == intent
 
 
 @pytest.mark.parametrize(
@@ -579,10 +553,10 @@ def test_fresh_cutover_rejects_unprovable_v2_orders_before_writing(
     legacy.write_text("Keep the original identity", encoding="utf-8")
     public_id = f"sp_{'7' * 32}"
     ids = [public_id] if sidecar_problem == "missing_catalog" else [public_id, public_id]
-    engine.QUEUE_ORDER.write_text(
+    engine.timeline.paths.queue_order.write_text(
         json.dumps({"version": 2, "ids": ids}), encoding="utf-8"
     )
-    original_order = engine.QUEUE_ORDER.read_bytes()
+    original_order = engine.timeline.paths.queue_order.read_bytes()
 
     instance_lock = engine.EngineInstanceLock()
     assert instance_lock.acquire()
@@ -593,9 +567,9 @@ def test_fresh_cutover_rejects_unprovable_v2_orders_before_writing(
         instance_lock.release()
 
     assert legacy.read_text(encoding="utf-8") == "Keep the original identity"
-    assert engine.QUEUE_ORDER.read_bytes() == original_order
-    assert not engine.IDENTITY_INDEX.exists()
-    assert not engine.TIMELINE_INTENT.exists()
+    assert engine.timeline.paths.queue_order.read_bytes() == original_order
+    assert not engine.timeline.paths.legacy_identity_index.exists()
+    assert not engine.timeline.paths.intent.exists()
 
 
 def test_fresh_cutover_refuses_to_generate_ids_beside_a_durable_mutation(
@@ -620,8 +594,8 @@ def test_fresh_cutover_refuses_to_generate_ids_beside_a_durable_mutation(
 
     assert legacy.read_text(encoding="utf-8") == "Do not guess"
     assert durable_mutation.read_text(encoding="utf-8") == "{}"
-    assert not engine.IDENTITY_INDEX.exists()
-    assert not engine.TIMELINE_INTENT.exists()
+    assert not engine.timeline.paths.legacy_identity_index.exists()
+    assert not engine.timeline.paths.intent.exists()
 
 
 def test_fresh_v1_storage_cuts_over_directly_to_canonical_filenames(
@@ -635,10 +609,10 @@ def test_fresh_v1_storage_cuts_over_directly_to_canonical_filenames(
     earlier = engine.SPOKEN / "002-bm_fable-say.txt"
     waiting.write_text("Waiting", encoding="utf-8")
     earlier.write_text("Earlier", encoding="utf-8")
-    engine.QUEUE_ORDER.write_text(
+    engine.timeline.paths.queue_order.write_text(
         json.dumps({"version": 1, "ids": [waiting.stem]}), encoding="utf-8"
     )
-    engine.HISTORY_ORDER.write_text(
+    engine.timeline.paths.history_order.write_text(
         json.dumps({"version": 1, "ids": [earlier.stem]}), encoding="utf-8"
     )
 
@@ -649,7 +623,7 @@ def test_fresh_v1_storage_cuts_over_directly_to_canonical_filenames(
     assert len(canonical_queue) == len(canonical_history) == 1
     queue_name = SpeechicleFilename.parse(canonical_queue[0].name)
     history_name = SpeechicleFilename.parse(canonical_history[0].name)
-    assert read_ids(engine.QUEUE_ORDER) == [queue_name.public_id]
-    assert read_ids(engine.HISTORY_ORDER) == [history_name.public_id]
-    assert not engine.IDENTITY_INDEX.exists()
-    assert not engine.TIMELINE_INTENT.exists()
+    assert read_ids(engine.timeline.paths.queue_order) == [queue_name.public_id]
+    assert read_ids(engine.timeline.paths.history_order) == [history_name.public_id]
+    assert not engine.timeline.paths.legacy_identity_index.exists()
+    assert not engine.timeline.paths.intent.exists()

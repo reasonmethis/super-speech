@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import platform
 import shutil
@@ -13,6 +12,9 @@ from pathlib import Path
 
 
 SOURCE_SKILL = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SOURCE_SKILL / "engine"))
+
+from file_lock import InterprocessFileLock
 
 
 def default_skill_directory(agent: str) -> Path:
@@ -40,70 +42,19 @@ def engine_environment(runtime: Path) -> dict[str, str]:
     }
 
 
-def process_exists(process_id: object) -> bool:
-    if not isinstance(process_id, int) or process_id <= 0:
-        return False
-    if os.name == "nt":
-        import ctypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        open_process = kernel32.OpenProcess
-        open_process.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
-        open_process.restype = ctypes.c_void_p
-        close_handle = kernel32.CloseHandle
-        close_handle.argtypes = [ctypes.c_void_p]
-        close_handle.restype = ctypes.c_int
-        handle = open_process(0x1000, False, process_id)
-        if not handle:
-            return False
-        close_handle(handle)
-        return True
-    try:
-        os.kill(process_id, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
-
-
 def engine_lock_is_held(runtime: Path) -> bool:
     lock_path = runtime / "engine.lock"
-    try:
-        if not lock_path.is_file() or lock_path.stat().st_size == 0:
-            return False
-        lock_file = lock_path.open("r+b")
-    except OSError:
+    if not lock_path.is_file():
+        return False
+    lock = InterprocessFileLock(lock_path)
+    if not lock.acquire():
         return True
-    lock_file.seek(0)
-    try:
-        if os.name == "nt":
-            import msvcrt
-
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-    except OSError:
-        return True
-    finally:
-        lock_file.close()
+    lock.release()
     return False
 
 
 def runtime_engine_is_active(runtime: Path) -> bool:
-    if (runtime / "engine.alive").exists() or engine_lock_is_held(runtime):
-        return True
-    try:
-        status = json.loads((runtime / "status.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError):
-        return False
-    return isinstance(status, dict) and process_exists(status.get("engine_pid"))
+    return engine_lock_is_held(runtime)
 
 
 def stop_existing_engine(engine: Path, runtime: Path) -> None:
@@ -129,6 +80,18 @@ def stop_existing_engine(engine: Path, runtime: Path) -> None:
             break
         time.sleep(0.1)
     raise RuntimeError("the existing headless engine did not stop before upgrade")
+
+
+def acquire_engine_upgrade_lock(engine: Path, runtime: Path) -> InterprocessFileLock:
+    deadline = time.monotonic() + 10
+    while True:
+        stop_existing_engine(engine, runtime)
+        lock = InterprocessFileLock(runtime / "engine.lock")
+        if lock.acquire():
+            return lock
+        if time.monotonic() >= deadline:
+            raise RuntimeError("could not reserve the headless engine for upgrade")
+        time.sleep(0.1)
 
 
 def validate_platform() -> None:
@@ -169,30 +132,34 @@ def install(destination: Path) -> Path:
 
     runtime = destination / "runtime"
     environment = runtime / "venv"
-    stop_existing_engine(engine_command(environment), runtime)
-    if not virtualenv_python(environment).is_file():
-        venv.EnvBuilder(with_pip=True).create(environment)
-
-    python = virtualenv_python(environment)
-    subprocess.run(
-        [
-            str(python),
-            "-m",
-            "pip",
-            "install",
-            "--disable-pip-version-check",
-            "--no-cache-dir",
-            "--upgrade",
-            str(destination / "engine"),
-        ],
-        check=True,
-    )
     engine = engine_command(environment)
-    subprocess.run(
-        [str(engine), "setup"],
-        check=True,
-        env=engine_environment(runtime),
-    )
+    upgrade_lock = acquire_engine_upgrade_lock(engine, runtime)
+    try:
+        if not virtualenv_python(environment).is_file():
+            venv.EnvBuilder(with_pip=True).create(environment)
+
+        python = virtualenv_python(environment)
+        subprocess.run(
+            [
+                str(python),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-cache-dir",
+                "--upgrade",
+                str(destination / "engine"),
+            ],
+            check=True,
+        )
+        engine = engine_command(environment)
+        subprocess.run(
+            [str(engine), "setup"],
+            check=True,
+            env=engine_environment(runtime),
+        )
+    finally:
+        upgrade_lock.release()
     return engine
 
 

@@ -119,7 +119,7 @@ def test_stop_existing_engine_retries_during_status_before_heartbeat_startup(
     assert attempts == [[str(engine), "interrupt"], [str(engine), "interrupt"]]
 
 
-def test_status_detects_a_starting_engine_before_its_first_heartbeat(
+def test_status_without_an_owner_lock_does_not_block_an_upgrade(
     tmp_path: Path,
 ) -> None:
     installer = load_installer()
@@ -130,10 +130,51 @@ def test_status_detects_a_starting_engine_before_its_first_heartbeat(
         encoding="utf-8",
     )
 
-    assert installer.runtime_engine_is_active(runtime)
+    assert not installer.runtime_engine_is_active(runtime)
 
 
-def test_install_stops_the_engine_before_updating_its_environment(
+def test_stale_heartbeat_does_not_report_an_active_engine(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    installer = load_installer()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "engine.alive").write_text("stale", encoding="utf-8")
+    (runtime / "status.json").write_text(
+        json.dumps({"state": "stopped", "engine_pid": 123}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(installer, "engine_lock_is_held", lambda _runtime: False)
+    assert not installer.runtime_engine_is_active(runtime)
+
+
+def test_held_engine_lock_reports_an_active_owner(tmp_path: Path) -> None:
+    installer = load_installer()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    lock_path = runtime / "engine.lock"
+    lock_path.write_bytes(b"\0")
+
+    with lock_path.open("r+b") as lock_file:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            assert installer.runtime_engine_is_active(runtime)
+        finally:
+            lock_file.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def test_install_holds_the_engine_lock_while_updating_its_environment(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     installer = load_installer()
@@ -147,13 +188,22 @@ def test_install_stops_the_engine_before_updating_its_environment(
     calls: list[str] = []
 
     monkeypatch.setattr(installer, "copy_skill", lambda _destination: None)
+    held = True
+
+    def release() -> None:
+        nonlocal held
+        held = False
+        calls.append("unlock")
+
+    lock = SimpleNamespace(release=release)
     monkeypatch.setattr(
         installer,
-        "stop_existing_engine",
-        lambda *_args: calls.append("stop"),
+        "acquire_engine_upgrade_lock",
+        lambda *_args: calls.append("lock") or lock,
     )
 
     def run(command, **_kwargs):
+        assert held
         calls.append("pip" if "pip" in command else "setup")
         return SimpleNamespace(returncode=0)
 
@@ -161,4 +211,36 @@ def test_install_stops_the_engine_before_updating_its_environment(
 
     installer.install(destination)
 
-    assert calls == ["stop", "pip", "setup"]
+    assert calls == ["lock", "pip", "setup", "unlock"]
+    assert not held
+
+
+def test_upgrade_lock_retries_when_an_engine_starts_during_cutover(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    installer = load_installer()
+    runtime = tmp_path / "runtime"
+    engine = tmp_path / "engine"
+    attempts: list[str] = []
+    outcomes = iter((False, True))
+
+    class FakeLock:
+        def __init__(self, _path: Path) -> None:
+            pass
+
+        def acquire(self) -> bool:
+            attempts.append("lock")
+            return next(outcomes)
+
+    monkeypatch.setattr(installer, "InterprocessFileLock", FakeLock)
+    monkeypatch.setattr(
+        installer,
+        "stop_existing_engine",
+        lambda *_args: attempts.append("stop"),
+    )
+    monkeypatch.setattr(installer.time, "sleep", lambda _seconds: None)
+
+    lock = installer.acquire_engine_upgrade_lock(engine, runtime)
+
+    assert isinstance(lock, FakeLock)
+    assert attempts == ["stop", "lock", "stop", "lock"]
