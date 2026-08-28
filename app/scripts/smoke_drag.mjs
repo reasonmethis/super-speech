@@ -32,6 +32,9 @@ const environment = {
   SUPER_SPEECH_SKIP_SKILL_INSTALL: "1",
 };
 
+const windowIcon = readFileSync(path.join(appDirectory, "dist", "icon.svg"), "utf8");
+assert(!windowIcon.includes("<filter"), "The in-app icon must not contain clipped shadows");
+
 let electronApp;
 let enginePid;
 
@@ -60,7 +63,7 @@ function status() {
     assert.match(row.id, /^sp_[0-9a-f]{32}$/, "Status leaked an invalid Speechicle ID");
     assert(!Object.hasOwn(row, "filename"), "Status leaked an internal filename");
   }
-  assert.equal(snapshot.version, 12, "Pointer smoke requires the current status schema");
+  assert.equal(snapshot.version, 13, "Pointer smoke requires the current status schema");
   assert(Number.isInteger(snapshot.timeline_revision));
   assert(snapshot.timeline_revision >= 0);
   return snapshot;
@@ -1397,6 +1400,55 @@ try {
     await page.evaluate(() => document.activeElement?.id),
     "queue-list",
     "Automatic collapse did not restore keyboard focus to Speechicles",
+  );
+
+  const externalEnginePid = status().engine_pid;
+  assert(externalEnginePid, "External-engine supervision requires a live fixture");
+  process.kill(externalEnginePid);
+  await waitFor(
+    () => !processExists(externalEnginePid),
+    "The external engine fixture did not stop",
+  );
+  await waitFor(
+    async () => {
+      const snapshot = await page.evaluate(() => window.superSpeech.getStatus());
+      assert.notEqual(
+        snapshot.state,
+        "stopped",
+        "The app exposed a stopped state while supervising engine recovery",
+      );
+      assert.notEqual(
+        await page.locator("body").getAttribute("data-state"),
+        "stopped",
+        "The renderer exposed a stopped state while supervising engine recovery",
+      );
+      if (!snapshot.engine_running) {
+        assert.equal(
+          snapshot.state,
+          "loading",
+          "The app exposed an idle gap before its replacement engine was live",
+        );
+      }
+      if (snapshot.engine_running) {
+        assert.notEqual(
+          snapshot.engine_pid,
+          externalEnginePid,
+          "The app reported the dead external engine as live",
+        );
+        assert(
+          processExists(snapshot.engine_pid),
+          "The app reported a replacement PID that was not live",
+        );
+      }
+      return snapshot.engine_pid !== externalEnginePid && snapshot.state === "idle";
+    },
+    "The desktop app did not replace the stopped external engine",
+    120_000,
+  );
+  enginePid = status().engine_pid;
+  await waitFor(
+    async () => await page.locator("body").getAttribute("data-state") === "idle",
+    "The renderer did not recover after replacing the external engine",
   );
 
   console.log("Super Speech pointer drag and cancellation smoke test passed");

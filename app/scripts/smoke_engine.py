@@ -52,7 +52,7 @@ def read_status(environment: dict[str, str]) -> dict[str, Any]:
     )
     status = json.loads(result.stdout)
     if (
-        status.get("version") != 12
+        status.get("version") != 13
         or not isinstance(status.get("timeline_revision"), int)
         or "filename" in result.stdout
     ):
@@ -153,7 +153,7 @@ def main() -> None:
             if (
                 replay_payload.get("outcome") != "committed"
                 or replay_payload.get("result_id") != speechicle_id
-                or replay_payload.get("snapshot", {}).get("version") != 12
+                or replay_payload.get("snapshot", {}).get("version") != 13
             ):
                 raise RuntimeError(
                     "frozen engine returned an invalid replay result"

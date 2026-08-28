@@ -65,14 +65,25 @@ test("a stopped engine cannot be presented as active because work is queued", ()
   assert.equal(runtimeStateForSnapshot(false, false, undefined), "setup_required");
 });
 
+test("a supervised restart stays loading before its replacement process is live", () => {
+  const recovering: RuntimeStatus = {
+    ...status,
+    state: "loading",
+    engine_running: false,
+    installed: true,
+  };
+  assert.equal(runtimeStateForSnapshot(true, false, "loading"), "loading");
+  assert.deepEqual(statusAfterPauseCommand(recovering, false), recovering);
+});
+
 test("an incompatible external engine cannot leave the app loading forever", () => {
-  assert.equal(compatibleEngineIsRunning(false, null, true), false);
-  assert.equal(compatibleEngineIsRunning(false, status, true), true);
-  assert.equal(compatibleEngineIsRunning(true, null, false), true);
+  assert.equal(compatibleEngineIsRunning(null, true), false);
+  assert.equal(compatibleEngineIsRunning(status, true), true);
+  assert.equal(compatibleEngineIsRunning(status, false), false);
 });
 
 test("accepts a complete current-version status", () => {
-  assert.equal(ENGINE_STATUS_VERSION, 12);
+  assert.equal(ENGINE_STATUS_VERSION, 13);
   assert.equal(parseEngineStatus(status), status);
 });
 
@@ -334,7 +345,7 @@ test("reflects pause commands immediately without creating an empty paused state
   assert.equal(stopped.current?.id, active.current.id);
   assert.equal(
     statusAfterPauseCommand({ ...active, state: "loading", engine_running: false }, true).state,
-    "stopped",
+    "loading",
   );
 });
 
@@ -644,6 +655,72 @@ test("a stale poll cannot roll back a committed snapshot", () => {
     engine_pid: null,
     engine_running: false,
   });
+});
+
+test("an older recovery snapshot keeps the newer timeline but renders loading", () => {
+  const current: RuntimeStatus = {
+    ...status,
+    timeline_revision: 8,
+    state: "idle",
+    updated_at: 50,
+    engine_running: true,
+    installed: true,
+  };
+  const recovering: RuntimeStatus = {
+    ...current,
+    timeline_revision: 0,
+    state: "loading",
+    updated_at: 0,
+    engine_pid: null,
+    engine_running: false,
+  };
+
+  assert.deepEqual(adoptTimelineSnapshot(current, recovering), {
+    ...current,
+    state: "loading",
+    engine_pid: null,
+    engine_running: false,
+  });
+});
+
+test("a new engine Loading snapshot keeps rows until its ready snapshot arrives", () => {
+  const current: RuntimeStatus = {
+    ...status,
+    state: "idle",
+    timeline_revision: 8,
+    updated_at: 80,
+    engine_pid: 100,
+    engine_running: true,
+    installed: true,
+    history_count: 1,
+    history: [{ id: speechicleId(10), text: "Saved", voice: "af_heart" }],
+  };
+  const loading: RuntimeStatus = {
+    ...status,
+    state: "loading",
+    timeline_revision: 0,
+    updated_at: 1,
+    engine_pid: 200,
+    engine_running: true,
+    installed: true,
+    current: null,
+    queue_count: 0,
+    queue: [],
+    history_count: 0,
+    history: [],
+  };
+  const retained = adoptTimelineSnapshot(current, loading);
+
+  assert.equal(retained.state, "loading");
+  assert.equal(retained.engine_pid, null);
+  assert.deepEqual(retained.history, current.history);
+
+  const ready: RuntimeStatus = {
+    ...loading,
+    state: "idle",
+    updated_at: 2,
+  };
+  assert.deepEqual(adoptTimelineSnapshot(retained, ready), ready);
 });
 
 test("a new engine process starts a fresh timeline revision sequence", () => {

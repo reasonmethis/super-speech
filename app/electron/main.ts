@@ -48,7 +48,9 @@ import {
 
 const HEARTBEAT_FRESHNESS_MS = 15_000;
 const ENGINE_STABLE_AFTER_MS = 30_000;
+const ENGINE_START_TIMEOUT_MS = 120_000;
 const ENGINE_RESTART_MAX_DELAY_MS = 30_000;
+const ENGINE_FAILURES_BEFORE_ERROR = 3;
 const MODEL_MIN_BYTES = 300_000_000;
 const VOICES_MIN_BYTES = 20_000_000;
 const SETUP_URL = "https://github.com/reasonmethis/super-speech#install";
@@ -60,6 +62,10 @@ const startHidden = smokeTest || process.argv.includes("--hidden");
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let ownedEngine: ChildProcess | null = null;
+let ownedEngineStartedAt: number | null = null;
+let ownedEngineReadyAt: number | null = null;
+let engineStartPromise: Promise<void> | null = null;
+let engineHealthTimer: NodeJS.Timeout | null = null;
 let engineRestartFailures = 0;
 let engineRestartTimer: NodeJS.Timeout | null = null;
 let quitting = false;
@@ -203,20 +209,49 @@ function getStatus(): RuntimeStatus {
     ? statusForEngineProcess(storedEngine, ownedEngine?.pid)
     : storedEngine;
   const storedProcessRunning = engineIsRunning(base, storedProcess);
-  const engineRunning = compatibleEngineIsRunning(
-    ownedEngineRunning,
-    storedEngine,
+  const engineProcessRunning = compatibleEngineIsRunning(
+    engine,
     storedProcessRunning,
+  );
+  const engineReady = engineProcessRunning &&
+    engine?.state !== "loading" &&
+    engine?.state !== "stopped";
+  if (engineReady && ownedEngineRunning) {
+    ownedEngineReadyAt ??= Date.now();
+    if (Date.now() - ownedEngineReadyAt >= ENGINE_STABLE_AFTER_MS) {
+      engineRestartFailures = 0;
+    }
+  } else if (!ownedEngineRunning) {
+    ownedEngineReadyAt = null;
+  }
+  // A compatible external engine is already serving the shared runtime
+  if (engineReady && !ownedEngineRunning) {
+    engineRestartFailures = 0;
+  }
+  const engineRunning = engineProcessRunning && engine?.state !== "stopped";
+  // Start recovery now instead of waiting for the one-second health check
+  const recoveryExpected = !engineRunning && engineCanRecover(installed);
+  if (
+    recoveryExpected &&
+    !ownedEngineRunning &&
+    !engineRestartTimer &&
+    !engineStartPromise
+  ) {
+    void startEngine();
+  }
+  // After three failed starts, show Stopped between retry attempts
+  const recoveryVisible = recoveryExpected && (
+    engineStartPromise !== null ||
+    ownedEngineRunning ||
+    engineRestartFailures < ENGINE_FAILURES_BEFORE_ERROR
   );
 
   const state = runtimeStateForSnapshot(
     installed,
     engineRunning,
-    engine?.state,
+    engineRunning ? engine?.state : recoveryVisible ? "loading" : undefined,
   );
-  const timeline = statusUnavailable
-    ? null
-    : engine ?? (ownedEngineRunning ? lastEngineStatus : null);
+  const timeline = statusUnavailable ? null : engine;
 
   const status: RuntimeStatus = {
     version: ENGINE_STATUS_VERSION,
@@ -391,12 +426,9 @@ function writeInstallManifest(
   );
 }
 
-function scheduleEngineRestart(runDurationMilliseconds: number): void {
+function scheduleEngineRestart(): void {
   if (quitting || engineRestartTimer) {
     return;
-  }
-  if (runDurationMilliseconds >= ENGINE_STABLE_AFTER_MS) {
-    engineRestartFailures = 0;
   }
   const delayMilliseconds = Math.min(
     1_000 * 2 ** engineRestartFailures,
@@ -411,7 +443,33 @@ function scheduleEngineRestart(runDurationMilliseconds: number): void {
   }, delayMilliseconds);
 }
 
-async function startEngine(): Promise<void> {
+function startEngine(): Promise<void> {
+  if (quitting) {
+    return Promise.resolve();
+  }
+  if (!engineStartPromise) {
+    // App startup, status polling, and the watchdog may all notice the same stopped engine
+    engineStartPromise = startEngineOnce()
+      .then((started) => {
+        if (!started) {
+          scheduleEngineRestart();
+        }
+      })
+      .catch((error) => {
+        console.error("Super Speech engine startup failed", error);
+        scheduleEngineRestart();
+      })
+      .finally(() => {
+        engineStartPromise = null;
+      });
+  }
+  return engineStartPromise;
+}
+
+async function startEngineOnce(): Promise<boolean> {
+  if (quitting) {
+    return true;
+  }
   const base = runtimeDir();
   mkdirSync(path.join(base, "queue"), { recursive: true });
   mkdirSync(path.join(base, "spoken"), { recursive: true });
@@ -424,17 +482,23 @@ async function startEngine(): Promise<void> {
   const storedProcess = parseEngineProcessStatus(storedSnapshot);
   if (engineIsRunning(base, storedProcess)) {
     if (storedEngine) {
-      return;
+      return true;
     }
     if (!(await stopIncompatibleEngine(base))) {
-      return;
+      return false;
+    }
+    if (quitting) {
+      return true;
     }
   }
   if (ownedEngine && ownedEngine.exitCode === null) {
-    return;
+    return true;
   }
   if (!launch || !modelsInstalled(modelDirectory())) {
-    return;
+    return true;
+  }
+  if (quitting) {
+    return true;
   }
 
   const logDescriptor = openSync(path.join(base, "engine.log"), "a");
@@ -449,21 +513,72 @@ async function startEngine(): Promise<void> {
       stdio: ["ignore", logDescriptor, logDescriptor],
     });
     ownedEngine = child;
-    const startedAt = Date.now();
+    ownedEngineStartedAt = Date.now();
+    ownedEngineReadyAt = null;
     const restartAfterUnexpectedExit = () => {
       if (ownedEngine !== child) {
         return;
       }
       ownedEngine = null;
-      scheduleEngineRestart(Date.now() - startedAt);
+      ownedEngineStartedAt = null;
+      ownedEngineReadyAt = null;
+      scheduleEngineRestart();
     };
     child.once("error", restartAfterUnexpectedExit);
     child.once("exit", restartAfterUnexpectedExit);
+    return true;
   } catch {
     ownedEngine = null;
-    scheduleEngineRestart(0);
+    ownedEngineStartedAt = null;
+    ownedEngineReadyAt = null;
+    return false;
   } finally {
     closeSync(logDescriptor);
+  }
+}
+
+function engineCanRecover(installed: boolean): boolean {
+  return !quitting && installed && engineLaunch() !== null;
+}
+
+function startEngineHealthMonitor(): void {
+  if (engineHealthTimer) {
+    return;
+  }
+  engineHealthTimer = setInterval(() => {
+    const status = getStatus();
+    if (
+      ownedEngine &&
+      ownedEngine.exitCode === null &&
+      ownedEngineStartedAt !== null &&
+      ownedEngineReadyAt === null &&
+      Date.now() - ownedEngineStartedAt >= ENGINE_START_TIMEOUT_MS
+    ) {
+      // A process that never leaves Loading is not a successful engine start
+      ownedEngineStartedAt = null;
+      if (!ownedEngine.kill()) {
+        ownedEngine = null;
+        ownedEngineReadyAt = null;
+        scheduleEngineRestart();
+      }
+      return;
+    }
+    if (
+      !quitting &&
+      !engineRestartTimer &&
+      !engineStartPromise &&
+      engineCanRecover(status.installed) &&
+      !status.engine_running
+    ) {
+      void startEngine();
+    }
+  }, 1_000);
+}
+
+function stopEngineHealthMonitor(): void {
+  if (engineHealthTimer) {
+    clearInterval(engineHealthTimer);
+    engineHealthTimer = null;
   }
 }
 
@@ -473,10 +588,14 @@ function stopOwnedEngine(): void {
     engineRestartTimer = null;
   }
   if (!ownedEngine || ownedEngine.exitCode !== null) {
+    ownedEngineStartedAt = null;
+    ownedEngineReadyAt = null;
     return;
   }
   ownedEngine.kill();
   ownedEngine = null;
+  ownedEngineStartedAt = null;
+  ownedEngineReadyAt = null;
   const heartbeat = path.join(runtimeDir(), "engine.alive");
   if (existsSync(heartbeat)) {
     unlinkSync(heartbeat);
@@ -712,6 +831,7 @@ if (!hasSingleInstanceLock) {
   });
   app.on("before-quit", () => {
     quitting = true;
+    stopEngineHealthMonitor();
     stopOwnedEngine();
   });
   app.on("activate", showWindow);
@@ -722,6 +842,7 @@ if (!hasSingleInstanceLock) {
     Menu.setApplicationMenu(null);
     registerIpc();
     await startEngine();
+    startEngineHealthMonitor();
     createWindow();
     createTray();
     if (smokeTest) {

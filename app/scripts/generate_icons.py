@@ -194,15 +194,18 @@ def color_hex(color: RGB) -> str:
     return "#" + "".join(f"{channel:02X}" for channel in color)
 
 
-def badge_icon_svg(variant: IconVariant) -> str:
+def badge_icon_svg(variant: IconVariant, *, shadows: bool = True) -> str:
     assert variant.bar_colors is not None
     bars = "\n".join(
         f'    <rect x="{bar.x}" y="{bar.y}" width="{bar.width}" '
         f'height="{bar.height}" rx="{bar.width // 2}" fill="{color_hex(color)}"/>'
         for bar, color in zip(variant.bars, variant.bar_colors, strict=True)
     )
-    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <defs>
+    definitions = ""
+    badge_filter = ""
+    bar_filter = ""
+    if shadows:
+        definitions = '''  <defs>
     <filter id="badgeShadow" x="-20%" y="-20%" width="140%" height="150%">
       <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#29233A" flood-opacity="0.22"/>
     </filter>
@@ -210,9 +213,13 @@ def badge_icon_svg(variant: IconVariant) -> str:
       <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#383044" flood-opacity="0.18"/>
     </filter>
   </defs>
-  <circle cx="256" cy="256" r="{variant.badge_radius}" fill="#FFFFFF" filter="url(#badgeShadow)"/>
+'''
+        badge_filter = ' filter="url(#badgeShadow)"'
+        bar_filter = ' filter="url(#barShadow)"'
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+{definitions}  <circle cx="256" cy="256" r="{variant.badge_radius}" fill="#FFFFFF"{badge_filter}/>
   <circle cx="256" cy="256" r="{variant.badge_radius - 2}" fill="none" stroke="#E8E5ED" stroke-width="4"/>
-  <g filter="url(#barShadow)">
+  <g{bar_filter}>
 {bars}
   </g>
 </svg>
@@ -433,7 +440,10 @@ def main() -> None:
         rendered[variant.slug] = render_icon(variant)
         rendered[variant.slug].save(DESIGN_DIR / f"{variant.slug}.png", optimize=True)
 
-    PUBLIC_ICON.write_text(icon_svg(SELECTED_VARIANT), encoding="utf-8")
+    PUBLIC_ICON.write_text(
+        badge_icon_svg(SELECTED_VARIANT, shadows=False),
+        encoding="utf-8",
+    )
     rendered[SELECTED_VARIANT.slug].save(PUBLIC_ICON.with_suffix(".png"), optimize=True)
     rendered[SELECTED_VARIANT.slug].save(
         BUILD_DIR / "icon.ico",

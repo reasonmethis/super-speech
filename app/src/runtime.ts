@@ -6,7 +6,7 @@ export type RuntimeState =
   | "setup_required"
   | "stopped";
 
-export const ENGINE_STATUS_VERSION = 12 as const;
+export const ENGINE_STATUS_VERSION = 13 as const;
 
 const SPEECHICLE_ID = /^sp_[0-9a-f]{32}$/;
 const MUTATION_REQUEST_ID = /^[0-9a-f]{24}$/;
@@ -119,11 +119,10 @@ export interface RuntimeStatus extends EngineStatus {
 }
 
 export function compatibleEngineIsRunning(
-  ownedEngineRunning: boolean,
   status: EngineStatus | null,
   storedProcessRunning: boolean,
 ): boolean {
-  return ownedEngineRunning || Boolean(status && storedProcessRunning);
+  return Boolean(status && storedProcessRunning);
 }
 
 export function runtimeStateForSnapshot(
@@ -133,6 +132,10 @@ export function runtimeStateForSnapshot(
 ): RuntimeState {
   if (!installed || engineState === "setup_required") {
     return "setup_required";
+  }
+  // Loading also covers the short gap before the supervisor has a replacement PID
+  if (engineState === "loading") {
+    return "loading";
   }
   if (!engineRunning) {
     return "stopped";
@@ -144,14 +147,11 @@ export function statusAfterPauseCommand(
   status: RuntimeStatus,
   paused: boolean,
 ): RuntimeStatus {
-  if (["setup_required", "stopped"].includes(status.state)) {
+  if (["loading", "setup_required", "stopped"].includes(status.state)) {
     return status;
   }
   if (!status.engine_running) {
     return { ...status, state: "stopped" };
-  }
-  if (status.state === "loading") {
-    return status;
   }
   const hasWork = status.current !== null;
   return {
@@ -560,6 +560,15 @@ export function adoptTimelineSnapshot(
   const newEngineProcess = candidate.engine_running &&
     candidate.engine_pid !== null &&
     candidate.engine_pid !== current.engine_pid;
+  if (newEngineProcess && candidate.state === "loading") {
+    return {
+      ...current,
+      state: "loading",
+      engine_pid: null,
+      engine_running: true,
+      installed: candidate.installed,
+    };
+  }
   // Revisions are comparable only while the same engine process owns the timeline
   const timelineIsOlder = !newEngineProcess && (
     candidate.timeline_revision < current.timeline_revision || (
@@ -578,10 +587,13 @@ export function adoptTimelineSnapshot(
   }
   return {
     ...current,
+    // Keep newer rows on screen while the supervisor replaces their dead engine
     state: runtimeStateForSnapshot(
       candidate.installed,
       candidate.engine_running,
-      current.state === "setup_required" || current.state === "stopped"
+      candidate.state === "loading"
+        ? "loading"
+        : current.state === "setup_required" || current.state === "stopped"
         ? undefined
         : current.state,
     ),
