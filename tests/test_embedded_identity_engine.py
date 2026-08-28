@@ -11,7 +11,13 @@ import pytest
 ENGINE_SOURCE = Path(__file__).parents[1] / "skills" / "super-speech" / "engine"
 sys.path.insert(0, str(ENGINE_SOURCE))
 
-from speechicle_identity import IdentityCatalog, SpeechicleFilename, write_catalog
+from speechicle_identity import (
+    IdentityCatalog,
+    SpeechicleFilename,
+    plan_embed_public_ids,
+    write_catalog,
+)
+import timeline_storage as timeline_storage_module
 
 
 def load_engine(module_name: str):
@@ -33,11 +39,13 @@ def configure_runtime(engine, tmp_path: Path) -> None:
     engine.HISTORY_ORDER = tmp_path / "history-order.json"
     engine.STATUS = tmp_path / "status.json"
     engine.STATUS_FAILURE = tmp_path / "status.failed"
+    engine.STORAGE_READY = tmp_path / "storage-ready.json"
     engine.INSTANCE_LOCK = tmp_path / "engine.lock"
     engine.TIMELINE_LOCK = tmp_path / "timeline.lock"
     engine.TIMELINE_INTENT = tmp_path / "timeline-intent.json"
     engine.IDENTITY_INDEX = tmp_path / "speechicle-index.json"
-    engine._order_cache.clear()
+    engine.TIMELINE_PATHS = engine.TimelinePaths(tmp_path)
+    engine.timeline = engine.TimelineStorage(engine.TIMELINE_PATHS, engine.DEFAULT_VOICE)
 
 
 def canonical_name(
@@ -85,7 +93,7 @@ def planned_legacy_embed(engine, *, write_intent: bool = True):
     engine.HISTORY_ORDER.write_text(
         json.dumps({"version": 2, "ids": [second_id]}), encoding="utf-8"
     )
-    migration = engine.plan_embed_public_ids(
+    migration = plan_embed_public_ids(
         engine.QUEUE,
         engine.SPOKEN,
         engine.FAILED,
@@ -96,19 +104,19 @@ def planned_legacy_embed(engine, *, write_intent: bool = True):
     )
     assert migration is not None
     if write_intent:
-        engine._write_timeline_intent(migration.intent_payload())
+        engine.timeline._write_intent(migration.intent_payload())
     return migration
 
 
 def apply_embed_moves(engine, migration, count: int) -> None:
     planned = [
         (root, item)
-        for root, files in engine._embed_target_sections(migration)
+        for root, files in engine.timeline._embed_sections(migration)
         for item in files
     ]
     for target_root, item in planned[:count]:
-        source = engine._migration_root_path(item.source_root) / item.source_name
-        target = engine._migration_root_path(target_root) / item.target_name
+        source = engine.timeline._migration_root(item.source_root) / item.source_name
+        target = engine.timeline._migration_root(target_root) / item.target_name
         target.parent.mkdir(parents=True, exist_ok=True)
         if source != target:
             os.replace(source, target)
@@ -179,7 +187,7 @@ def test_interrupted_embed_converges_before_deleting_catalog(tmp_path: Path) -> 
     engine.HISTORY_ORDER.write_text(
         json.dumps({"version": 2, "ids": [second_id]}), encoding="utf-8"
     )
-    migration = engine.plan_embed_public_ids(
+    migration = plan_embed_public_ids(
         engine.QUEUE,
         engine.SPOKEN,
         engine.FAILED,
@@ -189,7 +197,7 @@ def test_interrupted_embed_converges_before_deleting_catalog(tmp_path: Path) -> 
         engine.DEFAULT_VOICE,
     )
     assert migration is not None
-    engine._write_timeline_intent(migration.intent_payload())
+    engine.timeline._write_intent(migration.intent_payload())
     first_move = migration.queue_files[0]
     os.replace(first, engine.QUEUE / first_move.target_name)
 
@@ -224,10 +232,14 @@ def test_embed_recovery_converges_from_each_durable_checkpoint(
     engine = load_engine(f"embedded_identity_checkpoint_{checkpoint}")
     configure_runtime(engine, tmp_path)
     migration = planned_legacy_embed(engine, write_intent=False)
-    monkeypatch.setattr(engine, "plan_embed_public_ids", lambda *_args, **_kwargs: migration)
+    monkeypatch.setattr(
+        timeline_storage_module,
+        "plan_embed_public_ids",
+        lambda *_args, **_kwargs: migration,
+    )
     real_replace = engine.os.replace
-    real_validate = engine._validate_embed_inventory
-    real_write_order = engine._write_order_payload
+    real_validate = engine.timeline._validate_embed_inventory
+    real_write_order = engine.timeline._write_order
     real_unlink = Path.unlink
     text_moves = 0
 
@@ -235,7 +247,7 @@ def test_embed_recovery_converges_from_each_durable_checkpoint(
         def crash_after_intent(_migration) -> None:
             raise RuntimeError("simulated crash")
 
-        monkeypatch.setattr(engine, "_converge_embed_public_ids", crash_after_intent)
+        monkeypatch.setattr(engine.timeline, "_converge_embed", crash_after_intent)
     elif checkpoint == "first_rename":
         def crash_after_first_rename(source, target) -> None:
             nonlocal text_moves
@@ -253,19 +265,21 @@ def test_embed_recovery_converges_from_each_durable_checkpoint(
             real_validate(migration_arg, final=final)
 
         monkeypatch.setattr(
-            engine, "_validate_embed_inventory", crash_before_final_validation
+            engine.timeline, "_validate_embed_inventory", crash_before_final_validation
         )
     elif checkpoint in {"history_order", "queue_order"}:
         crash_path = (
             engine.HISTORY_ORDER if checkpoint == "history_order" else engine.QUEUE_ORDER
         )
 
-        def crash_after_order(path: Path, ids: list[str], version: int) -> None:
+        def crash_after_order(
+            path: Path, ids: list[str], version: int = 2
+        ) -> None:
             real_write_order(path, ids, version)
             if path == crash_path:
                 raise RuntimeError("simulated crash")
 
-        monkeypatch.setattr(engine, "_write_order_payload", crash_after_order)
+        monkeypatch.setattr(engine.timeline, "_write_order", crash_after_order)
     else:
         def crash_after_catalog_delete(path: Path, *args, **kwargs) -> None:
             real_unlink(path, *args, **kwargs)
@@ -391,7 +405,7 @@ def test_embed_recovery_accepts_an_already_removed_exact_replay_duplicate(
         ),
         encoding="utf-8",
     )
-    migration = engine.plan_embed_public_ids(
+    migration = plan_embed_public_ids(
         engine.QUEUE,
         engine.SPOKEN,
         engine.FAILED,
@@ -401,7 +415,11 @@ def test_embed_recovery_accepts_an_already_removed_exact_replay_duplicate(
         engine.DEFAULT_VOICE,
     )
     assert migration is not None and len(migration.removals) == 1
-    monkeypatch.setattr(engine, "plan_embed_public_ids", lambda *_args, **_kwargs: migration)
+    monkeypatch.setattr(
+        timeline_storage_module,
+        "plan_embed_public_ids",
+        lambda *_args, **_kwargs: migration,
+    )
     real_unlink = Path.unlink
 
     def crash_after_duplicate_removal(path: Path, *args, **kwargs) -> None:
@@ -459,7 +477,7 @@ def test_embed_keeps_catalog_and_journal_until_order_validation_succeeds(
     def fail_normalization() -> None:
         raise RuntimeError("sidecar unavailable")
 
-    monkeypatch.setattr(engine, "_normalize_canonical_orders", fail_normalization)
+    monkeypatch.setattr(engine.timeline, "_normalize_orders", fail_normalization)
 
     instance_lock = engine.EngineInstanceLock()
     assert instance_lock.acquire()
@@ -490,7 +508,7 @@ def test_catalog_free_allocation_and_metadata_use_canonical_filenames(
     first.unlink()
     second = engine.enqueue_text("Second", "bm_fable")
     second_filename = SpeechicleFilename.parse(second.name)
-    assert second_filename.sequence == first_filename.sequence
+    assert second_filename.sequence == first_filename.sequence + 1
     assert second_filename.public_id != first_filename.public_id
     assert engine._find_chunk(engine.QUEUE, second_filename.public_id) == second
     changed = engine._replace_queue_voice(second, "af_heart")

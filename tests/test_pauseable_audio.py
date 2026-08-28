@@ -17,6 +17,7 @@ ENGINE_SOURCE = Path(__file__).parents[1] / "skills" / "super-speech" / "engine"
 sys.path.insert(0, str(ENGINE_SOURCE))
 
 from pauseable_audio import PauseableAudio
+from timeline_storage import TimelineLocation, TimelineMove, TimelinePlan
 
 
 class CallbackStop(Exception):
@@ -53,12 +54,15 @@ def configure_runtime(engine, tmp_path: Path) -> None:
     engine.HEARTBEAT = tmp_path / "engine.alive"
     engine.STATUS = tmp_path / "status.json"
     engine.STATUS_FAILURE = tmp_path / "status.failed"
+    engine.STORAGE_READY = tmp_path / "storage-ready.json"
     engine.INSTANCE_LOCK = tmp_path / "engine.lock"
     engine.TIMELINE_LOCK = tmp_path / "timeline.lock"
     engine.TIMELINE_INTENT = tmp_path / "timeline-intent.json"
     engine.IDENTITY_INDEX = tmp_path / "speechicle-index.json"
     engine.PLAYBACK_COMMAND_LOCK = tmp_path / "playback-command.lock"
     engine.PLAYBACK_COMMAND_SEQUENCE = tmp_path / "playback-command-sequence.json"
+    engine.TIMELINE_PATHS = engine.TimelinePaths(tmp_path)
+    engine.timeline = engine.TimelineStorage(engine.TIMELINE_PATHS, engine.DEFAULT_VOICE)
     engine.QUEUE.mkdir(exist_ok=True)
     engine.SPOKEN.mkdir(exist_ok=True)
 
@@ -139,6 +143,12 @@ def ready_status(engine, engine_pid: int, updated_at: float = 0) -> dict[str, ob
         "history_count": 0,
         "history": [],
     }
+
+
+def write_storage_ready(engine, engine_pid: int) -> None:
+    engine.STORAGE_READY.write_text(
+        json.dumps({"engine_pid": engine_pid}), encoding="utf-8"
+    )
 
 
 def request_mutation(engine, mutation_type: str, **fields: object) -> str:
@@ -696,6 +706,7 @@ def test_enqueue_text_reserves_the_next_queue_number(tmp_path: Path) -> None:
 
     configure_runtime(engine, tmp_path)
     (engine.SPOKEN / "007-sp_00000000000000000000000000000007-af_heart-say.txt").write_text("Earlier", encoding="utf-8")
+    prepare_timeline(engine)
 
     queued = engine.enqueue_text("New words", "bm_fable", 650)
 
@@ -710,6 +721,7 @@ def test_enqueue_publishes_the_final_queue_path_only_after_writing_text(
 ) -> None:
     engine = load_engine("super_speech_engine_enqueue_atomic")
     configure_runtime(engine, tmp_path)
+    prepare_timeline(engine)
     observed = []
     real_replace = engine.os.replace
 
@@ -737,6 +749,7 @@ def test_queue_order_preserves_stable_ids_and_appends_new_arrivals(tmp_path: Pat
         path.write_text(path.stem, encoding="utf-8")
 
     engine.save_queue_order([third, first, second])
+    prepare_timeline(engine)
     new_arrival = engine.enqueue_text("New", "bm_george")
 
     assert [path.stem for path in engine.queue_files_in_order()] == [
@@ -789,6 +802,7 @@ def test_failed_sequence_numbers_are_not_reused(tmp_path: Path) -> None:
     configure_runtime(engine, tmp_path)
     engine.FAILED.mkdir()
     (engine.FAILED / "007-sp_00000000000000000000000000000007-af_heart-say.txt").write_text("Failed", encoding="utf-8")
+    prepare_timeline(engine)
 
     assert engine.chunk_sequence(engine.enqueue_text("New", "af_heart")) == 8
 
@@ -1246,14 +1260,14 @@ def test_archive_waits_for_history_order_before_moving_the_current_row(
         path.write_text(path.stem, encoding="utf-8")
     engine.save_history_order([newer, older])
 
-    real_write = engine._write_saved_order
+    real_write = engine.timeline._write_order
 
     def fail_history_order(path: Path, ids: list[str]) -> None:
         if path == engine.HISTORY_ORDER:
             raise PermissionError("locked")
         real_write(path, ids)
 
-    monkeypatch.setattr(engine, "_write_saved_order", fail_history_order)
+    monkeypatch.setattr(engine.timeline, "_write_order", fail_history_order)
 
     assert not engine.archive(current)
     assert current.exists()
@@ -1492,6 +1506,7 @@ def test_enqueue_text_ignores_a_stale_legacy_reservation(tmp_path: Path) -> None
     engine = load_engine("super_speech_engine_enqueue_race")
     configure_runtime(engine, tmp_path)
     (engine.QUEUE / "001.reserve").touch()
+    prepare_timeline(engine)
 
     queued = engine.enqueue_text("New words", "af_heart")
 
@@ -1575,6 +1590,7 @@ def test_start_engine_waits_for_fresh_status_after_startup_cleanup(
             json.dumps(ready_status(engine, fake_pid, engine.time.time() + 1)),
             encoding="utf-8",
         )
+        write_storage_ready(engine, fake_pid)
 
     monkeypatch.setattr(engine, "engine_is_running", engine_running)
     monkeypatch.setattr(engine.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
@@ -1594,6 +1610,7 @@ def test_start_engine_accepts_an_existing_current_engine_that_is_loading(
         json.dumps(ready_status(engine, 4321)),
         encoding="utf-8",
     )
+    write_storage_ready(engine, 4321)
 
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     monkeypatch.setattr(engine, "process_exists", lambda process_id: process_id == 4321)
@@ -1611,6 +1628,52 @@ def test_start_engine_accepts_an_existing_current_engine_that_is_loading(
     engine.start_engine()
 
 
+def test_speak_waits_for_delayed_storage_preparation_and_enqueues_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_delayed_storage_ready")
+    configure_runtime(engine, tmp_path)
+    prepare_timeline(engine)
+    engine.STATUS.write_text(
+        json.dumps(ready_status(engine, os.getpid(), engine.time.time())),
+        encoding="utf-8",
+    )
+    readiness_checked = threading.Event()
+    real_storage_is_ready = engine.storage_is_ready
+
+    def observe_readiness(engine_pid: object) -> bool:
+        readiness_checked.set()
+        return real_storage_is_ready(engine_pid)
+
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    monkeypatch.setattr(engine, "storage_is_ready", observe_readiness)
+    monkeypatch.setattr(engine, "wait_for_queue_acceptance", lambda: True)
+    results: list[int] = []
+    errors: list[BaseException] = []
+
+    def speak() -> None:
+        try:
+            results.append(engine.cli(["speak", "Prepared exactly once"]))
+        except BaseException as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=speak)
+    worker.start()
+    assert readiness_checked.wait(timeout=1)
+    assert worker.is_alive()
+    assert not list(engine.QUEUE.glob("*.txt"))
+
+    write_storage_ready(engine, os.getpid())
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert results == [0]
+    queued = list(engine.QUEUE.glob("*.txt"))
+    assert len(queued) == 1
+    assert queued[0].read_text(encoding="utf-8") == "Prepared exactly once"
+
+
 def test_process_exists_recognizes_the_current_process() -> None:
     engine = load_engine("super_speech_engine_process_exists")
 
@@ -1626,6 +1689,7 @@ def test_start_engine_ignores_status_from_a_previous_lock_owner(
         json.dumps(ready_status(engine, 1111, 1)),
         encoding="utf-8",
     )
+    write_storage_ready(engine, 1111)
     sleeps = 0
 
     def publish_current_owner(_seconds: float) -> None:
@@ -1635,6 +1699,7 @@ def test_start_engine_ignores_status_from_a_previous_lock_owner(
             json.dumps(ready_status(engine, 2222, 2)),
             encoding="utf-8",
         )
+        write_storage_ready(engine, 2222)
 
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     monkeypatch.setattr(engine, "process_exists", lambda process_id: process_id == 2222)
@@ -1661,7 +1726,7 @@ def test_start_engine_rejects_the_previous_selection_protocol(
         encoding="utf-8",
     )
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    monkeypatch.setattr(engine, "wait_for_engine_status", lambda: False)
+    monkeypatch.setattr(engine, "wait_for_engine_status", lambda **_kwargs: False)
     monkeypatch.setattr(engine, "process_exists", lambda process_id: process_id == 4321)
 
     with pytest.raises(
@@ -1721,6 +1786,7 @@ def test_start_engine_retries_after_stopped_status_releases_the_instance_lock(
             json.dumps(ready_status(engine, FakeProcess.pid, engine.time.time())),
             encoding="utf-8",
         )
+        write_storage_ready(engine, FakeProcess.pid)
         return FakeProcess()
 
     def let_status_finish(_seconds: float) -> None:
@@ -2407,6 +2473,7 @@ def test_history_selection_moves_only_the_playback_boundary(
     for path in history:
         path.write_text(path.stem, encoding="utf-8")
     engine.save_history_order(history)
+    prepare_timeline(engine)
     active: list[Path] = []
     if include_active:
         active = [
@@ -2596,12 +2663,12 @@ def test_startup_removes_a_promotion_duplicate_backup(tmp_path: Path) -> None:
     duplicate_history.write_text("Legacy History copy", encoding="utf-8")
     duplicate_queue.write_text("Active copy", encoding="utf-8")
     selected.write_text("Selected", encoding="utf-8")
-    engine._write_order_payload(engine.QUEUE_ORDER, [duplicate_queue.stem], 1)
-    engine._write_order_payload(
+    engine.timeline._write_order(engine.QUEUE_ORDER, [duplicate_queue.stem], 1)
+    engine.timeline._write_order(
         engine.HISTORY_ORDER, [duplicate_history.stem, selected.stem], 1
     )
     os.replace(duplicate_history, backup)
-    engine._write_timeline_intent(
+    engine.timeline._write_intent(
         {
             "version": 1,
             "operation": "promote",
@@ -2659,6 +2726,7 @@ def test_preparation_rejects_a_nonidentical_canonical_identity_collision(
 def test_enqueue_waits_while_history_rows_are_moving(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_timeline_file_lock")
     configure_runtime(engine, tmp_path)
+    prepare_timeline(engine)
     lock = engine.InterprocessFileLock(engine.TIMELINE_LOCK)
     assert lock.acquire()
     queued: list[Path] = []
@@ -2719,7 +2787,7 @@ def test_history_selection_excludes_worker_claims_until_rollback_finishes(
     source.write_text("History", encoding="utf-8")
     entered_save = threading.Event()
     release_save = threading.Event()
-    real_write = engine._write_saved_order
+    real_write = engine.timeline._write_order
 
     def fail_after_worker_waits(path: Path, ids: list[str]) -> None:
         if path == engine.QUEUE_ORDER and not entered_save.is_set():
@@ -2728,7 +2796,7 @@ def test_history_selection_excludes_worker_claims_until_rollback_finishes(
             raise PermissionError("locked")
         real_write(path, ids)
 
-    monkeypatch.setattr(engine, "_write_saved_order", fail_after_worker_waits)
+    monkeypatch.setattr(engine.timeline, "_write_order", fail_after_worker_waits)
     promotion_errors = []
 
     def promote() -> None:
@@ -3979,6 +4047,7 @@ def test_speak_reports_durable_queueing_when_engine_cannot_accept_immediately(
 ) -> None:
     engine = load_engine("super_speech_engine_speak_queued_later")
     configure_runtime(engine, tmp_path)
+    prepare_timeline(engine)
     monkeypatch.setattr(engine, "start_engine", lambda: None)
     monkeypatch.setattr(engine, "wait_for_queue_acceptance", lambda: False)
 
@@ -4265,13 +4334,21 @@ def test_mutation_result_pruning_keeps_active_waiters(tmp_path: Path) -> None:
     assert active.exists()
 
 
-def test_serve_removes_stale_status_after_acquiring_the_lock(
+def test_serve_publishes_loading_status_before_delayed_preparation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     engine = load_engine("super_speech_engine_serve_status")
     configure_runtime(engine, tmp_path)
-    engine.STATUS.write_text("stale", encoding="utf-8")
-    observed: list[bool] = []
+    prior = ready_status(engine, 123, updated_at=10)
+    prior["state"] = "stopped"
+    prior["timeline_revision"] = 7
+    prior["engine_pid"] = None
+    prior["queue_count"] = 1
+    prior["queue"] = [
+        {"id": f"sp_{'1' * 32}", "text": "Waiting", "voice": "af_heart"}
+    ]
+    engine.STATUS.write_text(json.dumps(prior), encoding="utf-8")
+    observed: list[tuple[str, int]] = []
 
     class FakeLock:
         @staticmethod
@@ -4285,15 +4362,108 @@ def test_serve_removes_stale_status_after_acquiring_the_lock(
         held = True
 
     monkeypatch.setattr(engine, "EngineInstanceLock", FakeLock)
-    monkeypatch.setattr(
-        engine,
-        "run_engine_loop",
-        lambda *_args: observed.append(engine.STATUS.exists()),
-    )
+
+    def delayed_prepare(_lock) -> None:
+        loading = json.loads(engine.STATUS.read_text(encoding="utf-8"))
+        assert loading["state"] == "loading"
+        assert loading["engine_pid"] == os.getpid()
+        assert loading["queue"] == prior["queue"]
+        assert engine.HEARTBEAT.exists()
+        assert not engine.STORAGE_READY.exists()
+        observed.append((loading["state"], loading["timeline_revision"]))
+
+    def run_loop(revision: int, seed: str) -> None:
+        assert engine.storage_is_ready(os.getpid())
+        observed.append((seed, revision))
+
+    def clear_startup_signals() -> None:
+        assert not engine.STORAGE_READY.exists()
+
+    fingerprint = engine.fingerprint_from_status(prior)
+    assert fingerprint is not None
+    monkeypatch.setattr(engine, "prepare_timeline_storage", delayed_prepare)
+    monkeypatch.setattr(engine, "clear_transient_signals", clear_startup_signals)
+    monkeypatch.setattr(engine, "run_engine_loop", run_loop)
 
     engine.serve()
 
-    assert observed == [False]
+    assert observed == [("loading", 7), (fingerprint, 7)]
+    assert not engine.STORAGE_READY.exists()
+
+
+def test_control_sent_during_loading_survives_startup_cleanup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_loading_control")
+    configure_runtime(engine, tmp_path)
+    preparation_started = threading.Event()
+    finish_preparation = threading.Event()
+    observed: list[bool] = []
+
+    class FakeLock:
+        held = True
+
+        @staticmethod
+        def acquire() -> bool:
+            return True
+
+        @staticmethod
+        def release() -> None:
+            pass
+
+    def delayed_prepare(_lock) -> None:
+        preparation_started.set()
+        assert finish_preparation.wait(2)
+
+    def run_loop(_revision: int, _seed: str | None) -> None:
+        observed.append(engine.SKIP.exists())
+
+    monkeypatch.setattr(engine, "EngineInstanceLock", FakeLock)
+    monkeypatch.setattr(engine, "prepare_timeline_storage", delayed_prepare)
+    monkeypatch.setattr(engine, "run_engine_loop", run_loop)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    monkeypatch.setattr(engine, "process_exists", lambda _pid: True)
+    engine.SKIP.write_text("stale", encoding="utf-8")
+
+    serving = threading.Thread(target=engine.serve)
+    serving.start()
+    assert preparation_started.wait(1)
+    assert not engine.SKIP.exists()
+    loading = json.loads(engine.STATUS.read_text(encoding="utf-8"))
+    assert loading["state"] == "loading"
+
+    engine.send_control(engine.SKIP)
+    finish_preparation.set()
+    serving.join(2)
+
+    assert not serving.is_alive()
+    assert observed == [True]
+
+
+def test_startup_publications_retry_transient_windows_replace_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_startup_publication_retry")
+    configure_runtime(engine, tmp_path)
+    attempts = {engine.STATUS: 0, engine.STORAGE_READY: 0}
+    real_replace = engine.os.replace
+
+    def replace(source: Path, target: Path) -> None:
+        target = Path(target)
+        if target in attempts:
+            attempts[target] += 1
+            if attempts[target] == 1:
+                raise PermissionError("temporarily locked")
+        real_replace(source, target)
+
+    monkeypatch.setattr(engine.os, "replace", replace)
+
+    status = engine.publish_startup_status(4)
+    engine.publish_storage_ready()
+
+    assert attempts == {engine.STATUS: 2, engine.STORAGE_READY: 2}
+    assert json.loads(engine.STATUS.read_text(encoding="utf-8")) == status
+    assert engine.storage_is_ready(os.getpid())
 
 
 def test_status_exposes_bounded_recent_history(tmp_path: Path) -> None:
@@ -4348,6 +4518,7 @@ def test_new_history_item_stays_newest_after_manual_reordering(tmp_path: Path) -
     first.write_text("First", encoding="utf-8")
     second.write_text("Second", encoding="utf-8")
     engine.save_history_order([first, second])
+    prepare_timeline(engine)
     newest = engine.enqueue_text("Newest", "af_heart")
 
     assert engine.archive(newest)
@@ -4368,7 +4539,7 @@ def test_new_archive_and_history_reorder_commit_in_one_serial_order(
     engine.save_history_order([first, second])
     entered_save = threading.Event()
     release_save = threading.Event()
-    real_save = engine.save_history_order
+    real_save = engine.timeline.save_history_order
 
     def pause_reorder_save(paths=None) -> None:
         if threading.current_thread().name == "history-reorder":
@@ -4376,7 +4547,7 @@ def test_new_archive_and_history_reorder_commit_in_one_serial_order(
             assert release_save.wait(1)
         real_save(paths)
 
-    monkeypatch.setattr(engine, "save_history_order", pause_reorder_save)
+    monkeypatch.setattr(engine.timeline, "save_history_order", pause_reorder_save)
     second_id = speechicle_id(engine, second)
     first_id = speechicle_id(engine, first)
     reorder = threading.Thread(
@@ -4417,8 +4588,8 @@ def test_history_snapshot_and_archive_cannot_deadlock_each_other(
     queued.write_text("New", encoding="utf-8")
     archive_holds_order = threading.Event()
     snapshot_reading = threading.Event()
-    real_write = engine._write_saved_order
-    real_history_files = engine.history_files_in_order
+    real_write = engine.timeline._write_order
+    real_history_files = engine.timeline.history_files
 
     def gated_write(path: Path, ids: list[str]) -> None:
         if path == engine.HISTORY_ORDER and threading.current_thread().name == "archive":
@@ -4431,8 +4602,8 @@ def test_history_snapshot_and_archive_cannot_deadlock_each_other(
             snapshot_reading.set()
         return real_history_files()
 
-    monkeypatch.setattr(engine, "_write_saved_order", gated_write)
-    monkeypatch.setattr(engine, "history_files_in_order", observed_history_files)
+    monkeypatch.setattr(engine.timeline, "_write_order", gated_write)
+    monkeypatch.setattr(engine.timeline, "history_files", observed_history_files)
     archive_thread = threading.Thread(
         name="archive", target=engine.archive, args=(queued,), daemon=True
     )
@@ -4478,6 +4649,7 @@ def test_history_snapshot_refreshes_only_after_an_archive_move(tmp_path: Path) -
     configure_runtime(engine, tmp_path)
     first = engine.SPOKEN / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     first.write_text("First", encoding="utf-8")
+    prepare_timeline(engine)
 
     first_count, first_items = engine.history_snapshot()
     cached_count, cached_items = engine.history_snapshot()
@@ -4501,6 +4673,7 @@ def test_history_snapshot_keeps_rows_during_a_transient_text_lock(
     configure_runtime(engine, tmp_path)
     first = engine.SPOKEN / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     first.write_text("First", encoding="utf-8")
+    prepare_timeline(engine)
     assert engine.history_snapshot()[1][0]["text"] == "First"
     queued_second = engine.enqueue_text("Second", "af_heart")
     assert engine.archive(queued_second)
@@ -4531,12 +4704,12 @@ def test_timeline_plan_executes_moves_orders_and_cleanup(tmp_path: Path) -> None
     target = engine.SPOKEN / source.name
     source.write_text("Speech", encoding="utf-8")
     row_id = speechicle_id(engine, source)
-    plan = engine.TimelinePlan(
+    plan = TimelinePlan(
         kind="archive",
         moves=(
-            engine.TimelineMove(
-                engine.TimelineLocation("queue", source.name),
-                engine.TimelineLocation("history", target.name),
+            TimelineMove(
+                TimelineLocation("queue", source.name),
+                TimelineLocation("history", target.name),
             ),
         ),
         previous_queue_ids=(row_id,),
@@ -4545,7 +4718,7 @@ def test_timeline_plan_executes_moves_orders_and_cleanup(tmp_path: Path) -> None
         history_ids=(row_id,),
     )
 
-    engine._execute_timeline_plan(plan)
+    engine.timeline._execute_plan(plan)
 
     assert not source.exists()
     assert target.read_text(encoding="utf-8") == "Speech"
@@ -4573,12 +4746,12 @@ def test_timeline_plan_rolls_back_after_moves_and_one_order_write(
     source_id = speechicle_id(engine, source)
     engine.save_queue_order([current])
     engine.save_history_order([source])
-    plan = engine.TimelinePlan(
+    plan = TimelinePlan(
         kind="promote",
         moves=(
-            engine.TimelineMove(
-                engine.TimelineLocation("history", source.name),
-                engine.TimelineLocation("queue", target.name),
+            TimelineMove(
+                TimelineLocation("history", source.name),
+                TimelineLocation("queue", target.name),
             ),
         ),
         previous_queue_ids=(current_id,),
@@ -4586,7 +4759,7 @@ def test_timeline_plan_rolls_back_after_moves_and_one_order_write(
         queue_ids=(source_id, current_id),
         history_ids=(),
     )
-    real_write = engine._write_saved_order
+    real_write = engine.timeline._write_order
     real_replace = engine.os.replace
 
     def fail_final_history_order(path: Path, ids: list[str]) -> None:
@@ -4603,12 +4776,12 @@ def test_timeline_plan_rolls_back_after_moves_and_one_order_write(
             raise PermissionError("source locked")
         real_replace(source_path, target_path)
 
-    monkeypatch.setattr(engine, "_write_saved_order", fail_final_history_order)
+    monkeypatch.setattr(engine.timeline, "_write_order", fail_final_history_order)
     monkeypatch.setattr(engine.os, "replace", maybe_fail_move_rollback)
 
     expected_error = engine.MutationOutcomeUnconfirmed if rollback_fails else OSError
     with pytest.raises(expected_error):
-        engine._execute_timeline_plan(plan)
+        engine.timeline._execute_plan(plan)
 
     if rollback_fails:
         assert engine.TIMELINE_INTENT.exists()
@@ -4632,12 +4805,12 @@ def build_archive_recovery_plan(engine):
     earlier_id = speechicle_id(engine, earlier)
     engine.save_queue_order([current, waiting])
     engine.save_history_order([earlier])
-    plan = engine.TimelinePlan(
+    plan = TimelinePlan(
         kind="archive",
         moves=tuple(
-            engine.TimelineMove(
-                engine.TimelineLocation("queue", path.name),
-                engine.TimelineLocation("history", path.name),
+            TimelineMove(
+                TimelineLocation("queue", path.name),
+                TimelineLocation("history", path.name),
             )
             for path in (current, waiting)
         ),
@@ -4660,7 +4833,7 @@ def test_new_timeline_plan_recovers_from_each_commit_checkpoint(
     engine = load_engine(f"super_speech_engine_plan_checkpoint_{checkpoint}")
     configure_runtime(engine, tmp_path)
     plan, current, waiting, earlier = build_archive_recovery_plan(engine)
-    engine._write_timeline_intent(plan.intent_payload())
+    engine.timeline._write_intent(plan.intent_payload())
     move_count = {
         "intent": 0,
         "history_order": 0,
@@ -4672,9 +4845,9 @@ def test_new_timeline_plan_recovers_from_each_commit_checkpoint(
     for source in (current, waiting)[:move_count]:
         os.replace(source, engine.SPOKEN / source.name)
     if checkpoint != "intent":
-        engine._write_saved_order(engine.HISTORY_ORDER, list(plan.history_ids))
+        engine.timeline._write_order(engine.HISTORY_ORDER, list(plan.history_ids))
     if checkpoint not in {"intent", "history_order"}:
-        engine._write_saved_order(engine.QUEUE_ORDER, list(plan.queue_ids))
+        engine.timeline._write_order(engine.QUEUE_ORDER, list(plan.queue_ids))
 
     prepare_timeline(engine)
 
@@ -4703,12 +4876,12 @@ def test_new_timeline_plan_recovers_a_voice_changing_promotion(
     waiting.write_text("Waiting", encoding="utf-8")
     source_id = speechicle_id(engine, source)
     waiting_id = speechicle_id(engine, waiting)
-    plan = engine.TimelinePlan(
+    plan = TimelinePlan(
         kind="promote",
         moves=(
-            engine.TimelineMove(
-                engine.TimelineLocation("history", source.name),
-                engine.TimelineLocation("queue", target.name),
+            TimelineMove(
+                TimelineLocation("history", source.name),
+                TimelineLocation("queue", target.name),
             ),
         ),
         previous_queue_ids=(waiting_id,),
@@ -4716,13 +4889,13 @@ def test_new_timeline_plan_recovers_a_voice_changing_promotion(
         queue_ids=(source_id, waiting_id),
         history_ids=(),
     )
-    engine._write_timeline_intent(plan.intent_payload())
+    engine.timeline._write_intent(plan.intent_payload())
     if checkpoint != "intent":
         os.replace(source, target)
     if checkpoint in {"queue_order", "history_order"}:
-        engine._write_saved_order(engine.QUEUE_ORDER, list(plan.queue_ids))
+        engine.timeline._write_order(engine.QUEUE_ORDER, list(plan.queue_ids))
     if checkpoint == "history_order":
-        engine._write_saved_order(engine.HISTORY_ORDER, list(plan.history_ids))
+        engine.timeline._write_order(engine.HISTORY_ORDER, list(plan.history_ids))
 
     prepare_timeline(engine)
 
@@ -4777,7 +4950,7 @@ def test_new_timeline_plan_rejects_malformed_or_contradictory_payloads(
         payload["moves"][1]["target"]["name"] = "004-sp_00000000000000000000000000000004-af_heart-say.txt"
     else:
         payload["queue_ids"] = [payload["previous_queue_ids"][0]]
-    engine._write_timeline_intent(payload)
+    engine.timeline._write_intent(payload)
 
     with pytest.raises(RuntimeError, match=error):
         prepare_timeline(engine)
@@ -4831,7 +5004,7 @@ def test_each_legacy_timeline_intent_adapts_to_common_recovery(
             "history_ids": [saved_id] if operation == "archive_batch" else [],
         }
         expected_root = engine.SPOKEN if operation == "archive_batch" else engine.QUEUE
-    engine._write_timeline_intent(intent)
+    engine.timeline._write_intent(intent)
 
     prepare_timeline(engine)
 
@@ -4856,7 +5029,7 @@ def test_legacy_promotion_finishes_an_intermediate_voice_rename(
     renamed_source = engine.QUEUE / "001-af_heart-say.txt"
     target = engine.QUEUE / "001-bm_fable-say.txt"
     renamed_source.write_text("Selected", encoding="utf-8")
-    engine._write_timeline_intent(
+    engine.timeline._write_intent(
         {
             "version": 1,
             "operation": "promote",
@@ -4895,7 +5068,7 @@ def test_unsafe_legacy_intent_is_retained_without_partial_application(
     first_id = speechicle_id(engine, first)
     unsafe_id = speechicle_id(engine, unsafe)
     write_upgrade_catalog(engine, first, unsafe)
-    engine._write_timeline_intent(
+    engine.timeline._write_intent(
         {
             "version": 1,
             "operation": "archive_batch",
@@ -4931,13 +5104,13 @@ def test_new_timeline_plan_retains_journal_until_backup_cleanup_succeeds(
     source.write_text("Current", encoding="utf-8")
     row_id = speechicle_id(engine, source)
     target.write_text("Duplicate", encoding="utf-8")
-    plan = engine.TimelinePlan(
+    plan = TimelinePlan(
         kind="archive",
         moves=(
-            engine.TimelineMove(
-                engine.TimelineLocation("queue", source.name),
-                engine.TimelineLocation("history", target.name),
-                engine.TimelineLocation("history", backup.name),
+            TimelineMove(
+                TimelineLocation("queue", source.name),
+                TimelineLocation("history", target.name),
+                TimelineLocation("history", backup.name),
             ),
         ),
         previous_queue_ids=(row_id,),
@@ -4945,7 +5118,7 @@ def test_new_timeline_plan_retains_journal_until_backup_cleanup_succeeds(
         queue_ids=(),
         history_ids=(row_id,),
     )
-    engine._write_timeline_intent(plan.intent_payload())
+    engine.timeline._write_intent(plan.intent_payload())
     real_unlink = Path.unlink
 
     def fail_backup_cleanup(path: Path, *args, **kwargs) -> None:
@@ -4974,7 +5147,7 @@ def test_new_timeline_plan_retains_journal_when_a_row_cannot_be_recovered(
     engine = load_engine("super_speech_engine_plan_missing_row")
     configure_runtime(engine, tmp_path)
     plan, current, waiting, earlier = build_archive_recovery_plan(engine)
-    engine._write_timeline_intent(plan.intent_payload())
+    engine.timeline._write_intent(plan.intent_payload())
     current.unlink()
 
     with pytest.raises(RuntimeError, match="pending timeline row is missing"):
@@ -5002,11 +5175,11 @@ def test_startup_completes_an_interrupted_clear_batch(tmp_path: Path) -> None:
         engine.IDENTITY_INDEX,
         engine.IdentityCatalog(4, public_ids),
     )
-    engine._write_order_payload(
+    engine.timeline._write_order(
         engine.QUEUE_ORDER, [public_ids[1], public_ids[2]], 2
     )
-    engine._write_order_payload(engine.HISTORY_ORDER, [public_ids[3]], 2)
-    engine._write_timeline_intent(
+    engine.timeline._write_order(engine.HISTORY_ORDER, [public_ids[3]], 2)
+    engine.timeline._write_intent(
         {
             "version": 1,
             "operation": "archive_batch",
@@ -5263,8 +5436,8 @@ def test_identity_migration_recovers_with_the_ids_saved_before_interruption(
     queued.write_text("Queued", encoding="utf-8")
     collision.write_text("Collision", encoding="utf-8")
     malformed.write_text("Malformed", encoding="utf-8")
-    interrupted._write_order_payload(interrupted.QUEUE_ORDER, [queued.stem], 1)
-    interrupted._write_order_payload(
+    interrupted.timeline._write_order(interrupted.QUEUE_ORDER, [queued.stem], 1)
+    interrupted.timeline._write_order(
         interrupted.HISTORY_ORDER, [malformed.stem, collision.stem], 1
     )
 
@@ -5272,7 +5445,7 @@ def test_identity_migration_recovers_with_the_ids_saved_before_interruption(
         raise RuntimeError("simulated interruption")
 
     monkeypatch.setattr(
-        interrupted, "_converge_embed_public_ids", stop_after_journal
+        interrupted.timeline, "_converge_embed", stop_after_journal
     )
     with pytest.raises(RuntimeError, match="simulated interruption"):
         prepare_timeline(interrupted)
@@ -5311,11 +5484,12 @@ def test_identity_migration_recovers_with_the_ids_saved_before_interruption(
     assert not recovered.TIMELINE_INTENT.exists()
 
 
-def test_deleted_public_identity_is_not_reused_when_sequence_is_recycled(
+def test_deleted_public_identity_and_sequence_are_not_reused(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     engine = load_engine("super_speech_engine_identity_delete")
     configure_runtime(engine, tmp_path)
+    prepare_timeline(engine)
     first = engine.enqueue_text("First", "af_heart")
     first_id = speechicle_id(engine, first)
     first_sequence = engine.SpeechicleFilename.parse(first.name).sequence
@@ -5327,7 +5501,7 @@ def test_deleted_public_identity_is_not_reused_when_sequence_is_recycled(
     second = engine.enqueue_text("Second", "af_heart")
     second_id = speechicle_id(engine, second)
 
-    assert engine.SpeechicleFilename.parse(second.name).sequence == first_sequence
+    assert engine.SpeechicleFilename.parse(second.name).sequence == first_sequence + 1
     assert second_id != first_id
     assert engine._find_chunk(engine.QUEUE, first_id) is None
     assert engine._find_chunk(engine.SPOKEN, first_id) is None
@@ -5344,6 +5518,7 @@ def test_voice_and_history_lifecycle_preserve_one_public_identity(
 ) -> None:
     engine = load_engine("super_speech_engine_identity_lifecycle")
     configure_runtime(engine, tmp_path)
+    prepare_timeline(engine)
     engine.AVAILABLE_VOICES = {"af_heart", "bm_fable"}
     original = engine.enqueue_text("Same words", "af_heart", 250)
     public_id = speechicle_id(engine, original)
@@ -5367,13 +5542,14 @@ def test_voice_change_does_not_rewrite_stable_queue_order(
     engine = load_engine("super_speech_engine_voice_order_is_stable")
     configure_runtime(engine, tmp_path)
     engine.AVAILABLE_VOICES = {"af_heart", "bm_fable"}
+    prepare_timeline(engine)
     current = engine.enqueue_text("Current", "af_heart")
     waiting = engine.enqueue_text("Waiting", "af_heart")
     engine.save_queue_order([current, waiting])
     saved_order = engine.QUEUE_ORDER.read_bytes()
     monkeypatch.setattr(
-        engine,
-        "_write_order_payload",
+        engine.timeline,
+        "_write_order",
         lambda *_args: (_ for _ in ()).throw(AssertionError("order was rewritten")),
     )
 
@@ -5388,6 +5564,7 @@ def test_skip_invalidates_buffered_audio_by_removing_its_claim(
 ) -> None:
     engine = load_engine("super_speech_engine_skip_claim_generation")
     configure_runtime(engine, tmp_path)
+    prepare_timeline(engine)
     current = engine.enqueue_text("Current", "af_heart")
     state = engine.State()
     _, generation = engine._record_claim(state, current)

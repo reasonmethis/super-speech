@@ -53,7 +53,9 @@ import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Literal, NamedTuple, TypeGuard, assert_never
+from typing import NamedTuple, assert_never
+
+from file_lock import InterprocessFileLock
 
 from mutation_protocol import (
     ArchiveMutation,
@@ -68,18 +70,15 @@ from mutation_protocol import (
 )
 from pauseable_audio import PauseableAudio
 from speechicle_identity import (
-    EmbedPublicIdsFile,
-    EmbedPublicIdsMigration,
     IdentityCatalog,
     SpeechicleFilename,
-    embed_public_ids_from_intent,
-    generate_public_id,
     is_public_id,
-    load_catalog,
-    migration_from_intent,
-    plan_embed_public_ids,
-    strict_sequence,
     write_catalog,
+)
+from timeline_storage import (
+    MutationOutcomeUnconfirmed,
+    TimelinePaths,
+    TimelineStorage,
 )
 
 try:
@@ -90,9 +89,10 @@ except Exception:
 
 _USER_HOME = Path(os.environ.get("USERPROFILE") or os.path.expanduser("~"))
 BASE = Path(os.environ.get("SUPER_SPEECH_HOME") or (_USER_HOME / ".super-speech"))
-QUEUE = BASE / "queue"
-SPOKEN = BASE / "spoken"
-FAILED = BASE / "failed"
+TIMELINE_PATHS = TimelinePaths(BASE)
+QUEUE = TIMELINE_PATHS.queue
+SPOKEN = TIMELINE_PATHS.history
+FAILED = TIMELINE_PATHS.failed
 LOG = BASE / "log.txt"
 
 STOP = BASE / "STOP"
@@ -101,16 +101,17 @@ INTERRUPT = BASE / "INTERRUPT"
 SKIP = BASE / "SKIP"
 CONTINUE = BASE / "CONTINUE"
 MUTATION = BASE / "MUTATION.json"
-QUEUE_ORDER = BASE / "queue-order.json"
-HISTORY_ORDER = BASE / "history-order.json"
+QUEUE_ORDER = TIMELINE_PATHS.queue_order
+HISTORY_ORDER = TIMELINE_PATHS.history_order
 WARMUP = BASE / "WARMUP"
 HEARTBEAT = BASE / "engine.alive"
 STATUS = BASE / "status.json"
 STATUS_FAILURE = BASE / "status.failed"
+STORAGE_READY = BASE / "storage-ready.json"
 INSTANCE_LOCK = BASE / "engine.lock"
-TIMELINE_LOCK = BASE / "timeline.lock"
-TIMELINE_INTENT = BASE / "timeline-intent.json"
-IDENTITY_INDEX = BASE / "speechicle-index.json"
+TIMELINE_LOCK = TIMELINE_PATHS.mutation_lock
+TIMELINE_INTENT = TIMELINE_PATHS.intent
+IDENTITY_INDEX = TIMELINE_PATHS.legacy_identity_index
 PLAYBACK_COMMAND_LOCK = BASE / "playback-command.lock"
 PLAYBACK_COMMAND_SEQUENCE = BASE / "playback-command-sequence.json"
 
@@ -146,63 +147,11 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
-ENGINE_VERSION = "0.4.11"
+ENGINE_VERSION = "0.5.0"
 STATUS_VERSION = 13
+STARTUP_TIMEOUT = 120.0
 
-
-class MutationOutcomeUnconfirmed(RuntimeError):
-    """A durable mutation may have committed after its rollback failed."""
-
-
-class InterprocessFileLock:
-    """Hold one cross-platform, one-byte advisory file lock."""
-
-    def __init__(self, path: Path) -> None:
-        self._path = path
-        self._file: BinaryIO | None = None
-
-    def acquire(self) -> bool:
-        BASE.mkdir(parents=True, exist_ok=True)
-        lock_file = self._path.open("a+b")
-        if lock_file.seek(0, os.SEEK_END) == 0:
-            lock_file.write(b"0")
-            lock_file.flush()
-        lock_file.seek(0)
-        try:
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            lock_file.close()
-            return False
-        self._file = lock_file
-        return True
-
-    def release(self) -> None:
-        if self._file is None:
-            return
-        self._file.seek(0)
-        try:
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(self._file.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
-        finally:
-            self._file.close()
-            self._file = None
-
-    @property
-    def held(self) -> bool:
-        return self._file is not None
+timeline = TimelineStorage(TIMELINE_PATHS, DEFAULT_VOICE)
 
 
 class EngineInstanceLock(InterprocessFileLock):
@@ -212,33 +161,7 @@ class EngineInstanceLock(InterprocessFileLock):
         super().__init__(INSTANCE_LOCK)
 
 
-_timeline_lock_local = threading.local()
 _playback_command_lock_local = threading.local()
-
-
-@contextmanager
-def timeline_mutation_lock(timeout: float = 10.0):
-    """Serialize cross-process operations that move or allocate timeline rows."""
-    depth = getattr(_timeline_lock_local, "depth", 0)
-    if depth:
-        _timeline_lock_local.depth = depth + 1
-        try:
-            yield
-        finally:
-            _timeline_lock_local.depth -= 1
-        return
-    lock = InterprocessFileLock(TIMELINE_LOCK)
-    deadline = time.monotonic() + timeout
-    try:
-        while not lock.acquire():
-            if time.monotonic() >= deadline:
-                raise RuntimeError("timed out waiting for the speech timeline lock")
-            time.sleep(0.01)
-        _timeline_lock_local.depth = 1
-        yield
-    finally:
-        _timeline_lock_local.depth = 0
-        lock.release()
 
 
 @contextmanager
@@ -313,7 +236,7 @@ def engine_command(*arguments: str) -> list[str]:
 def start_engine() -> None:
     """Start the same engine executable detached and wait for its process lock."""
     if engine_is_running():
-        if wait_for_engine_status():
+        if wait_for_engine_status(timeout=STARTUP_TIMEOUT):
             return
         if engine_is_running():
             try:
@@ -358,7 +281,7 @@ def start_engine() -> None:
             options["start_new_session"] = True
         process = subprocess.Popen(engine_command("serve"), **options)
 
-    if wait_for_engine_status(process.pid, process):
+    if wait_for_engine_status(process.pid, process, timeout=STARTUP_TIMEOUT):
         return
     raise RuntimeError(f"engine failed to start; inspect {LOG}")
 
@@ -386,9 +309,11 @@ def wait_for_queue_acceptance(timeout: float = 15.0) -> bool:
 def wait_for_engine_status(
     expected_pid: int | None = None,
     process: subprocess.Popen | None = None,
+    *,
+    timeout: float = 5.0,
 ) -> bool:
-    """Wait until the lock owner publishes status after its startup cleanup."""
-    deadline = time.monotonic() + 5
+    """Wait until the lock owner finishes storage preparation."""
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         running = engine_is_running()
         if running:
@@ -406,6 +331,7 @@ def wait_for_engine_status(
                 and pid_matches
                 and owner_is_live
                 and isinstance(updated_at, (int, float))
+                and storage_is_ready(status.get("engine_pid"))
             ):
                 return True
         elif expected_pid is None and process is None:
@@ -418,6 +344,63 @@ def wait_for_engine_status(
             break
         time.sleep(0.05)
     return False
+
+
+def storage_is_ready(engine_pid: object) -> bool:
+    if not isinstance(engine_pid, int) or engine_pid <= 0:
+        return False
+    try:
+        payload = json.loads(STORAGE_READY.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    return payload == {"engine_pid": engine_pid}
+
+
+def publish_startup_json(
+    target: Path,
+    payload: dict[str, object],
+    label: str,
+    timeout: float = 5.0,
+) -> None:
+    """Publish one startup marker through short Windows file locks."""
+    started = time.monotonic()
+    first_error: OSError | None = None
+    while True:
+        temporary = target.with_name(
+            f"{target.name}.{os.getpid()}.{time.time_ns()}.tmp"
+        )
+        try:
+            temporary.write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+            os.replace(temporary, target)
+            if first_error is not None:
+                log(
+                    f"{label} publication recovered after "
+                    f"{time.monotonic() - started:.1f} seconds"
+                )
+            return
+        except OSError as error:
+            if first_error is None:
+                first_error = error
+                log(f"{label} publication waiting: {type(error).__name__}: {error}")
+            if time.monotonic() - started >= timeout:
+                raise
+            heartbeat(force=True)
+            time.sleep(0.05)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def publish_storage_ready() -> None:
+    publish_startup_json(
+        STORAGE_READY,
+        {"engine_pid": os.getpid()},
+        "storage-ready marker",
+    )
 
 
 def file_hash(path: Path) -> str:
@@ -457,66 +440,31 @@ def install_models(destination: Path = MODEL_DIR) -> None:
 
 
 def chunk_sequence(path: Path) -> int | None:
-    """Return the sequence number used to sort one canonical Speechicle."""
-    try:
-        return SpeechicleFilename.parse(path.name).sequence
-    except ValueError:
-        return None
+    return timeline.sequence(path)
 
 
-def _canonical_filename(path: Path) -> SpeechicleFilename:
-    try:
-        return SpeechicleFilename.parse(path.name)
-    except ValueError as error:
-        raise RuntimeError(f"speech filename is not canonical: {path.name}") from error
+def public_id_for_path(path: Path) -> str:
+    return timeline.public_id(path)
 
 
-def _canonical_inventory() -> dict[Path, SpeechicleFilename]:
-    inventory: dict[Path, SpeechicleFilename] = {}
-    public_ids: set[str] = set()
-    sequences: set[int] = set()
-    for directory in (QUEUE, SPOKEN, FAILED):
-        for path in directory.glob("*.txt"):
-            filename = _canonical_filename(path)
-            if filename.public_id in public_ids:
-                raise RuntimeError(f"duplicate speech public ID: {filename.public_id}")
-            if filename.sequence in sequences:
-                raise RuntimeError(f"duplicate live speech sequence: {filename.sequence}")
-            inventory[path] = filename
-            public_ids.add(filename.public_id)
-            sequences.add(filename.sequence)
-    return inventory
+def queue_files_in_order() -> list[Path]:
+    return timeline.queue_files()
 
 
-def _reserve_queue_file_unlocked(voice: str, gap_ms: int | None, text: str) -> Path:
-    inventory = _canonical_inventory()
-    sequence = max(
-        (filename.sequence for filename in inventory.values()), default=0
-    ) + 1
-    public_id = generate_public_id(
-        filename.public_id for filename in inventory.values()
-    )
-    path = QUEUE / SpeechicleFilename(sequence, public_id, voice, gap_ms).render()
-    temporary = QUEUE / f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
-    try:
-        temporary.write_text(text, encoding="utf-8")
-        os.replace(temporary, path)
-        return path
-    except Exception:
-        path.unlink(missing_ok=True)
-        raise
-    finally:
-        temporary.unlink(missing_ok=True)
+def history_files_in_order() -> list[Path]:
+    return timeline.history_files()
 
 
-def _reserve_queue_file(voice: str, gap_ms: int | None, text: str) -> Path:
-    with timeline_mutation_lock():
-        _recover_current_timeline_plan()
-        return _reserve_queue_file_unlocked(voice, gap_ms, text)
+def save_queue_order(paths: list[Path] | None = None) -> None:
+    timeline.save_queue_order(paths)
+
+
+def save_history_order(paths: list[Path] | None = None) -> None:
+    timeline.save_history_order(paths)
 
 
 def enqueue_text(text: str, voice: str, gap_ms: int | None = None) -> Path:
-    """Atomically append one chunk to the shared speech queue."""
+    """Atomically append one Speechicle to Queue."""
     text = text.strip()
     if not text:
         raise ValueError("speech text cannot be empty")
@@ -524,185 +472,66 @@ def enqueue_text(text: str, voice: str, gap_ms: int | None = None) -> Path:
         raise ValueError(f"invalid Kokoro voice: {voice}")
     if gap_ms is not None and not 0 <= gap_ms <= 1500:
         raise ValueError("gap must be between 0 and 1500 milliseconds")
-
-    return _reserve_queue_file(voice, gap_ms, text)
-
-
-def chunk_sort_key(path: Path) -> tuple[bool, int, str]:
-    sequence = chunk_sequence(path)
-    return (sequence is None, sequence or 0, path.name)
+    return timeline.reserve(voice, gap_ms, text)
 
 
-def history_sort_key(path: Path) -> tuple[bool, int, str]:
-    sequence = chunk_sequence(path)
-    return (sequence is not None, sequence or 0, path.name)
+def history_snapshot() -> tuple[int, list[dict[str, object]]]:
+    return timeline.history_snapshot(HISTORY_LIMIT)
 
 
-_queue_order_lock = threading.RLock()
-_order_cache: dict[Path, list[str]] = {}
+def invalidate_history() -> None:
+    timeline.invalidate_history()
 
 
-def _write_order_payload(path: Path, ids: list[str], version: int) -> None:
-    if not ids:
-        path.unlink(missing_ok=True)
-        _order_cache[path] = []
-        return
-    temporary = path.with_name(
-        f"{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp"
-    )
-    payload = {"version": version, "ids": ids}
+def prepare_timeline_storage(instance_lock: EngineInstanceLock) -> None:
+    recovered = timeline.prepare(instance_lock)
+    if recovered is not None:
+        log(f"recovered pending timeline {recovered} transaction")
+
+
+def _find_chunk(directory: Path, chunk_id: str) -> Path | None:
+    return timeline.find(directory, chunk_id)
+
+
+def _voice_variant_path(source: Path, voice: str) -> Path:
+    if AVAILABLE_VOICES and voice not in AVAILABLE_VOICES:
+        raise ValueError(f"unknown Kokoro voice: {voice}")
+    return timeline.voice_variant(source, voice)
+
+
+def _replace_queue_voice(source: Path, voice: str) -> Path:
+    _voice_variant_path(source, voice)
+    return timeline.replace_queue_voice(source, voice)
+
+
+def promote_history_selection(
+    source: Path, voice: str | None = None
+) -> tuple[Path, int]:
+    if voice is not None:
+        _voice_variant_path(source, voice)
     try:
-        temporary.write_text(
-            json.dumps(payload), encoding="utf-8"
-        )
-        try:
-            os.replace(temporary, path)
-        except OSError as replace_error:
-            try:
-                stored = json.loads(path.read_text(encoding="utf-8"))
-            except FileNotFoundError:
-                raise replace_error
-            except OSError as read_error:
-                raise MutationOutcomeUnconfirmed(
-                    f"could not confirm whether {path.name} was replaced"
-                ) from read_error
-            except json.JSONDecodeError:
-                raise replace_error
-            if stored != payload:
-                raise replace_error
-        _order_cache[path] = ids
-    finally:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
+        return timeline.promote_history(source, voice)
+    except MutationOutcomeUnconfirmed:
+        raise
+    except (OSError, RuntimeError, ValueError) as error:
+        raise RuntimeError("could not move History playback boundary") from error
 
 
-def public_id_for_path(path: Path) -> str:
-    return _canonical_filename(path).public_id
+def _archive_many(paths: list[Path]) -> bool:
+    return timeline.archive_many(paths)
 
 
-def _path_for_public_id(directory: Path, public_id: str) -> Path | None:
-    if not is_public_id(public_id):
-        return None
-    return next(
-        (
-            path
-            for path in directory.glob("*.txt")
-            if _canonical_filename(path).public_id == public_id
-        ),
-        None,
-    )
+def archive(path: Path) -> bool:
+    return _archive_many([path])
 
 
-def _apply_identity_migration_intent(intent: dict[str, object]) -> None:
+def archive_failed(path: Path) -> bool:
     try:
-        migration = migration_from_intent(intent)
-    except (TypeError, ValueError) as error:
-        raise RuntimeError("invalid pending identity migration") from error
-    directories = {"queue": QUEUE, "spoken": SPOKEN, "failed": FAILED}
-    for removal in migration.removals:
-        (directories[removal.directory] / removal.name).unlink(missing_ok=True)
-    for move in migration.moves:
-        source = directories[move.source_directory] / move.source
-        target = directories[move.target_directory] / move.target
-        if source == target or (target.exists() and not source.exists()):
-            continue
-        if source.exists() and not target.exists():
-            os.replace(source, target)
-            continue
-        raise RuntimeError(f"identity migration could not reconcile {source.name}")
-    write_catalog(IDENTITY_INDEX, migration.catalog)
-    _write_order_payload(QUEUE_ORDER, list(migration.queue_ids), 2)
-    _write_order_payload(HISTORY_ORDER, list(migration.history_ids), 2)
-
-
-def _strict_order_ids(payload: object, name: str) -> list[str]:
-    if not isinstance(payload, dict) or set(payload) != {"version", "ids"}:
-        raise RuntimeError(f"invalid speech order: {name}")
-    ids = payload["ids"]
-    if (
-        payload["version"] != 2
-        or not isinstance(ids, list)
-        or not all(is_public_id(item) for item in ids)
-        or len(ids) != len(set(ids))
-    ):
-        raise RuntimeError(f"invalid speech order: {name}")
-    return ids
-
-
-def _read_saved_order(path: Path) -> list[str]:
-    for attempt in range(3):
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            result = _strict_order_ids(payload, path.name)
-            _order_cache[path] = result
-            return result
-        except FileNotFoundError:
-            _order_cache[path] = []
-            return []
-        except OSError:
-            if path in _order_cache:
-                return list(_order_cache[path])
-            if attempt < 2:
-                time.sleep(0.01)
-                continue
-            raise RuntimeError(f"could not read speech order: {path.name}")
-        except (ValueError, json.JSONDecodeError) as error:
-            raise RuntimeError(f"invalid speech order: {path.name}") from error
-    raise AssertionError("unreachable")
-
-
-def _write_saved_order(path: Path, ids: list[str]) -> None:
-    _write_order_payload(path, ids, 2)
-
-
-def _write_timeline_intent(payload: dict[str, object]) -> None:
-    if TIMELINE_INTENT.exists():
-        raise RuntimeError("a timeline transaction is already pending recovery")
-    temporary = TIMELINE_INTENT.with_name(
-        f"{TIMELINE_INTENT.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-    )
-    try:
-        temporary.write_text(json.dumps(payload), encoding="utf-8")
-        os.replace(temporary, TIMELINE_INTENT)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def queue_files_in_order() -> list[Path]:
-    """Return live queue files in explicit order, then append new arrivals."""
-    with _queue_order_lock:
-        live = {public_id_for_path(path): path for path in QUEUE.glob("*.txt")}
-        ordered = []
-        for speechicle_id in _read_saved_order(QUEUE_ORDER):
-            matched = live.pop(speechicle_id, None)
-            if matched is not None:
-                ordered.append(matched)
-        ordered.extend(sorted(live.values(), key=chunk_sort_key))
-        return ordered
-
-
-def save_queue_order(paths: list[Path] | None = None) -> None:
-    """Atomically persist the order of files that are still in the queue."""
-    with _queue_order_lock:
-        ordered = paths if paths is not None else queue_files_in_order()
-        live_ids = {public_id_for_path(path) for path in QUEUE.glob("*.txt")}
-        ids = [
-            public_id_for_path(path)
-            for path in ordered
-            if public_id_for_path(path) in live_ids
-        ]
-        missing = sorted(
-            (
-                path
-                for path in QUEUE.glob("*.txt")
-                if public_id_for_path(path) not in ids
-            ),
-            key=chunk_sort_key,
-        )
-        ids.extend(public_id_for_path(path) for path in missing)
-        _write_saved_order(QUEUE_ORDER, ids)
+        timeline.archive_failed(path)
+        return True
+    except (OSError, RuntimeError) as error:
+        log(f"archive_failed error {path.name}: {error}")
+        return False
 
 
 def log(msg: str, *, stderr: bool = False) -> None:
@@ -1307,518 +1136,33 @@ def prune_mutation_results(max_age: float = 300.0) -> None:
             log(f"could not prune mutation result {result.name}: {error}")
 
 
-@dataclass(frozen=True)
-class TimelineLocation:
-    """Name one file inside a permitted timeline storage directory."""
-
-    root: Literal["queue", "history"]
-    name: str
-
-    def path(self) -> Path:
-        return (QUEUE if self.root == "queue" else SPOKEN) / self.name
 
 
-@dataclass(frozen=True)
-class TimelineMove:
-    """Move one timeline file, optionally preserving a duplicate copy."""
-
-    source: TimelineLocation
-    target: TimelineLocation
-    backup: TimelineLocation | None = None
-    # A promoted History row wins when Queue still contains the same Speechicle
-    preserve_existing_target: bool = False
 
 
-@dataclass(frozen=True)
-class TimelinePlan:
-    """Describe one recoverable change to the saved timeline."""
-
-    kind: Literal["archive", "promote"]
-    moves: tuple[TimelineMove, ...]
-    previous_queue_ids: tuple[str, ...]
-    previous_history_ids: tuple[str, ...]
-    queue_ids: tuple[str, ...]
-    history_ids: tuple[str, ...]
-    order_version: Literal[1, 2] = 2
-    journal_version: Literal[2, 3] = 3
-
-    def intent_payload(self) -> dict[str, object]:
-        return {
-            "version": self.journal_version,
-            "operation": "timeline_plan",
-            "moves": [
-                {
-                    "source": {
-                        "root": move.source.root,
-                        "name": move.source.name,
-                    },
-                    "target": {
-                        "root": move.target.root,
-                        "name": move.target.name,
-                    },
-                    "backup": (
-                        {"root": move.backup.root, "name": move.backup.name}
-                        if move.backup is not None
-                        else None
-                    ),
-                    "preserve_existing_target": move.preserve_existing_target,
-                }
-                for move in self.moves
-            ],
-            "previous_queue_ids": list(self.previous_queue_ids),
-            "previous_history_ids": list(self.previous_history_ids),
-            "queue_ids": list(self.queue_ids),
-            "history_ids": list(self.history_ids),
-        }
 
 
-def _is_safe_timeline_filename(value: object) -> TypeGuard[str]:
-    return (
-        isinstance(value, str)
-        and bool(value)
-        and value not in {".", ".."}
-        and not any(character in value for character in ("/", "\\", ":", "\0"))
-        and Path(value).name == value
-    )
 
 
-def _parse_timeline_location(value: object, label: str) -> TimelineLocation:
-    if not isinstance(value, dict) or set(value) != {"root", "name"}:
-        raise RuntimeError(f"invalid {label} location")
-    root = value["root"]
-    name = value["name"]
-    if root not in {"queue", "history"}:
-        raise RuntimeError(f"invalid {label} storage root")
-    if not _is_safe_timeline_filename(name):
-        raise RuntimeError(f"invalid {label} filename")
-    return TimelineLocation(root, name)
 
 
-def _parse_timeline_ids(value: object, label: str) -> tuple[str, ...]:
-    if not isinstance(value, list) or not all(is_public_id(item) for item in value):
-        raise RuntimeError(f"invalid {label}")
-    if len(value) != len(set(value)):
-        raise RuntimeError(f"duplicate {label}")
-    return tuple(value)
 
 
-def _validate_timeline_plan(
-    plan: TimelinePlan,
-    legacy_catalog: IdentityCatalog | None = None,
-) -> None:
-    """Reject plans whose moves and saved orders describe different changes."""
-    if plan.kind not in {"archive", "promote"}:
-        raise RuntimeError("invalid timeline plan kind")
-    if not plan.moves:
-        raise RuntimeError("timeline plan has no moves")
-    for label, ids in (
-        ("previous Queue IDs", plan.previous_queue_ids),
-        ("previous History IDs", plan.previous_history_ids),
-        ("final Queue IDs", plan.queue_ids),
-        ("final History IDs", plan.history_ids),
-    ):
-        if not all(is_public_id(item) for item in ids) or len(ids) != len(set(ids)):
-            raise RuntimeError(f"invalid {label}")
-    sources: set[TimelineLocation] = set()
-    targets: set[TimelineLocation] = set()
-    backups: set[TimelineLocation] = set()
-    source_sequences: set[int] = set()
-    target_sequences: set[int] = set()
-    expected_roots = (
-        ("queue", "history") if plan.kind == "archive" else ("history", "queue")
-    )
-    for move in plan.moves:
-        if plan.journal_version == 3:
-            try:
-                source_filename = SpeechicleFilename.parse(move.source.name)
-                target_filename = SpeechicleFilename.parse(move.target.name)
-            except ValueError as error:
-                raise RuntimeError("invalid canonical timeline filename") from error
-            if (
-                source_filename.sequence != target_filename.sequence
-                or source_filename.public_id != target_filename.public_id
-                or source_filename.gap_ms != target_filename.gap_ms
-            ):
-                raise RuntimeError("timeline move changes canonical identity metadata")
-            source_sequence = source_filename.sequence
-            target_sequence = target_filename.sequence
-        else:
-            source_sequence = strict_sequence(move.source.name)
-            target_sequence = strict_sequence(move.target.name)
-            if source_sequence is None:
-                raise RuntimeError("invalid timeline source filename")
-        if (move.source.root, move.target.root) != expected_roots:
-            raise RuntimeError("timeline move contradicts its plan kind")
-        if (
-            move.source in sources
-            or move.target in targets
-            or move.source in backups
-            or move.target in backups
-            or source_sequence in source_sequences
-            or target_sequence in target_sequences
-        ):
-            raise RuntimeError("timeline plan contains a duplicate move")
-        if target_sequence != source_sequence:
-            raise RuntimeError("timeline move changes the storage sequence")
-        sources.add(move.source)
-        targets.add(move.target)
-        source_sequences.add(source_sequence)
-        target_sequences.add(target_sequence)
-        backup = move.backup
-        if backup is None:
-            if move.preserve_existing_target:
-                raise RuntimeError("preserved timeline target has no backup")
-            continue
-        if (
-            backup.root != "history"
-            or not backup.name.startswith(f".{move.source.name}.")
-            or not backup.name.endswith(".duplicate")
-            or backup in backups
-            or backup in sources
-            or backup in targets
-            or backup in {move.source, move.target}
-        ):
-            raise RuntimeError("invalid timeline backup")
-        backups.add(backup)
-        if move.preserve_existing_target != (plan.kind == "promote"):
-            raise RuntimeError("timeline backup contradicts its move direction")
-
-    previous_queue = set(plan.previous_queue_ids)
-    previous_history = set(plan.previous_history_ids)
-    final_queue = set(plan.queue_ids)
-    final_history = set(plan.history_ids)
-    if previous_queue & previous_history or final_queue & final_history:
-        raise RuntimeError("timeline orders contain the same ID in both sections")
-    if plan.kind == "archive":
-        moved_ids = previous_queue - final_queue
-        if (
-            moved_ids != final_history - previous_history
-            or not final_queue <= previous_queue
-            or not previous_history <= final_history
-        ):
-            raise RuntimeError("timeline archive orders contradict its moves")
-    else:
-        moved_ids = previous_history - final_history
-        if (
-            moved_ids != final_queue - previous_queue
-            or not final_history <= previous_history
-            or not previous_queue <= final_queue
-        ):
-            raise RuntimeError("timeline promotion orders contradict its moves")
-    if len(moved_ids) != len(plan.moves):
-        raise RuntimeError("timeline move count contradicts its orders")
-    if plan.journal_version == 3:
-        move_ids = {
-            SpeechicleFilename.parse(move.source.name).public_id
-            for move in plan.moves
-        }
-    else:
-        if legacy_catalog is None:
-            raise RuntimeError("legacy timeline plan requires the identity catalog")
-        move_ids = {
-            legacy_catalog.public_id(sequence) for sequence in source_sequences
-        }
-    if None in move_ids or moved_ids != move_ids:
-        raise RuntimeError("timeline move files contradict its orders")
 
 
-def _parse_timeline_plan_payload(
-    payload: object,
-    expected_version: Literal[2, 3],
-    legacy_catalog: IdentityCatalog | None,
-) -> TimelinePlan:
-    expected_fields = {
-        "version",
-        "operation",
-        "moves",
-        "previous_queue_ids",
-        "previous_history_ids",
-        "queue_ids",
-        "history_ids",
-    }
-    if not isinstance(payload, dict) or set(payload) != expected_fields:
-        raise RuntimeError("invalid pending timeline plan")
-    version = payload["version"]
-    if version != expected_version or payload["operation"] != "timeline_plan":
-        raise RuntimeError("unsupported pending timeline plan")
-    raw_moves = payload["moves"]
-    if not isinstance(raw_moves, list):
-        raise RuntimeError("invalid pending timeline moves")
-    moves: list[TimelineMove] = []
-    kinds: set[Literal["archive", "promote"]] = set()
-    for raw_move in raw_moves:
-        expected_move_fields = {
-            "source",
-            "target",
-            "backup",
-            "preserve_existing_target",
-        }
-        if not isinstance(raw_move, dict) or set(raw_move) != expected_move_fields:
-            raise RuntimeError("invalid pending timeline move")
-        source = _parse_timeline_location(raw_move["source"], "timeline source")
-        target = _parse_timeline_location(raw_move["target"], "timeline target")
-        roots = (source.root, target.root)
-        if roots == ("queue", "history"):
-            kinds.add("archive")
-        elif roots == ("history", "queue"):
-            kinds.add("promote")
-        else:
-            raise RuntimeError("invalid timeline move direction")
-        raw_backup = raw_move["backup"]
-        backup = (
-            None
-            if raw_backup is None
-            else _parse_timeline_location(raw_backup, "timeline backup")
-        )
-        preserve_existing_target = raw_move["preserve_existing_target"]
-        if not isinstance(preserve_existing_target, bool):
-            raise RuntimeError("invalid timeline duplicate policy")
-        moves.append(
-            TimelineMove(source, target, backup, preserve_existing_target)
-        )
-    if len(kinds) != 1:
-        raise RuntimeError("timeline plan mixes move directions")
-    plan = TimelinePlan(
-        kind=kinds.pop(),
-        moves=tuple(moves),
-        previous_queue_ids=_parse_timeline_ids(
-            payload["previous_queue_ids"], "previous Queue IDs"
-        ),
-        previous_history_ids=_parse_timeline_ids(
-            payload["previous_history_ids"], "previous History IDs"
-        ),
-        queue_ids=_parse_timeline_ids(payload["queue_ids"], "final Queue IDs"),
-        history_ids=_parse_timeline_ids(
-            payload["history_ids"], "final History IDs"
-        ),
-        journal_version=version,
-    )
-    _validate_timeline_plan(plan, legacy_catalog)
-    return plan
 
 
-def _parse_legacy_v2_timeline_plan(
-    payload: object,
-    catalog: IdentityCatalog | None,
-) -> TimelinePlan:
-    """Parse the upgrade-only journal whose IDs still depend on the catalog."""
-    if catalog is None:
-        raise RuntimeError("version-2 timeline recovery requires the identity catalog")
-    return _parse_timeline_plan_payload(payload, 2, catalog)
 
 
-def _parse_v3_timeline_plan(payload: object) -> TimelinePlan:
-    """Parse a strict canonical journal without consulting legacy storage."""
-    return _parse_timeline_plan_payload(payload, 3, None)
 
 
-def _write_timeline_plan_orders(
-    plan: TimelinePlan,
-    queue_ids: tuple[str, ...],
-    history_ids: tuple[str, ...],
-    written_orders: list[Path],
-) -> None:
-    writes = (
-        ((HISTORY_ORDER, history_ids), (QUEUE_ORDER, queue_ids))
-        if plan.kind == "archive"
-        else ((QUEUE_ORDER, queue_ids), (HISTORY_ORDER, history_ids))
-    )
-    for path, ids in writes:
-        _write_saved_order(path, list(ids))
-        written_orders.append(path)
 
 
-def _apply_timeline_move(move: TimelineMove) -> bool:
-    """Apply one move, or return false when its target already has the row."""
-    source = move.source.path()
-    target = move.target.path()
-    backup = move.backup.path() if move.backup is not None else None
-    if not source.exists():
-        if target.exists():
-            return False
-        raise FileNotFoundError(source)
-    if move.preserve_existing_target:
-        if backup is None:
-            raise RuntimeError("timeline duplicate has no backup path")
-        os.replace(source, backup)
-    else:
-        if backup is not None:
-            os.replace(target, backup)
-        os.replace(source, target)
-    return True
 
 
-def _rollback_timeline_move(move: TimelineMove) -> None:
-    source = move.source.path()
-    target = move.target.path()
-    backup = move.backup.path() if move.backup is not None else None
-    if move.preserve_existing_target:
-        if backup is not None and backup.exists():
-            if not source.exists():
-                os.replace(backup, source)
-        elif not source.exists() and target.exists():
-            os.replace(target, source)
-        return
-    if not source.exists() and target.exists():
-        os.replace(target, source)
-    if backup is not None and backup.exists():
-        os.replace(backup, target)
 
 
-def _execute_timeline_plan(plan: TimelinePlan) -> None:
-    """Apply one journaled plan, restoring its old layout on a known failure."""
-    if plan.order_version != 2:
-        raise RuntimeError("foreground timeline plans require stable ID orders")
-    _validate_timeline_plan(plan)
-    applied_moves: list[TimelineMove] = []
-    written_orders: list[Path] = []
-    intent_written = False
-    try:
-        _write_timeline_intent(plan.intent_payload())
-        intent_written = True
-        if plan.kind == "archive":
-            _write_timeline_plan_orders(
-                plan, plan.queue_ids, plan.history_ids, written_orders
-            )
-        for move in plan.moves:
-            if move.target.root == "history":
-                SPOKEN.mkdir(parents=True, exist_ok=True)
-            applied_moves.append(move)
-            if not _apply_timeline_move(move):
-                applied_moves.pop()
-        if plan.kind == "promote":
-            _write_timeline_plan_orders(
-                plan, plan.queue_ids, plan.history_ids, written_orders
-            )
-    except (OSError, RuntimeError, ValueError) as error:
-        if not intent_written:
-            raise
-        rollback_errors: list[str] = []
-        for move in reversed(applied_moves):
-            try:
-                _rollback_timeline_move(move)
-            except OSError as rollback_error:
-                rollback_errors.append(str(rollback_error))
-        previous_orders = {
-            QUEUE_ORDER: plan.previous_queue_ids,
-            HISTORY_ORDER: plan.previous_history_ids,
-        }
-        for path in (QUEUE_ORDER, HISTORY_ORDER):
-            if path not in written_orders:
-                continue
-            try:
-                _write_saved_order(path, list(previous_orders[path]))
-            except (OSError, RuntimeError) as rollback_error:
-                rollback_errors.append(str(rollback_error))
-        if rollback_errors:
-            raise MutationOutcomeUnconfirmed(
-                "timeline rollback failed: " + "; ".join(rollback_errors)
-            ) from error
-        try:
-            TIMELINE_INTENT.unlink(missing_ok=True)
-        except OSError as rollback_error:
-            raise MutationOutcomeUnconfirmed(
-                f"timeline rollback cleanup failed: {rollback_error}"
-            ) from error
-        raise
-    finally:
-        invalidate_history()
 
-    cleanup_complete = True
-    for move in applied_moves:
-        if move.backup is None:
-            continue
-        backup = move.backup.path()
-        try:
-            backup.unlink(missing_ok=True)
-        except OSError as cleanup_error:
-            cleanup_complete = False
-            log(
-                "timeline duplicate cleanup deferred until restart: "
-                f"{cleanup_error}"
-            )
-    if cleanup_complete:
-        try:
-            TIMELINE_INTENT.unlink(missing_ok=True)
-        except OSError as cleanup_error:
-            log(f"timeline intent cleanup deferred until restart: {cleanup_error}")
-
-
-def _archive_many(paths: list[Path]) -> bool:
-    """Move one ordered timeline block to History as one recoverable mutation."""
-    unique = list(dict.fromkeys(paths))
-    if not unique:
-        return True
-
-    with timeline_mutation_lock(), _history_order_lock, _queue_order_lock:
-        _recover_current_timeline_plan()
-        previous_queue = queue_files_in_order()
-        previous_history = history_files_in_order()
-        archived_names = {path.name for path in unique}
-        desired_queue = [
-            path for path in previous_queue if path.name not in archived_names
-        ]
-        retained_history = [
-            path for path in previous_history if path.name not in archived_names
-        ]
-        desired_history = [
-            *(SPOKEN / path.name for path in reversed(unique)),
-            *retained_history,
-        ]
-        planned_moves = tuple(
-            TimelineMove(
-                source=TimelineLocation("queue", path.name),
-                target=TimelineLocation("history", path.name),
-                backup=TimelineLocation(
-                    "history",
-                    f".{path.name}.{os.getpid()}.{time.time_ns()}.duplicate",
-                )
-                if (SPOKEN / path.name).exists()
-                else None,
-            )
-            for path in unique
-        )
-        plan = TimelinePlan(
-            kind="archive",
-            moves=planned_moves,
-            previous_queue_ids=tuple(
-                public_id_for_path(path) for path in previous_queue
-            ),
-            previous_history_ids=tuple(
-                public_id_for_path(path) for path in previous_history
-            ),
-            queue_ids=tuple(public_id_for_path(path) for path in desired_queue),
-            history_ids=tuple(public_id_for_path(path) for path in desired_history),
-        )
-        try:
-            _execute_timeline_plan(plan)
-        except MutationOutcomeUnconfirmed:
-            raise
-        except (OSError, RuntimeError) as error:
-            log(f"archive error: {error}")
-            return False
-        return True
-
-
-def archive(path: Path) -> bool:
-    return _archive_many([path])
-
-
-def archive_failed(path: Path) -> bool:
-    """Move a chunk that couldn't be synthesized into failed/ so the queue doesn't loop on it."""
-    try:
-        with timeline_mutation_lock():
-            _recover_current_timeline_plan()
-            FAILED.mkdir(parents=True, exist_ok=True)
-            os.replace(str(path), str(FAILED / path.name))
-            try:
-                save_queue_order()
-            except (OSError, RuntimeError) as order_error:
-                log(f"queue order update error after failure {path.name}: {order_error}")
-            return True
-    except (OSError, RuntimeError) as error:
-        log(f"archive_failed error {path.name}: {error}")
-        return False
 
 
 def warmup(kokoro) -> None:
@@ -2062,638 +1406,58 @@ def consume_continue(st: State) -> bool:
 _last_status_write_monotonic = 0.0
 _last_status_updated_at = 0.0
 _status_failure_started: float | None = None
-_history_dirty = True
-_history_count = 0
-_history_items: list[dict[str, object]] = []
-_history_order_lock = threading.RLock()
 
 
-def invalidate_history() -> None:
-    global _history_dirty
-    with _history_order_lock:
-        _history_dirty = True
 
 
-def history_files_in_order() -> list[Path]:
-    """Return archived files in their saved display order."""
-    with _history_order_lock:
-        live = {public_id_for_path(path): path for path in SPOKEN.glob("*.txt")}
-        saved_ids = _read_saved_order(HISTORY_ORDER)
-        ordered = [
-            live.pop(speechicle_id)
-            for speechicle_id in saved_ids
-            if speechicle_id in live
-        ]
-        missing = sorted(live.values(), key=history_sort_key, reverse=True)
-        return [*missing, *ordered]
 
 
-def save_history_order(paths: list[Path] | None = None) -> None:
-    """Atomically persist the order of archived files."""
-    with _history_order_lock:
-        ordered = paths if paths is not None else history_files_in_order()
-        live_ids = {public_id_for_path(path) for path in SPOKEN.glob("*.txt")}
-        ids = [
-            public_id_for_path(path)
-            for path in ordered
-            if public_id_for_path(path) in live_ids
-        ]
-        missing = sorted(
-            (
-                path
-                for path in SPOKEN.glob("*.txt")
-                if public_id_for_path(path) not in ids
-            ),
-            key=history_sort_key,
-            reverse=True,
-        )
-        ids.extend(public_id_for_path(path) for path in missing)
-        _write_saved_order(HISTORY_ORDER, ids)
 
 
-def _legacy_order_version(intent: dict[object, object]) -> Literal[1, 2]:
-    value = intent.get("order_version", 1)
-    if value not in {1, 2}:
-        raise RuntimeError("invalid pending timeline order version")
-    return value
 
 
-def _parse_legacy_ids(
-    value: object,
-    label: str,
-    order_version: Literal[1, 2],
-) -> tuple[str, ...]:
-    valid = (
-        isinstance(value, list)
-        and all(
-            is_public_id(item)
-            if order_version == 2
-            else _is_safe_timeline_filename(item)
-            for item in value
-        )
-    )
-    if not valid:
-        raise RuntimeError(f"invalid {label}")
-    if len(value) != len(set(value)):
-        raise RuntimeError(f"duplicate {label}")
-    return tuple(value)
 
 
-def _parse_legacy_filename(value: object, label: str) -> str:
-    if not _is_safe_timeline_filename(value):
-        raise RuntimeError(f"invalid {label}")
-    return value
 
 
-def _parse_legacy_moves(
-    value: object,
-    kind: Literal["archive", "promote"],
-) -> tuple[TimelineMove, ...]:
-    if not isinstance(value, list) or not value:
-        raise RuntimeError("invalid pending timeline moves")
-    moves: list[TimelineMove] = []
-    seen_sources: set[TimelineLocation] = set()
-    seen_targets: set[TimelineLocation] = set()
-    seen_backups: set[TimelineLocation] = set()
-    for raw_move in value:
-        if not isinstance(raw_move, dict):
-            raise RuntimeError("invalid pending timeline move")
-        source_name = _parse_legacy_filename(
-            raw_move.get("source"), "pending timeline source"
-        )
-        target_name = _parse_legacy_filename(
-            raw_move.get("target"), "pending timeline target"
-        )
-        backup_name = raw_move.get("backup")
-        backup = (
-            None
-            if backup_name is None
-            else TimelineLocation(
-                "history",
-                _parse_legacy_filename(
-                    backup_name, "pending timeline backup"
-                ),
-            )
-        )
-        if backup is not None and (
-            not backup.name.startswith(f".{source_name}.")
-            or not backup.name.endswith(".duplicate")
-        ):
-            raise RuntimeError("invalid pending timeline backup")
-        source = TimelineLocation(
-            "queue" if kind == "archive" else "history", source_name
-        )
-        target = TimelineLocation(
-            "history" if kind == "archive" else "queue", target_name
-        )
-        source_sequence = strict_sequence(source_name)
-        if source_sequence is None or strict_sequence(target_name) != source_sequence:
-            raise RuntimeError("pending timeline move changes the storage sequence")
-        renamed_source = TimelineLocation("queue", source_name)
-        if (
-            kind == "promote"
-            and not source.path().exists()
-            and not target.path().exists()
-            and (backup is None or not backup.path().exists())
-            and renamed_source.path().exists()
-        ):
-            source = renamed_source
-        if source in seen_sources or target in seen_targets:
-            raise RuntimeError("pending timeline contains a duplicate move")
-        if (
-            backup is not None
-            and (
-                backup in seen_backups
-                or backup in seen_sources
-                or backup in seen_targets
-                or backup in {source, target}
-            )
-        ):
-            raise RuntimeError("pending timeline contains a duplicate backup")
-        seen_sources.add(source)
-        seen_targets.add(target)
-        if backup is not None:
-            seen_backups.add(backup)
-        moves.append(
-            TimelineMove(
-                source,
-                target,
-                backup,
-                preserve_existing_target=kind == "promote" and backup is not None,
-            )
-        )
-    occupied = seen_sources | seen_targets
-    if seen_backups & occupied:
-        raise RuntimeError("pending timeline backup overlaps a moved row")
-    return tuple(moves)
 
 
-def _queue_ids_for_recovery(
-    order_version: Literal[1, 2],
-    legacy_catalog: IdentityCatalog | None,
-) -> tuple[str, ...]:
-    """Read Queue order directly so legacy adaptation cannot re-enter recovery."""
-    paths = sorted(QUEUE.glob("*.txt"), key=chunk_sort_key)
-    if order_version == 1:
-        return tuple(path.stem for path in paths)
-    if legacy_catalog is None:
-        raise RuntimeError("version-2 timeline recovery requires the identity catalog")
-    live = {
-        public_id: path
-        for path in paths
-        if (sequence := strict_sequence(path.name)) is not None
-        and (public_id := legacy_catalog.public_id(sequence)) is not None
-    }
-    try:
-        payload = json.loads(QUEUE_ORDER.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
-        saved_ids: list[str] = []
-    else:
-        raw_ids = payload.get("ids") if isinstance(payload, dict) else None
-        saved_ids = (
-            raw_ids
-            if isinstance(payload, dict)
-            and payload.get("version") == 2
-            and isinstance(raw_ids, list)
-            and all(is_public_id(item) for item in raw_ids)
-            else []
-        )
-    ordered = list(
-        dict.fromkeys(
-            speechicle_id for speechicle_id in saved_ids if speechicle_id in live
-        )
-    )
-    ordered.extend(
-        speechicle_id for speechicle_id in live if speechicle_id not in ordered
-    )
-    return tuple(ordered)
 
 
-def _adapt_legacy_archive(
-    intent: dict[object, object],
-    legacy_catalog: IdentityCatalog | None,
-) -> TimelinePlan:
-    order_version = _legacy_order_version(intent)
-    if order_version == 2 and legacy_catalog is None:
-        raise RuntimeError("version-2 timeline recovery requires the identity catalog")
-    name = _parse_legacy_filename(intent.get("name"), "pending archive filename")
-    previous_history = _parse_legacy_ids(
-        intent.get("previous_history_ids"),
-        "pending previous History IDs",
-        order_version,
-    )
-    desired_history = _parse_legacy_ids(
-        intent.get("desired_history_ids"),
-        "pending final History IDs",
-        order_version,
-    )
-    source = TimelineLocation("queue", name)
-    target = TimelineLocation("history", name)
-    if source.path().exists():
-        moves: tuple[TimelineMove, ...] = ()
-        final_history = previous_history
-    elif target.path().exists():
-        moves = (TimelineMove(source, target),)
-        final_history = desired_history
-    else:
-        raise RuntimeError(f"pending archive row is missing: {name}")
-    queue_ids = _queue_ids_for_recovery(order_version, legacy_catalog)
-    return TimelinePlan(
-        "archive",
-        moves,
-        queue_ids,
-        previous_history,
-        queue_ids,
-        final_history,
-        order_version,
-        2,
-    )
 
 
-def _adapt_legacy_plan(
-    intent: dict[object, object],
-    legacy_catalog: IdentityCatalog | None,
-) -> TimelinePlan:
-    """Translate supported v1 journals into the common convergence model."""
-    operation = intent.get("operation")
-    if operation == "archive":
-        return _adapt_legacy_archive(intent, legacy_catalog)
-    if operation not in {"archive_batch", "promote"}:
-        raise RuntimeError("unknown pending timeline transaction")
-    order_version = _legacy_order_version(intent)
-    if order_version == 2 and legacy_catalog is None:
-        raise RuntimeError("version-2 timeline recovery requires the identity catalog")
-    kind: Literal["archive", "promote"] = (
-        "archive" if operation == "archive_batch" else "promote"
-    )
-    previous_queue = _parse_legacy_ids(
-        intent.get("previous_queue_ids", []),
-        "pending previous Queue IDs",
-        order_version,
-    )
-    previous_history = _parse_legacy_ids(
-        intent.get("previous_history_ids", []),
-        "pending previous History IDs",
-        order_version,
-    )
-    return TimelinePlan(
-        kind,
-        _parse_legacy_moves(intent.get("moves"), kind),
-        previous_queue,
-        previous_history,
-        _parse_legacy_ids(
-            intent.get("queue_ids"), "pending final Queue IDs", order_version
-        ),
-        _parse_legacy_ids(
-            intent.get("history_ids"), "pending final History IDs", order_version
-        ),
-        order_version,
-        2,
-    )
 
 
-def _converge_timeline_move(move: TimelineMove) -> None:
-    source = move.source.path()
-    target = move.target.path()
-    backup = move.backup.path() if move.backup is not None else None
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if move.preserve_existing_target:
-        if target.exists():
-            source.unlink(missing_ok=True)
-        elif source.exists():
-            os.replace(source, target)
-        elif backup is not None and backup.exists():
-            os.replace(backup, target)
-        else:
-            raise RuntimeError(f"pending timeline row is missing: {move.source.name}")
-    elif source.exists():
-        if backup is not None and target.exists():
-            if backup.exists():
-                raise RuntimeError(
-                    f"pending timeline backup is ambiguous: {backup.name}"
-                )
-            os.replace(target, backup)
-        os.replace(source, target)
-    elif not target.exists():
-        raise RuntimeError(f"pending timeline row is missing: {move.source.name}")
-    if backup is not None:
-        backup.unlink(missing_ok=True)
 
 
-def _converge_timeline_plan(plan: TimelinePlan) -> None:
-    """Finish a parsed plan's declared final layout without guessing state."""
-    for move in plan.moves:
-        _converge_timeline_move(move)
-    _write_order_payload(QUEUE_ORDER, list(plan.queue_ids), plan.order_version)
-    _write_order_payload(HISTORY_ORDER, list(plan.history_ids), plan.order_version)
 
 
-def _embed_target_sections(
-    migration: EmbedPublicIdsMigration,
-) -> tuple[
-    tuple[
-        Literal["queue", "spoken", "failed"],
-        tuple[EmbedPublicIdsFile, ...],
-    ],
-    ...,
-]:
-    return (
-        ("queue", migration.queue_files),
-        ("spoken", migration.history_files),
-        ("failed", migration.failed_files),
-    )
 
 
-def _migration_root_path(root: str) -> Path:
-    return {"queue": QUEUE, "spoken": SPOKEN, "failed": FAILED}[root]
 
 
-def _validate_embed_inventory(
-    migration: EmbedPublicIdsMigration,
-    *,
-    final: bool,
-) -> None:
-    """Check every planned file and hash before moving anything."""
-    actual = {
-        (root, path.name): path
-        for root in ("queue", "spoken", "failed")
-        for path in _migration_root_path(root).glob("*.txt")
-    }
-    allowed: set[tuple[str, str]] = set()
-    expected_final: dict[tuple[str, str], str] = {}
-    for target_root, files in _embed_target_sections(migration):
-        for item in files:
-            source_key = (item.source_root, item.source_name)
-            target_key = (target_root, item.target_name)
-            allowed.update((source_key, target_key))
-            expected_final[target_key] = item.sha256
-            present = [key for key in {source_key, target_key} if key in actual]
-            if final:
-                if present != [target_key] and not (
-                    source_key == target_key and present == [source_key]
-                ):
-                    raise RuntimeError("embedded identity target inventory is incomplete")
-            elif len(present) != 1:
-                raise RuntimeError("embedded identity migration state is ambiguous")
-            for key in present:
-                if file_hash(actual[key]) != item.sha256:
-                    raise RuntimeError(f"speech file hash changed: {key[1]}")
-    for removal in migration.removals:
-        removal_key = (removal.source_root, removal.source_name)
-        allowed.add(removal_key)
-        if removal_key in actual and file_hash(actual[removal_key]) != removal.sha256:
-            raise RuntimeError(f"speech file hash changed: {removal.source_name}")
-        if final and removal_key in actual:
-            raise RuntimeError("embedded replay duplicate still exists")
-    if final:
-        if set(actual) != set(expected_final):
-            raise RuntimeError("embedded identity final inventory has undeclared files")
-    elif not set(actual) <= allowed:
-        raise RuntimeError("embedded identity source inventory has undeclared files")
 
 
-def _converge_embed_public_ids(migration: EmbedPublicIdsMigration) -> None:
-    _validate_embed_inventory(migration, final=False)
-    for removal in migration.removals:
-        (_migration_root_path(removal.source_root) / removal.source_name).unlink(
-            missing_ok=True
-        )
-    for target_root, files in _embed_target_sections(migration):
-        target_directory = _migration_root_path(target_root)
-        target_directory.mkdir(parents=True, exist_ok=True)
-        for item in files:
-            source = _migration_root_path(item.source_root) / item.source_name
-            target = target_directory / item.target_name
-            if source == target or (target.exists() and not source.exists()):
-                continue
-            if source.exists() and not target.exists():
-                os.replace(source, target)
-                continue
-            raise RuntimeError(f"could not converge embedded identity {item.source_name}")
-    _validate_embed_inventory(migration, final=True)
-    _write_order_payload(HISTORY_ORDER, list(migration.history_ids), 2)
-    _write_order_payload(QUEUE_ORDER, list(migration.queue_ids), 2)
 
 
-def _load_legacy_catalog() -> IdentityCatalog | None:
-    try:
-        return load_catalog(IDENTITY_INDEX)
-    except (TypeError, ValueError) as error:
-        raise RuntimeError(str(error)) from error
 
 
-def _recover_timeline_intent() -> str | None:
-    if not TIMELINE_INTENT.exists():
-        return None
-    try:
-        intent = json.loads(TIMELINE_INTENT.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError) as error:
-        raise RuntimeError("could not read the pending timeline transaction") from error
-    if not isinstance(intent, dict):
-        raise RuntimeError("invalid pending timeline transaction")
-
-    operation = intent.get("operation")
-    version = intent.get("version")
-    if version == 1 and operation == "identity_migration":
-        _apply_identity_migration_intent(intent)
-    elif version == 3 and operation == "embed_public_ids":
-        try:
-            migration = embed_public_ids_from_intent(intent)
-        except (TypeError, ValueError) as error:
-            raise RuntimeError("invalid pending embedded identity migration") from error
-        _converge_embed_public_ids(migration)
-        _canonical_inventory()
-        _normalize_canonical_orders()
-        IDENTITY_INDEX.unlink(missing_ok=True)
-    elif version == 3 and operation == "timeline_plan":
-        _converge_timeline_plan(_parse_v3_timeline_plan(intent))
-    elif version in {1, 2}:
-        legacy_catalog = _load_legacy_catalog()
-        plan = (
-            _parse_legacy_v2_timeline_plan(intent, legacy_catalog)
-            if version == 2
-            else _adapt_legacy_plan(intent, legacy_catalog)
-        )
-        _converge_timeline_plan(plan)
-    else:
-        raise RuntimeError("invalid pending timeline transaction")
-
-    TIMELINE_INTENT.unlink()
-    invalidate_history()
-    log(f"recovered pending timeline {operation} transaction")
-    assert isinstance(operation, str)
-    return operation
 
 
-def _recover_current_timeline_plan() -> None:
-    """Finish a pending canonical plan before accepting another mutation."""
-    with timeline_mutation_lock(), _history_order_lock, _queue_order_lock:
-        if not TIMELINE_INTENT.exists():
-            return
-        try:
-            intent = json.loads(TIMELINE_INTENT.read_text(encoding="utf-8"))
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            raise RuntimeError(
-                "could not read the pending timeline transaction"
-            ) from error
-        if not (
-            isinstance(intent, dict)
-            and intent.get("version") == 3
-            and intent.get("operation") == "timeline_plan"
-        ):
-            raise RuntimeError("pending storage upgrade requires an engine restart")
-        _converge_timeline_plan(_parse_v3_timeline_plan(intent))
-        TIMELINE_INTENT.unlink()
-        invalidate_history()
 
 
-def _all_speech_files_are_canonical() -> bool:
-    paths = [
-        path
-        for directory in (QUEUE, SPOKEN, FAILED)
-        for path in directory.glob("*.txt")
-    ]
-    return all(_is_canonical_speech_name(path.name) for path in paths)
 
 
-def _is_canonical_speech_name(name: str) -> bool:
-    try:
-        SpeechicleFilename.parse(name)
-    except ValueError:
-        return False
-    return True
 
 
-def _order_is_strict_v2(path: Path) -> bool:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return True
-    except (OSError, ValueError, json.JSONDecodeError):
-        return False
-    try:
-        _strict_order_ids(payload, path.name)
-    except RuntimeError:
-        return False
-    return True
 
 
-def _normalized_order_ids(
-    directory: Path,
-    order_path: Path,
-    *,
-    history: bool,
-) -> list[str]:
-    inventory = {
-        public_id_for_path(path): path for path in directory.glob("*.txt")
-    }
-    try:
-        payload = json.loads(order_path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        saved: list[str] = []
-    except (OSError, ValueError, json.JSONDecodeError) as error:
-        raise RuntimeError(f"invalid speech order: {order_path.name}") from error
-    else:
-        saved = _strict_order_ids(payload, order_path.name)
-    ordered = list(
-        dict.fromkeys(public_id for public_id in saved if public_id in inventory)
-    )
-    missing = sorted(
-        (path for public_id, path in inventory.items() if public_id not in ordered),
-        key=history_sort_key if history else chunk_sort_key,
-        reverse=history,
-    )
-    missing_ids = [public_id_for_path(path) for path in missing]
-    return [*missing_ids, *ordered] if history else [*ordered, *missing_ids]
 
 
-def _normalize_canonical_orders() -> None:
-    queue_ids = _normalized_order_ids(QUEUE, QUEUE_ORDER, history=False)
-    history_ids = _normalized_order_ids(SPOKEN, HISTORY_ORDER, history=True)
-    _write_order_payload(HISTORY_ORDER, history_ids, 2)
-    _write_order_payload(QUEUE_ORDER, queue_ids, 2)
-    if set(queue_ids) != {
-        public_id_for_path(path) for path in QUEUE.glob("*.txt")
-    } or len(queue_ids) != len(set(queue_ids)):
-        raise RuntimeError("Queue order does not cover canonical storage")
-    if set(history_ids) != {
-        public_id_for_path(path) for path in SPOKEN.glob("*.txt")
-    } or len(history_ids) != len(set(history_ids)):
-        raise RuntimeError("History order does not cover canonical storage")
 
 
-def prepare_timeline_storage(instance_lock: EngineInstanceLock) -> None:
-    """Recover old storage and finish canonical filenames under the engine lock."""
-    if not instance_lock.held:
-        raise RuntimeError("timeline preparation requires the held engine instance lock")
-    QUEUE.mkdir(parents=True, exist_ok=True)
-    SPOKEN.mkdir(parents=True, exist_ok=True)
-    FAILED.mkdir(parents=True, exist_ok=True)
-    with timeline_mutation_lock(), _history_order_lock, _queue_order_lock:
-        if _recover_timeline_intent() == "embed_public_ids":
-            return
-        needs_embed = not _all_speech_files_are_canonical()
-        if not needs_embed:
-            try:
-                _canonical_inventory()
-            except RuntimeError:
-                needs_embed = True
-            needs_embed = needs_embed or not (
-                _order_is_strict_v2(QUEUE_ORDER)
-                and _order_is_strict_v2(HISTORY_ORDER)
-            )
-        if needs_embed:
-            try:
-                migration = plan_embed_public_ids(
-                    QUEUE,
-                    SPOKEN,
-                    FAILED,
-                    QUEUE_ORDER,
-                    HISTORY_ORDER,
-                    IDENTITY_INDEX,
-                    DEFAULT_VOICE,
-                )
-            except (TypeError, ValueError) as error:
-                raise RuntimeError(str(error)) from error
-            if migration is None:
-                raise RuntimeError("storage repair did not produce an embed migration")
-            _write_timeline_intent(migration.intent_payload())
-            _converge_embed_public_ids(migration)
-        _canonical_inventory()
-        _normalize_canonical_orders()
-        IDENTITY_INDEX.unlink(missing_ok=True)
-        if TIMELINE_INTENT.exists():
-            TIMELINE_INTENT.unlink()
-        invalidate_history()
 
 
-def history_snapshot() -> tuple[int, list[dict[str, object]]]:
-    """Return the cached bounded archive view, refreshing when invalidated."""
-    global _history_dirty, _history_count, _history_items
-    with _history_order_lock:
-        if _history_dirty:
-            history_files = history_files_in_order()
-            items: list[dict[str, object]] = []
-            read_failed = False
-            previous = {str(item["id"]): item for item in _history_items}
-            for path in history_files[:HISTORY_LIMIT]:
-                speechicle_id = public_id_for_path(path)
-                try:
-                    text = path.read_text(encoding="utf-8").strip()
-                except OSError:
-                    read_failed = True
-                    text = str(previous.get(speechicle_id, {}).get("text", ""))
-                items.append(
-                    {
-                        "id": speechicle_id,
-                        "text": text,
-                        "voice": voice_from_name(path.name),
-                    }
-                )
-            _history_count = len(history_files)
-            _history_items = items
-            _history_dirty = read_failed
-        return _history_count, _history_items
 
 
 def activate_next_chunk(st: State) -> bool:
@@ -2792,6 +1556,41 @@ def load_timeline_revision_seed() -> tuple[int, str | None]:
     if fingerprint is None or not isinstance(revision, int) or revision < 0:
         return 0, None
     return revision, fingerprint
+
+
+def publish_startup_status(timeline_revision: int) -> dict[str, object]:
+    """Publish liveness before storage preparation reads the timeline."""
+    previous: dict[str, object] | None = None
+    try:
+        candidate = json.loads(STATUS.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+    else:
+        if (
+            _snapshot_is_valid(candidate)
+            and fingerprint_from_status(candidate) is not None
+            and not _contains_private_status_field(candidate)
+        ):
+            assert isinstance(candidate, dict)
+            previous = candidate
+
+    payload = {
+        "version": STATUS_VERSION,
+        "timeline_revision": timeline_revision,
+        "state": "loading",
+        "updated_at": time.time(),
+        "engine_pid": os.getpid(),
+        "current": previous.get("current") if previous is not None else None,
+        "queue_count": previous.get("queue_count", 0) if previous is not None else 0,
+        "queue": previous.get("queue", []) if previous is not None else [],
+        "history_count": (
+            previous.get("history_count", 0) if previous is not None else 0
+        ),
+        "history": previous.get("history", []) if previous is not None else [],
+    }
+    publish_startup_json(STATUS, payload, "startup status")
+    heartbeat(force=True)
+    return payload
 
 
 def publish_status(
@@ -2938,118 +1737,16 @@ def publish_status(
     return None
 
 
-def _find_chunk(directory: Path, chunk_id: str) -> Path | None:
-    return _path_for_public_id(directory, chunk_id)
 
 
-def _voice_variant_path(source: Path, voice: str) -> Path:
-    if AVAILABLE_VOICES and voice not in AVAILABLE_VOICES:
-        raise ValueError(f"unknown Kokoro voice: {voice}")
-    if not re.fullmatch(r"[ab][fm]_[a-z0-9_]+", voice):
-        raise ValueError(f"invalid Kokoro voice: {voice}")
-    try:
-        filename = SpeechicleFilename.parse(source.name)
-    except ValueError as error:
-        raise ValueError(f"invalid speech filename: {source.name}") from error
-    return source.with_name(filename.with_voice(voice).render())
 
 
-def _replace_queue_voice_unlocked(source: Path, voice: str) -> Path:
-    """Rename one queued row in place so its chronology does not change."""
-    target = _voice_variant_path(source, voice)
-    if target == source:
-        return source
-    if not source.is_file():
-        raise ValueError(f"waiting chunk not found: {source.stem}")
-    if target.exists():
-        raise RuntimeError(f"voice target already exists: {target.stem}")
-    os.replace(source, target)
-    return target
 
 
-def _replace_queue_voice(source: Path, voice: str) -> Path:
-    with timeline_mutation_lock():
-        _recover_current_timeline_plan()
-        return _replace_queue_voice_unlocked(source, voice)
 
 
-def _promote_history_selection_unlocked(
-    source: Path,
-    voice: str | None = None,
-) -> tuple[Path, int]:
-    """Move the playback boundary to one History item without changing display order."""
-    with _history_order_lock, _queue_order_lock:
-        history = history_files_in_order()
-        try:
-            selected_index = history.index(source)
-        except ValueError as error:
-            raise ValueError(f"history chunk not found: {source.stem}") from error
-
-        promoted = history[: selected_index + 1]
-        remaining_history = history[selected_index + 1 :]
-        previous_queue = queue_files_in_order()
-        selected_source = promoted[-1]
-        selected_target = QUEUE / selected_source.name
-        if voice and voice != voice_from_name(selected_source.name):
-            selected_target = _voice_variant_path(selected_target, voice)
-            if selected_target.exists():
-                raise RuntimeError(
-                    f"voice target already exists: {selected_target.stem}"
-                )
-        targets = [
-            selected_target if archived == selected_source else QUEUE / archived.name
-            for archived in promoted
-        ]
-        playback_order = list(reversed(targets))
-        target_names = {path.name for path in targets}
-        remaining_queue = [
-            path for path in previous_queue if path.name not in target_names
-        ]
-        planned_moves = tuple(
-            TimelineMove(
-                source=TimelineLocation("history", archived.name),
-                target=TimelineLocation("queue", queued.name),
-                backup=TimelineLocation(
-                    "history",
-                    f".{archived.name}.{os.getpid()}.{time.time_ns()}.duplicate",
-                )
-                if queued.exists()
-                else None,
-                preserve_existing_target=queued.exists(),
-            )
-            for archived, queued in zip(promoted, targets)
-        )
-        plan = TimelinePlan(
-            kind="promote",
-            moves=planned_moves,
-            previous_queue_ids=tuple(
-                public_id_for_path(path) for path in previous_queue
-            ),
-            previous_history_ids=tuple(public_id_for_path(path) for path in history),
-            queue_ids=tuple(
-                public_id_for_path(path)
-                for path in [*playback_order, *remaining_queue]
-            ),
-            history_ids=tuple(
-                public_id_for_path(path) for path in remaining_history
-            ),
-        )
-        try:
-            _execute_timeline_plan(plan)
-        except MutationOutcomeUnconfirmed:
-            raise
-        except (OSError, RuntimeError, ValueError) as error:
-            raise RuntimeError("could not move History playback boundary") from error
-    return selected_target, len(promoted)
 
 
-def promote_history_selection(
-    source: Path,
-    voice: str | None = None,
-) -> tuple[Path, int]:
-    with timeline_mutation_lock():
-        _recover_current_timeline_plan()
-        return _promote_history_selection_unlocked(source, voice)
 
 
 def _discard_buffer(buf: "queue.Queue") -> int:
@@ -3280,67 +1977,16 @@ def do_clear(buf: "queue.Queue", st: State) -> bool:
 
 def apply_delete_mutation(request: DeleteMutation) -> None:
     """Delete one History row without disturbing the active queue."""
-    if _find_chunk(QUEUE, request.id) is not None:
-        raise ValueError(f"history chunk is active: {request.id}")
-    with _history_order_lock:
-        history_item = _find_chunk(SPOKEN, request.id)
-        if history_item is None:
-            log(f"QUEUE delete {request.id}; already absent")
-            return
-        try:
-            history_item.unlink()
-        except OSError as error:
-            raise RuntimeError(
-                f"could not delete history chunk: {request.id}"
-            ) from error
-        try:
-            save_history_order()
-        except (OSError, RuntimeError) as order_error:
-            log(
-                f"history order update error after deleting {history_item.name}: "
-                f"{order_error}"
-            )
-    invalidate_history()
+    history_item = timeline.delete_history(request.id)
+    if history_item is None:
+        log(f"QUEUE delete {request.id}; already absent")
+        return
     log(f"QUEUE delete {history_item.name}")
 
 
 def apply_history_move_mutation(request: MoveMutation) -> None:
     """Move one History row within the saved visible order."""
-    with _history_order_lock:
-        ordered_history = history_files_in_order()
-        source = next(
-            (
-                path
-                for path in ordered_history
-                if public_id_for_path(path) == request.id
-            ),
-            None,
-        )
-        if source is None:
-            raise ValueError(f"history chunk not found: {request.id}")
-        if request.before_id == request.id:
-            return
-        ordered_history.remove(source)
-        if request.before_id is None:
-            ordered_history.insert(
-                min(HISTORY_LIMIT - 1, len(ordered_history)), source
-            )
-        else:
-            destination = next(
-                (
-                    path
-                    for path in ordered_history
-                    if public_id_for_path(path) == request.before_id
-                ),
-                None,
-            )
-            if destination is None:
-                raise ValueError(
-                    f"history destination not found: {request.before_id}"
-                )
-            ordered_history.insert(ordered_history.index(destination), source)
-        save_history_order(ordered_history)
-    invalidate_history()
+    source = timeline.reorder_history(request.id, request.before_id, HISTORY_LIMIT)
     log(
         f"QUEUE move History {source.name} before "
         f"{request.before_id or 'visible end'}"
@@ -3348,15 +1994,7 @@ def apply_history_move_mutation(request: MoveMutation) -> None:
 
 
 def _waiting_mutation_source(chunk_id: str) -> tuple[list[Path], Path]:
-    ordered = queue_files_in_order()
-    source = next(
-        (path for path in ordered if public_id_for_path(path) == chunk_id),
-        None,
-    )
-    current_path = ordered[0] if ordered else None
-    if source is None or source == current_path:
-        raise ValueError(f"waiting chunk not found: {chunk_id}")
-    return ordered, source
+    return timeline.waiting_source(chunk_id)
 
 
 def _finish_waiting_mutation(
@@ -3392,29 +2030,9 @@ def apply_waiting_move_mutation(
     request: MoveMutation,
 ) -> None:
     """Move one Waiting row without changing Current."""
-    ordered, source = _waiting_mutation_source(request.id)
+    current_path, source = timeline.reorder_waiting(request.id, request.before_id)
     if request.before_id == request.id:
         return
-    current_path = ordered[0]
-    ordered.remove(source)
-    if request.before_id is None:
-        ordered.append(source)
-    else:
-        destination = next(
-            (
-                path
-                for path in ordered
-                if public_id_for_path(path) == request.before_id
-                and path != current_path
-            ),
-            None,
-        )
-        if destination is None:
-            raise ValueError(
-                f"waiting destination not found: {request.before_id}"
-            )
-        ordered.insert(ordered.index(destination), source)
-    save_queue_order(ordered)
     discarded = _finish_waiting_mutation(buf, st, current_path.name)
     log(
         f"QUEUE move {source.name} before {request.before_id or 'end'}; "
@@ -3513,7 +2131,6 @@ def process_mutation_requests(
         )
         result_id: str | None = None
         try:
-            _recover_current_timeline_plan()
             if isinstance(request, PlayMutation):
                 play_effect = apply_play_mutation(buf, st, request)
                 effect = play_effect or effect
@@ -4226,12 +2843,15 @@ def serve() -> None:
     if not instance_lock.acquire():
         return
     try:
-        prepare_timeline_storage(instance_lock)
-        timeline_revision, timeline_fingerprint_seed = load_timeline_revision_seed()
-        STATUS.unlink(missing_ok=True)
+        STORAGE_READY.unlink(missing_ok=True)
         clear_transient_signals()
+        timeline_revision, timeline_fingerprint_seed = load_timeline_revision_seed()
+        publish_startup_status(timeline_revision)
+        prepare_timeline_storage(instance_lock)
+        publish_storage_ready()
         run_engine_loop(timeline_revision, timeline_fingerprint_seed)
     finally:
+        STORAGE_READY.unlink(missing_ok=True)
         instance_lock.release()
 
 
