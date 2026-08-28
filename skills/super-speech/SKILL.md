@@ -98,11 +98,17 @@ Treat IDs as random strings that must be copied exactly. Copy an ID from
 `status`; never build one from a path or filename. Passing `--voice` to `play`
 keeps the same text and timeline position.
 
+In status JSON, `current` is the Speechicle at the playback boundary. It may be
+playing, paused, being prepared, or stopped. `queue` contains only the
+Speechicles waiting after it. Together they are the Queue described in the app
+and documentation.
+
 ## Install or repair headless mode
 
-The desktop installer already includes the engine, model, voices, and this
-skill. It installs the skill when it finds an existing Codex or Claude
-directory. It does not require system Python.
+The desktop package includes the engine, model, voices, and this skill. When the
+app starts, it installs a missing skill or updates an unchanged app-managed
+copy in each existing Codex or Claude directory. It preserves a locally edited
+skill. Desktop mode does not require system Python.
 
 For headless mode, run the bundled installer with Python 3.11, 3.12, or 3.13:
 
@@ -116,8 +122,9 @@ py -3.12 "$skill\scripts\install.py" --agent codex
 python3 "$SKILL/scripts/install.py" --agent codex
 ```
 
-Use `--agent claude` for Claude Code. To repair the skill that is currently
-running these instructions, point the installer back at this exact directory:
+Use `--agent claude` for Claude Code. To repair the private environment or
+models using the engine source already installed, point the installer back at
+this exact directory:
 
 ```powershell
 py -3.12 "$skill\scripts\install.py" --target "$skill"
@@ -126,6 +133,10 @@ py -3.12 "$skill\scripts\install.py" --target "$skill"
 ```bash
 python3 "$SKILL/scripts/install.py" --target "$SKILL"
 ```
+
+This same-directory repair does not fetch newer skill code. To update the skill
+itself, run `install.py` from a newer repository checkout or release copy and
+use `--target` with this installed skill directory.
 
 The headless installer keeps its private environment, models, queue, status,
 and logs under this skill's `runtime/` directory.

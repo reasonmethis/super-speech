@@ -7,7 +7,7 @@ with [README.md](README.md) for the product overview.
 
 The desktop app and headless skill use one Python speech engine. Electron adds
 the window, tray, installer, and process supervision. It does not have another
-queue or playback implementation.
+timeline storage or playback implementation.
 
 ## System at a glance
 
@@ -30,9 +30,15 @@ headless skill.
 - A **piece** is a smaller sentence-sized part prepared inside a Speechicle
 - **Current** is the one Speechicle at the playback boundary
 - **Waiting** contains the Speechicles that will play after Current
-- **History** contains Speechicles that finished, were skipped, or were cleared
+- **Queue** contains Current and all Waiting Speechicles
+- **History** contains inactive Speechicles. Rows enter it after playback
+  finishes, Skip, Clear all, manual archive, or a synthesis failure after
+  playback began
 - The **playback boundary** is Current's place between Waiting and History
 - A **row** is the card that represents a Speechicle in the desktop window
+
+Older command names and internal variables sometimes use `chunk` for a
+Speechicle. A `piece` always means one smaller synthesis unit inside it.
 
 ## One spoken reply from start to finish
 
@@ -59,7 +65,7 @@ Each runtime has three speech directories:
 - `spoken/` owns History membership
 - `failed/` holds speech that could not be prepared
 
-A current filename looks like:
+A Queue filename looks like:
 
 ```text
 001-sp_0123456789abcdef0000000000000001-af_heart-g250-say.txt
@@ -72,8 +78,9 @@ the ID exactly and do not need to understand the filename.
 `next-sequence.json` stores a random installation ID and the next number to use.
 Startup creates or repairs it after checking the complete stored timeline.
 Normal `speak` calls then advance this small file without scanning History. The
-installation ID and never-reused number together make each public ID unique. A
-crash after advancing the counter can leave a skipped number, which is safe.
+installation ID and sequence together form each public ID. The counter advances
+before its Queue file is published, so a crash can leave a skipped number but
+cannot reuse the reserved public ID during normal operation.
 
 Physical directories decide which section contains a Speechicle.
 `queue-order.json` and `history-order.json` store only the relative display
@@ -122,7 +129,11 @@ Each snapshot contains:
   History count changes
 - The current piece number and its Unicode text offsets
 
-The renderer uses the piece offsets to show the current sentence without
+For historical protocol compatibility, JSON `current` contains Current while
+JSON `queue` contains Waiting only. The conceptual Queue is both fields
+together.
+
+The renderer uses the piece offsets to show the current piece without
 changing the text's line breaks. It uses the revision before the publication
 time, so a late status read cannot undo a newer command result.
 
@@ -210,11 +221,18 @@ checked status and sends commands through Electron main.
   requests and results
 - `app/electron/main.ts` owns the window, tray, engine supervision, installer
   integration, and calls from the renderer
+- `app/electron/atomic-file.ts` safely replaces the desktop install manifest
+- `app/electron/managed-skill.ts` preserves or updates app-managed agent skills
+- `app/electron/tray-menu.ts` maps engine state to the tray playback action
 - `app/src/runtime.ts` checks engine status and defines the desktop data shapes
 - `app/src/main.ts` renders the window and handles its controls
-- `app/src/queue-drag-model.ts` contains the pure drag state machine
+- `app/src/timeline-drag-model.ts` contains the pure drag state machine
 - `tests/test_timeline_storage.py` covers storage directly
-- `tests/test_pauseable_audio.py` covers engine playback and command behavior
+- `tests/engine_test_support.py` provides shared, silent engine test fixtures
+- `tests/test_engine_protocol.py` covers public status and mutation shapes
+- `tests/test_engine_lifecycle.py` covers commands, status, startup, and controls
+- `tests/test_engine_playback.py` covers selection, synthesis, and playback
+- `tests/test_engine_timeline.py` covers engine-level mutations and recovery
 - `app/src/*.test.ts` covers desktop status and drag logic without audio
 - `app/scripts/smoke_*.mjs` covers real Electron behavior with silent audio
 
@@ -238,8 +256,8 @@ Electron frontend remains a separate MIT process. See
 ### Python-only app
 
 This would use one language, but a polished cross-platform tray UI would still
-need Qt/QML or another large UI runtime. SpotKey's Tkinter and pystray approach
-is Windows-focused and does not meet this app's UI goal.
+need Qt/QML or another large UI runtime. The earlier Tkinter and pystray
+prototype was Windows-focused and did not meet this app's UI goal.
 
 ### Electron plus Python
 
@@ -257,5 +275,6 @@ not a packaging shortcut.
 
 ### Tauri plus Python
 
-This adds Rust as a third language without removing the Python engine. It also
-reintroduces a desktop stack that Littlebird already replaced with Electron.
+This adds Rust as a third language without removing the Python engine. An
+earlier Tauri attempt also had enough desktop integration problems that this
+project chose Electron instead.

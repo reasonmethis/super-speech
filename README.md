@@ -3,8 +3,11 @@
 Super Speech gives AI coding agents private voice replies. Kokoro speech
 synthesis runs on the user's computer, without an API key or per-word bill.
 
-One agent reply becomes one Speechicle in the app. A Speechicle stays one row
-and one replay target even though the engine prepares it in smaller pieces.
+One agent reply becomes one Speechicle. A Speechicle stays one row and one
+replay target even though the engine prepares it in smaller pieces. Queue
+contains the Speechicle at the playback boundary, called Current, plus any
+Waiting Speechicles. Current may be playing, paused, preparing, or stopped.
+Finished, skipped, cleared, or manually archived Speechicles appear in History.
 
 ## Choose an installation
 
@@ -38,8 +41,8 @@ Ask your agent:
 
 The agent sends the complete spoken reply to the platform launcher once. The
 launcher uses the desktop engine when the app is installed. Otherwise, it uses
-the engine packaged inside the headless skill. The app and the skill do not
-have separate queue or playback implementations.
+the engine packaged inside the headless skill. The app and the skill share the
+same Queue and playback implementation.
 
 ## Desktop controls
 
@@ -47,11 +50,11 @@ have separate queue or playback implementations.
 - Click a Speechicle to expand its text, or double-click it to play it
 - Drag Waiting and History rows to reorder them
 - Use a row's three-dot menu for the actions that apply there. Current has
-  Pause or Resume; Waiting and History have Play. All rows have Copy text and
-  Change voice. Delete moves Waiting into History and permanently removes
-  History
+  Pause or Resume while active and Play when stopped; Waiting and History have
+  Play. All rows have Copy text and Change voice. Delete moves Waiting into
+  History and permanently removes History
 - Clear all stops Current and moves active speech into History
-- Click the main text area to follow the current sentence in a larger view
+- Click the main text area to follow the current piece in a larger view
 - Use Settings to switch between Light and Dark appearance
 
 ## How it works

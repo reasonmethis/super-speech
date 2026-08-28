@@ -64,10 +64,10 @@ Use the launcher for normal commands. Do not set model or runtime environment
 variables manually and do not call the private virtual-environment executable
 directly.
 
-## Update or repair
+## Repair or update
 
-Run the installed skill's installer again and point it back at the same skill
-folder:
+To repair the private Python environment or model files, run the installed
+skill's installer against the same skill folder:
 
 ```powershell
 py -3.12 "$skill\scripts\install.py" --target "$skill"
@@ -77,8 +77,24 @@ py -3.12 "$skill\scripts\install.py" --target "$skill"
 python3 "$SKILL/scripts/install.py" --target "$SKILL"
 ```
 
-Reinstallation stops the headless engine, replaces the files supplied by Super
-Speech, updates Python packages, verifies the models, and preserves `runtime/`.
+This stops the headless engine, reinstalls Python packages from the engine
+source already in the skill, verifies the models, and preserves the timeline in
+`runtime/`. It does not fetch newer skill code.
+
+To update the skill code, run `install.py` from a newer repository checkout or
+release copy and target the installed skill. From a newer repository checkout:
+
+```powershell
+py -3.12 .\skills\super-speech\scripts\install.py --target "$skill"
+```
+
+```bash
+python3 skills/super-speech/scripts/install.py --target "$SKILL"
+```
+
+The newer installer copies its `SKILL.md`, launchers, and engine source into the
+installed skill before updating the private environment. It still preserves
+`runtime/`.
 
 ## If the desktop app is installed later
 
