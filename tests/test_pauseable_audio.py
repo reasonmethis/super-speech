@@ -59,9 +59,6 @@ def configure_runtime(engine, tmp_path: Path) -> None:
     engine.IDENTITY_INDEX = tmp_path / "speechicle-index.json"
     engine.PLAYBACK_COMMAND_LOCK = tmp_path / "playback-command.lock"
     engine.PLAYBACK_COMMAND_SEQUENCE = tmp_path / "playback-command-sequence.json"
-    engine._identity_cache_path = None
-    engine._identity_cache = None
-    engine._identity_ready_path = None
     engine.QUEUE.mkdir(exist_ok=True)
     engine.SPOKEN.mkdir(exist_ok=True)
 
@@ -103,8 +100,45 @@ def set_current(
 
 
 def speechicle_id(engine, path: Path) -> str:
-    engine.ensure_identity_catalog()
     return engine.public_id_for_path(path)
+
+
+def prepare_timeline(engine) -> None:
+    instance_lock = engine.EngineInstanceLock()
+    assert instance_lock.acquire()
+    try:
+        engine.prepare_timeline_storage(instance_lock)
+    finally:
+        instance_lock.release()
+
+
+def write_upgrade_catalog(engine, *paths: Path) -> None:
+    filenames = [engine.SpeechicleFilename.parse(path.name) for path in paths]
+    engine.write_catalog(
+        engine.IDENTITY_INDEX,
+        engine.IdentityCatalog(
+            max((filename.sequence for filename in filenames), default=0) + 1,
+            {
+                filename.sequence: filename.public_id
+                for filename in filenames
+            },
+        ),
+    )
+
+
+def ready_status(engine, engine_pid: int, updated_at: float = 0) -> dict[str, object]:
+    return {
+        "version": engine.STATUS_VERSION,
+        "timeline_revision": 0,
+        "state": "loading",
+        "updated_at": updated_at,
+        "engine_pid": engine_pid,
+        "current": None,
+        "queue_count": 0,
+        "queue": [],
+        "history_count": 0,
+        "history": [],
+    }
 
 
 def request_mutation(engine, mutation_type: str, **fields: object) -> str:
@@ -216,10 +250,10 @@ def test_status_exposes_pause_current_chunk_and_queue(tmp_path: Path) -> None:
 
     configure_runtime(engine, tmp_path)
     engine.PAUSE.touch()
-    (engine.QUEUE / "001-af_heart-say.txt").write_text("Current words", encoding="utf-8")
+    (engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt").write_text("Current words", encoding="utf-8")
     full_queue_text = "Queued words " * 40
     for number in range(2, 7):
-        (engine.QUEUE / f"{number:03}-bm_fable-say.txt").write_text(
+        (engine.QUEUE / f"{number:03d}-sp_{number:032x}-bm_fable-say.txt").write_text(
             full_queue_text if number == 2 else f"Queued words {number}",
             encoding="utf-8",
         )
@@ -228,7 +262,7 @@ def test_status_exposes_pause_current_chunk_and_queue(tmp_path: Path) -> None:
     set_current(
         engine,
         state,
-        engine.QUEUE / "001-af_heart-say.txt",
+        engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt",
         piece=1,
         piece_count=2,
     )
@@ -258,7 +292,7 @@ def test_status_stays_playing_while_the_current_item_waits_for_its_next_piece(
 ) -> None:
     engine = load_engine("super_speech_engine_status_between_pieces")
     configure_runtime(engine, tmp_path)
-    current = engine.QUEUE / "001-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     current.write_text("Two sentences. Still one speech item.", encoding="utf-8")
     state = engine.State()
     set_current(engine, state, current, piece=1, piece_count=2)
@@ -275,7 +309,7 @@ def test_audio_stream_failure_propagates_before_playback(
 ) -> None:
     engine = load_engine("super_speech_engine_stream_start_failure")
     configure_runtime(engine, tmp_path)
-    path = engine.QUEUE / "001-af_heart-say.txt"
+    path = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     path.write_text("Speech", encoding="utf-8")
     state = engine.State()
     set_current(engine, state, path)
@@ -305,7 +339,7 @@ def test_fatal_engine_stop_cannot_start_another_audio_stream(
 ) -> None:
     engine = load_engine("super_speech_engine_fatal_before_stream")
     configure_runtime(engine, tmp_path)
-    path = engine.QUEUE / "001-af_heart-say.txt"
+    path = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     path.write_text("Do not start", encoding="utf-8")
     state = engine.State()
     state.stop.set()
@@ -339,7 +373,7 @@ def test_engine_stream_failure_leaves_current_item_visible_in_stopped_queue(
     engine.MODEL_DIR.mkdir()
     engine.MODEL_PATH.touch()
     engine.VOICES_PATH.touch()
-    queued = engine.QUEUE / "001-af_heart-say.txt"
+    queued = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     queued.write_text("Keep visible", encoding="utf-8")
 
     class FakeKokoro:
@@ -407,7 +441,7 @@ def test_status_stays_playing_while_queued_audio_is_being_prepared(
 ) -> None:
     engine = load_engine("super_speech_engine_status_preparing")
     configure_runtime(engine, tmp_path)
-    queued = engine.QUEUE / "001-af_heart-say.txt"
+    queued = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     queued.write_text("Still being prepared", encoding="utf-8")
 
     engine.publish_status("idle", engine.State(), force=True)
@@ -436,8 +470,8 @@ def test_status_uses_queue_first_when_cached_progress_cannot_apply(
 ) -> None:
     engine = load_engine(f"super_speech_engine_status_{cached_projection}_progress")
     configure_runtime(engine, tmp_path)
-    first = engine.QUEUE / "001-af_heart-say.txt"
-    second = engine.QUEUE / "002-bm_fable-say.txt"
+    first = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    second = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
     first.write_text("Durable first", encoding="utf-8")
     second.write_text("Cached second", encoding="utf-8")
     state = engine.State()
@@ -459,8 +493,8 @@ def test_status_uses_queue_first_when_cached_progress_cannot_apply(
 def test_activation_replaces_progress_that_is_not_for_queue_first(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_activation_durable_first")
     configure_runtime(engine, tmp_path)
-    first = engine.QUEUE / "001-af_heart-say.txt"
-    second = engine.QUEUE / "002-bm_fable-say.txt"
+    first = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    second = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
     first.write_text("Durable first", encoding="utf-8")
     second.write_text("Stale projection", encoding="utf-8")
     state = engine.State()
@@ -495,8 +529,8 @@ def test_status_count_matches_the_items_in_the_same_snapshot(
 ) -> None:
     engine = load_engine("super_speech_engine_status_read_failure")
     configure_runtime(engine, tmp_path)
-    readable = engine.QUEUE / "001-af_heart-say.txt"
-    unreadable = engine.QUEUE / "002-af_heart-say.txt"
+    readable = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    unreadable = engine.QUEUE / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
     readable.write_text("Readable", encoding="utf-8")
     unreadable.write_text("Temporarily locked", encoding="utf-8")
     original_read_text = Path.read_text
@@ -522,7 +556,15 @@ def test_status_command_retries_a_transient_windows_read_error(
     engine = load_engine("super_speech_engine_status_retry")
     configure_runtime(engine, tmp_path)
     engine.STATUS.write_text(
-        json.dumps({"version": engine.STATUS_VERSION, "state": "idle"}),
+        json.dumps(
+            {
+                "version": engine.STATUS_VERSION,
+                "timeline_revision": 0,
+                "state": "stopped",
+                "queue": [],
+                "history": [],
+            }
+        ),
         encoding="utf-8",
     )
     original_read_text = Path.read_text
@@ -541,7 +583,7 @@ def test_status_command_retries_a_transient_windows_read_error(
     engine.print_status()
 
     assert attempts == 2
-    assert json.loads(capsys.readouterr().out)["state"] == "idle"
+    assert json.loads(capsys.readouterr().out)["state"] == "stopped"
 
 
 def test_persistent_status_publication_failure_stops_the_engine(
@@ -549,7 +591,7 @@ def test_persistent_status_publication_failure_stops_the_engine(
 ) -> None:
     engine = load_engine("super_speech_engine_status_write_failure")
     configure_runtime(engine, tmp_path)
-    engine.ensure_identity_catalog()
+    prepare_timeline(engine)
     state = engine.State()
     engine._status_failure_started = engine.time.monotonic() - 6
     real_replace = engine.os.replace
@@ -576,7 +618,7 @@ def test_status_publication_uses_a_fresh_temporary_file_after_failure(
 ) -> None:
     engine = load_engine("super_speech_engine_status_fresh_temporary")
     configure_runtime(engine, tmp_path)
-    engine.ensure_identity_catalog()
+    prepare_timeline(engine)
     state = engine.State()
     temporary_paths: list[Path] = []
     real_replace = engine.os.replace
@@ -606,10 +648,10 @@ def test_backward_wall_clock_cannot_throttle_or_regress_status(
 ) -> None:
     engine = load_engine("super_speech_engine_backward_status_clock")
     configure_runtime(engine, tmp_path)
-    current = engine.QUEUE / "001-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     current.write_text("Current progress", encoding="utf-8")
     state = engine.State()
-    engine.ensure_identity_catalog()
+    prepare_timeline(engine)
     monotonic_times = iter([10.0, 10.1, 10.3])
     wall_times = iter([100.0, 80.0])
     monkeypatch.setattr(engine.time, "monotonic", lambda: next(monotonic_times))
@@ -639,7 +681,7 @@ def test_stopped_status_contains_the_same_queue_items_as_its_count(
 ) -> None:
     engine = load_engine("super_speech_engine_stopped_status")
     configure_runtime(engine, tmp_path)
-    waiting = engine.QUEUE / "001-af_heart-say.txt"
+    waiting = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     waiting.write_text("Waiting", encoding="utf-8")
 
     engine.print_status()
@@ -653,11 +695,13 @@ def test_enqueue_text_reserves_the_next_queue_number(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_enqueue")
 
     configure_runtime(engine, tmp_path)
-    (engine.SPOKEN / "007-af_heart-say.txt").write_text("Earlier", encoding="utf-8")
+    (engine.SPOKEN / "007-sp_00000000000000000000000000000007-af_heart-say.txt").write_text("Earlier", encoding="utf-8")
 
     queued = engine.enqueue_text("New words", "bm_fable", 650)
 
-    assert queued.name == "008-bm_fable-g650-say.txt"
+    assert engine.SpeechicleFilename.parse(queued.name).sequence == 8
+    assert engine.voice_from_name(queued.name) == "bm_fable"
+    assert engine.gap_from_name(queued.name) == 0.65
     assert queued.read_text(encoding="utf-8") == "New words"
 
 
@@ -686,9 +730,9 @@ def test_enqueue_publishes_the_final_queue_path_only_after_writing_text(
 def test_queue_order_preserves_stable_ids_and_appends_new_arrivals(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_queue_order")
     configure_runtime(engine, tmp_path)
-    first = engine.QUEUE / "001-af_heart-say.txt"
-    second = engine.QUEUE / "002-bm_fable-say.txt"
-    third = engine.QUEUE / "003-af_bella-say.txt"
+    first = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    second = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
+    third = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_bella-say.txt"
     for path in (first, second, third):
         path.write_text(path.stem, encoding="utf-8")
 
@@ -708,8 +752,8 @@ def test_queue_order_uses_its_cache_during_a_transient_sidecar_lock(
 ) -> None:
     engine = load_engine("super_speech_engine_queue_order_lock")
     configure_runtime(engine, tmp_path)
-    first = engine.QUEUE / "001-af_heart-say.txt"
-    second = engine.QUEUE / "002-af_heart-say.txt"
+    first = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    second = engine.QUEUE / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
     first.write_text("First", encoding="utf-8")
     second.write_text("Second", encoding="utf-8")
     engine.save_queue_order([second, first])
@@ -728,13 +772,13 @@ def test_queue_order_uses_its_cache_during_a_transient_sidecar_lock(
 def test_voice_rename_recovery_keeps_the_saved_queue_position(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_voice_rename_recovery")
     configure_runtime(engine, tmp_path)
-    first = engine.QUEUE / "001-af_heart-say.txt"
-    second = engine.QUEUE / "002-af_heart-say.txt"
-    third = engine.QUEUE / "003-af_heart-say.txt"
+    first = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    second = engine.QUEUE / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
+    third = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_heart-say.txt"
     for path in (first, second, third):
         path.write_text(path.stem, encoding="utf-8")
     engine.save_queue_order([third, first, second])
-    renamed = engine.QUEUE / "001-bm_fable-say.txt"
+    renamed = engine.QUEUE / "001-sp_00000000000000000000000000000001-bm_fable-say.txt"
     os.replace(first, renamed)
 
     assert engine.queue_files_in_order() == [third, renamed, second]
@@ -744,9 +788,9 @@ def test_failed_sequence_numbers_are_not_reused(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_failed_sequence")
     configure_runtime(engine, tmp_path)
     engine.FAILED.mkdir()
-    (engine.FAILED / "007-af_heart-say.txt").write_text("Failed", encoding="utf-8")
+    (engine.FAILED / "007-sp_00000000000000000000000000000007-af_heart-say.txt").write_text("Failed", encoding="utf-8")
 
-    assert engine.enqueue_text("New", "af_heart").name == "008-af_heart-say.txt"
+    assert engine.chunk_sequence(engine.enqueue_text("New", "af_heart")) == 8
 
 
 def test_moving_a_waiting_chunk_resets_banked_audio_but_keeps_current(
@@ -754,9 +798,9 @@ def test_moving_a_waiting_chunk_resets_banked_audio_but_keeps_current(
 ) -> None:
     engine = load_engine("super_speech_engine_queue_move")
     configure_runtime(engine, tmp_path)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    second = engine.QUEUE / "002-bm_fable-say.txt"
-    third = engine.QUEUE / "003-af_bella-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    second = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
+    third = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_bella-say.txt"
     for path in (current, second, third):
         path.write_text(path.stem, encoding="utf-8")
     buffered: queue.Queue = queue.Queue()
@@ -797,8 +841,8 @@ def test_reset_waiting_buffer_keeps_queue_first_claim_without_cached_progress(
 ) -> None:
     engine = load_engine("super_speech_engine_reset_without_projection")
     configure_runtime(engine, tmp_path)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    waiting = engine.QUEUE / "002-bm_fable-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
     current.write_text("Current", encoding="utf-8")
     waiting.write_text("Waiting", encoding="utf-8")
     buffered: queue.Queue = queue.Queue()
@@ -823,9 +867,9 @@ def test_waiting_mutation_does_not_reread_storage_after_commit(
 ) -> None:
     engine = load_engine(f"super_speech_engine_post_commit_reset_{action}")
     configure_runtime(engine, tmp_path)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    second = engine.QUEUE / "002-bm_fable-say.txt"
-    third = engine.QUEUE / "003-af_bella-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    second = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
+    third = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_bella-say.txt"
     for path in (current, second, third):
         path.write_text(path.stem, encoding="utf-8")
     state = engine.State()
@@ -884,9 +928,9 @@ def test_post_commit_waiting_reset_failure_is_never_reported_as_rejected(
     engine = load_engine(f"super_speech_engine_waiting_unconfirmed_{action}")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    second = engine.QUEUE / "002-bm_fable-say.txt"
-    third = engine.QUEUE / "003-af_bella-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    second = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
+    third = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_bella-say.txt"
     for path in (current, second, third):
         path.write_text(path.stem, encoding="utf-8")
     if action == "archive":
@@ -929,9 +973,9 @@ def test_waiting_move_temp_write_failure_is_rejected_without_stopping_engine(
     engine = load_engine("super_speech_engine_move_precommit_failure")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    second = engine.QUEUE / "002-bm_fable-say.txt"
-    third = engine.QUEUE / "003-af_bella-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    second = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
+    third = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_bella-say.txt"
     for path in (current, second, third):
         path.write_text(path.stem, encoding="utf-8")
     request_id = request_mutation(
@@ -968,9 +1012,9 @@ def test_waiting_move_accepts_verified_replace_success_after_replace_error(
     engine = load_engine("super_speech_engine_move_verified_replace")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    second = engine.QUEUE / "002-bm_fable-say.txt"
-    third = engine.QUEUE / "003-af_bella-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    second = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
+    third = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_bella-say.txt"
     for path in (current, second, third):
         path.write_text(path.stem, encoding="utf-8")
     request_id = request_mutation(
@@ -1002,9 +1046,9 @@ def test_waiting_mutation_preserves_mid_speechicle_piece_stream(
     engine = load_engine(f"super_speech_engine_mid_piece_{action}")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    waiting = engine.QUEUE / "002-bm_fable-say.txt"
-    moved = engine.QUEUE / "003-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
+    moved = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_heart-say.txt"
     for path in (current, waiting, moved):
         path.write_text(path.stem, encoding="utf-8")
     held_piece = (current, "piece 3")
@@ -1053,9 +1097,9 @@ def test_archiving_one_waiting_chunk_preserves_current_and_remaining_queue(
 ) -> None:
     engine = load_engine("super_speech_engine_queue_archive")
     configure_runtime(engine, tmp_path)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    archived = engine.QUEUE / "002-bm_fable-say.txt"
-    remaining = engine.QUEUE / "003-af_bella-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    archived = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
+    remaining = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_bella-say.txt"
     for path in (current, archived, remaining):
         path.write_text(path.stem, encoding="utf-8")
     buffered: queue.Queue = queue.Queue()
@@ -1086,8 +1130,8 @@ def test_archiving_one_waiting_chunk_preserves_current_and_remaining_queue(
 def test_waiting_mutation_rejects_queue_first_without_a_projection(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_first_queue_mutation")
     configure_runtime(engine, tmp_path)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    waiting = engine.QUEUE / "002-bm_fable-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
     current.write_text("Current", encoding="utf-8")
     waiting.write_text("Waiting", encoding="utf-8")
     state = engine.State()
@@ -1105,8 +1149,8 @@ def test_waiting_mutation_rejects_queue_first_without_a_projection(tmp_path: Pat
 def test_deleting_one_history_chunk_preserves_waiting_queue(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_history_delete")
     configure_runtime(engine, tmp_path)
-    waiting = engine.QUEUE / "002-af_heart-say.txt"
-    history = engine.SPOKEN / "001-bm_fable-say.txt"
+    waiting = engine.QUEUE / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
+    history = engine.SPOKEN / "001-sp_00000000000000000000000000000001-bm_fable-say.txt"
     waiting.write_text("Waiting", encoding="utf-8")
     history.write_text("History", encoding="utf-8")
     assert engine.history_snapshot()[0] == 1
@@ -1136,10 +1180,11 @@ def test_history_delete_is_rejected_while_the_same_item_is_active(
 ) -> None:
     engine = load_engine("super_speech_engine_history_delete_active")
     configure_runtime(engine, tmp_path)
-    queued = engine.QUEUE / "001-bm_fable-say.txt"
+    queued = engine.QUEUE / "001-sp_00000000000000000000000000000001-bm_fable-say.txt"
     history = engine.SPOKEN / queued.name
     queued.write_text("Active replay", encoding="utf-8")
     history.write_text("Active replay", encoding="utf-8")
+    prepare_timeline(engine)
 
     with pytest.raises(ValueError, match="history chunk is active"):
         engine.apply_delete_mutation(
@@ -1155,7 +1200,7 @@ def test_history_delete_succeeds_when_the_order_sidecar_cannot_update(
 ) -> None:
     engine = load_engine("super_speech_engine_history_delete_order_failure")
     configure_runtime(engine, tmp_path)
-    history = engine.SPOKEN / "001-bm_fable-say.txt"
+    history = engine.SPOKEN / "001-sp_00000000000000000000000000000001-bm_fable-say.txt"
     history.write_text("History", encoding="utf-8")
     assert engine.history_snapshot()[0] == 1
 
@@ -1177,7 +1222,7 @@ def test_archive_still_succeeds_when_the_order_sidecar_cannot_update(
 ) -> None:
     engine = load_engine("super_speech_engine_archive_order_failure")
     configure_runtime(engine, tmp_path)
-    queued = engine.QUEUE / "001-af_heart-say.txt"
+    queued = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     queued.write_text("Speech", encoding="utf-8")
 
     def fail_order_update(*_args) -> None:
@@ -1194,9 +1239,9 @@ def test_archive_waits_for_history_order_before_moving_the_current_row(
 ) -> None:
     engine = load_engine("super_speech_engine_history_order_fallback")
     configure_runtime(engine, tmp_path)
-    older = engine.SPOKEN / "001-af_heart-say.txt"
-    newer = engine.SPOKEN / "002-af_heart-say.txt"
-    current = engine.QUEUE / "003-af_heart-say.txt"
+    older = engine.SPOKEN / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    newer = engine.SPOKEN / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
+    current = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_heart-say.txt"
     for path in (older, newer, current):
         path.write_text(path.stem, encoding="utf-8")
     engine.save_history_order([newer, older])
@@ -1221,9 +1266,9 @@ def test_waiting_move_publishes_a_committed_result(
     engine = load_engine("super_speech_engine_queue_request")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    first = engine.QUEUE / "002-bm_fable-say.txt"
-    second = engine.QUEUE / "003-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    first = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
+    second = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     first.write_text("First waiting", encoding="utf-8")
     second.write_text("Second waiting", encoding="utf-8")
@@ -1251,7 +1296,7 @@ def test_timed_out_unclaimed_queue_request_cannot_apply_later(
     engine = load_engine("super_speech_engine_queue_timeout")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    waiting = engine.QUEUE / "001-af_heart-say.txt"
+    waiting = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     waiting.write_text("Keep me", encoding="utf-8")
     request_id = request_mutation(
         engine, "archive", id=speechicle_id(engine, waiting)
@@ -1343,7 +1388,7 @@ def test_history_delete_publishes_a_committed_result(
     engine = load_engine("super_speech_engine_history_delete_request")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    history = engine.SPOKEN / "001-af_heart-say.txt"
+    history = engine.SPOKEN / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     history.write_text("History", encoding="utf-8")
 
     request_id = request_mutation(
@@ -1400,7 +1445,7 @@ def test_queue_request_rejects_the_current_chunk(
     engine = load_engine("super_speech_engine_queue_current")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     state = engine.State()
     set_current(engine, state, current)
@@ -1421,8 +1466,8 @@ def test_unconfirmed_waiting_archive_stops_the_engine(
     engine = load_engine("super_speech_engine_queue_archive_unconfirmed")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-bm_fable-say.txt"
-    waiting = engine.QUEUE / "002-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-bm_fable-say.txt"
+    waiting = engine.QUEUE / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     waiting.write_text("Waiting", encoding="utf-8")
     state = engine.State()
@@ -1450,7 +1495,8 @@ def test_enqueue_text_ignores_a_stale_legacy_reservation(tmp_path: Path) -> None
 
     queued = engine.enqueue_text("New words", "af_heart")
 
-    assert queued.name == "001-af_heart-say.txt"
+    assert engine.chunk_sequence(queued) == 1
+    assert engine.voice_from_name(queued.name) == "af_heart"
 
 
 @pytest.mark.parametrize(
@@ -1472,7 +1518,7 @@ def test_speak_command_starts_engine_before_queueing(
 ) -> None:
     engine = load_engine("super_speech_engine_cli")
     configure_runtime(engine, tmp_path)
-    queued = tmp_path / "001-af_heart-g300-say.txt"
+    queued = tmp_path / "001-sp_00000000000000000000000000000001-af_heart-g300-say.txt"
     calls: list[object] = []
 
     monkeypatch.setattr(engine, "start_engine", lambda: calls.append("start"))
@@ -1504,9 +1550,7 @@ def test_start_engine_waits_for_fresh_status_after_startup_cleanup(
     engine.VOICES_PATH.touch()
     fake_pid = 4321
     engine.STATUS.write_text(
-        json.dumps(
-            {"version": engine.STATUS_VERSION, "engine_pid": 1111, "updated_at": 0}
-        ),
+        json.dumps(ready_status(engine, 1111)),
         encoding="utf-8",
     )
     running_checks = 0
@@ -1528,13 +1572,7 @@ def test_start_engine_waits_for_fresh_status_after_startup_cleanup(
         nonlocal sleeps
         sleeps += 1
         engine.STATUS.write_text(
-            json.dumps(
-                {
-                    "version": engine.STATUS_VERSION,
-                    "engine_pid": fake_pid,
-                    "updated_at": engine.time.time() + 1,
-                }
-            ),
+            json.dumps(ready_status(engine, fake_pid, engine.time.time() + 1)),
             encoding="utf-8",
         )
 
@@ -1553,9 +1591,7 @@ def test_start_engine_accepts_an_existing_current_engine_that_is_loading(
     engine = load_engine("super_speech_engine_existing_start_ready")
     configure_runtime(engine, tmp_path)
     engine.STATUS.write_text(
-        json.dumps(
-            {"version": engine.STATUS_VERSION, "engine_pid": 4321, "updated_at": 0}
-        ),
+        json.dumps(ready_status(engine, 4321)),
         encoding="utf-8",
     )
 
@@ -1587,9 +1623,7 @@ def test_start_engine_ignores_status_from_a_previous_lock_owner(
     engine = load_engine("super_speech_engine_existing_stale_owner")
     configure_runtime(engine, tmp_path)
     engine.STATUS.write_text(
-        json.dumps(
-            {"version": engine.STATUS_VERSION, "engine_pid": 1111, "updated_at": 1}
-        ),
+        json.dumps(ready_status(engine, 1111, 1)),
         encoding="utf-8",
     )
     sleeps = 0
@@ -1598,9 +1632,7 @@ def test_start_engine_ignores_status_from_a_previous_lock_owner(
         nonlocal sleeps
         sleeps += 1
         engine.STATUS.write_text(
-            json.dumps(
-                {"version": engine.STATUS_VERSION, "engine_pid": 2222, "updated_at": 2}
-            ),
+            json.dumps(ready_status(engine, 2222, 2)),
             encoding="utf-8",
         )
 
@@ -1629,12 +1661,82 @@ def test_start_engine_rejects_the_previous_selection_protocol(
         encoding="utf-8",
     )
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    monkeypatch.setattr(engine, "wait_for_engine_status", lambda: False)
+    monkeypatch.setattr(engine, "process_exists", lambda process_id: process_id == 4321)
 
     with pytest.raises(
         RuntimeError,
         match=rf"unsupported protocol version {engine.STATUS_VERSION - 1}",
     ):
         engine.start_engine()
+
+
+def test_start_engine_retries_after_stopped_status_releases_the_instance_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_status_reader_lock")
+    configure_runtime(engine, tmp_path)
+    engine.MODEL_PATH = tmp_path / "model.onnx"
+    engine.VOICES_PATH = tmp_path / "voices.bin"
+    engine.MODEL_PATH.touch()
+    engine.VOICES_PATH.touch()
+    engine.STATUS.write_text(
+        json.dumps(
+            {
+                **ready_status(engine, 1111),
+                "version": engine.STATUS_VERSION - 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+
+    def hold_for_stopped_status() -> None:
+        lock = engine.EngineInstanceLock()
+        assert lock.acquire()
+        holder_ready.set()
+        release_holder.wait(timeout=2)
+        lock.release()
+
+    holder = threading.Thread(target=hold_for_stopped_status)
+    holder.start()
+    assert holder_ready.wait(timeout=2)
+    launched_lock = engine.EngineInstanceLock()
+    launched = False
+    real_sleep = engine.time.sleep
+
+    class FakeProcess:
+        pid = 2222
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    def launch(*_args, **_kwargs) -> FakeProcess:
+        nonlocal launched
+        launched = True
+        assert launched_lock.acquire()
+        engine.STATUS.write_text(
+            json.dumps(ready_status(engine, FakeProcess.pid, engine.time.time())),
+            encoding="utf-8",
+        )
+        return FakeProcess()
+
+    def let_status_finish(_seconds: float) -> None:
+        release_holder.set()
+        real_sleep(0.01)
+
+    monkeypatch.setattr(engine.subprocess, "Popen", launch)
+    monkeypatch.setattr(engine.time, "sleep", let_status_finish)
+    try:
+        engine.start_engine()
+    finally:
+        release_holder.set()
+        holder.join(timeout=2)
+        launched_lock.release()
+
+    assert launched
 
 
 def test_pause_and_resume_commands_share_the_runtime_signal(tmp_path: Path) -> None:
@@ -1763,7 +1865,7 @@ def test_unreadable_stop_prevents_destructive_mutation_admission(
     engine = load_engine("super_speech_engine_unreadable_stop")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     request_mutation(engine, "clear")
     engine.publish_ordered_marker(engine.STOP)
@@ -1840,7 +1942,7 @@ def test_interrupt_rejects_pending_mutations_with_authoritative_results(
     engine = load_engine("super_speech_engine_interrupt_requests")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    selected = engine.QUEUE / "001-af_heart-say.txt"
+    selected = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     selected.write_text("Selected", encoding="utf-8")
     selected_id = speechicle_id(engine, selected)
     play_request = request_mutation(engine, "play", id=selected_id, voice=None)
@@ -1949,7 +2051,7 @@ def test_playing_current_chunk_resumes_without_reordering(
     engine = load_engine("super_speech_engine_play_current")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     engine.PAUSE.touch()
     engine.STOP.touch()
@@ -1983,7 +2085,7 @@ def test_play_and_pause_apply_in_publication_order(
     engine = load_engine(f"super_speech_engine_ordered_pause_{pause_remains}")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     state = engine.State()
     set_current(engine, state, current)
@@ -2015,7 +2117,7 @@ def test_pause_published_while_play_commits_is_not_removed(
     engine = load_engine("super_speech_engine_pause_during_play")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     state = engine.State()
     set_current(engine, state, current)
@@ -2044,7 +2146,7 @@ def test_legacy_pause_is_preserved_by_legacy_play_and_replaced_by_new_play(
     engine = load_engine("super_speech_engine_legacy_pause_upgrade")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     state = engine.State()
     set_current(engine, state, current)
@@ -2080,8 +2182,8 @@ def test_playing_queue_first_resumes_when_cached_projection_is_missing(
     engine = load_engine("super_speech_engine_play_current_without_projection")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    waiting = engine.QUEUE / "002-bm_fable-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
     current.write_text("Current", encoding="utf-8")
     waiting.write_text("Waiting", encoding="utf-8")
     engine.PAUSE.touch()
@@ -2106,10 +2208,10 @@ def test_selecting_upcoming_chunk_archives_everything_older(
     engine = load_engine("super_speech_engine_play_upcoming")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    older = engine.QUEUE / "002-af_heart-say.txt"
-    selected = engine.QUEUE / "003-bm_fable-say.txt"
-    newer = engine.QUEUE / "004-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    older = engine.QUEUE / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
+    selected = engine.QUEUE / "003-sp_00000000000000000000000000000003-bm_fable-say.txt"
+    newer = engine.QUEUE / "004-sp_00000000000000000000000000000004-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     older.write_text("Older waiting", encoding="utf-8")
     selected.write_text("Selected", encoding="utf-8")
@@ -2148,9 +2250,9 @@ def test_selecting_waiting_chunk_without_playback_archives_older_waiting_items(
     engine = load_engine("super_speech_engine_play_waiting")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    older = engine.QUEUE / "001-af_heart-say.txt"
-    selected = engine.QUEUE / "002-bm_fable-say.txt"
-    newer = engine.QUEUE / "003-af_heart-say.txt"
+    older = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    selected = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
+    newer = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_heart-say.txt"
     for path in (older, selected, newer):
         path.write_text(path.stem, encoding="utf-8")
     state = engine.State()
@@ -2175,8 +2277,8 @@ def test_selecting_waiting_chunk_rejects_an_archive_failure(
     engine = load_engine("super_speech_engine_play_archive_failure")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    older = engine.QUEUE / "001-af_heart-say.txt"
-    selected = engine.QUEUE / "002-bm_fable-say.txt"
+    older = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    selected = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
     older.write_text("Older", encoding="utf-8")
     selected.write_text("Selected", encoding="utf-8")
     monkeypatch.setattr(engine, "_archive_many", lambda _paths: False)
@@ -2200,10 +2302,10 @@ def test_selection_rolls_back_earlier_archives_when_a_later_archive_fails(
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     older = [
-        engine.QUEUE / "001-af_heart-say.txt",
-        engine.QUEUE / "002-af_heart-say.txt",
+        engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt",
+        engine.QUEUE / "002-sp_00000000000000000000000000000002-af_heart-say.txt",
     ]
-    selected = engine.QUEUE / "003-bm_fable-say.txt"
+    selected = engine.QUEUE / "003-sp_00000000000000000000000000000003-bm_fable-say.txt"
     for path in [*older, selected]:
         path.write_text(path.stem, encoding="utf-8")
     real_replace = engine.os.replace
@@ -2232,10 +2334,10 @@ def test_voice_selection_rolls_back_when_archiving_an_older_item_fails(
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     older = [
-        engine.QUEUE / "001-af_heart-say.txt",
-        engine.QUEUE / "002-af_heart-say.txt",
+        engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt",
+        engine.QUEUE / "002-sp_00000000000000000000000000000002-af_heart-say.txt",
     ]
-    selected = engine.QUEUE / "003-af_heart-say.txt"
+    selected = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_heart-say.txt"
     for path in [*older, selected]:
         path.write_text(path.stem, encoding="utf-8")
     real_replace = engine.os.replace
@@ -2266,7 +2368,7 @@ def test_replaying_history_reuses_its_id_without_duplicating_history(
     engine = load_engine("super_speech_engine_play_history")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    archived = engine.SPOKEN / "007-bm_fable-g350-say.txt"
+    archived = engine.SPOKEN / "007-sp_00000000000000000000000000000007-bm_fable-g350-say.txt"
     archived.write_text("Say this again", encoding="utf-8")
     state = engine.State()
 
@@ -2299,7 +2401,7 @@ def test_history_selection_moves_only_the_playback_boundary(
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     history = [
-        engine.SPOKEN / f"{number:03d}-af_heart-say.txt"
+        engine.SPOKEN / f"{number:03d}-sp_{number:032x}-af_heart-say.txt"
         for number in range(5, 0, -1)
     ]
     for path in history:
@@ -2368,9 +2470,9 @@ def test_history_replay_stays_first_after_an_engine_restart(
     engine = load_engine("super_speech_engine_replay_restart")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    archived = engine.SPOKEN / "001-bm_fable-say.txt"
-    first = engine.QUEUE / "010-af_heart-say.txt"
-    second = engine.QUEUE / "011-af_heart-say.txt"
+    archived = engine.SPOKEN / "001-sp_00000000000000000000000000000001-bm_fable-say.txt"
+    first = engine.QUEUE / "010-sp_0000000000000000000000000000000a-af_heart-say.txt"
+    second = engine.QUEUE / "011-sp_0000000000000000000000000000000b-af_heart-say.txt"
     for path in (archived, first, second):
         path.write_text(path.stem, encoding="utf-8")
     engine.save_queue_order([first, second])
@@ -2392,19 +2494,31 @@ def test_startup_repairs_an_interrupted_history_boundary_move(tmp_path: Path) ->
         engine.SPOKEN / "002-af_heart-say.txt",
         engine.SPOKEN / "001-af_heart-say.txt",
     ]
-    for path in history:
-        path.write_text(path.stem, encoding="utf-8")
-    engine.save_history_order(history)
+    for index, path in enumerate(history, start=1):
+        path.write_text(f"History {index}", encoding="utf-8")
+    engine.QUEUE_ORDER.write_text(
+        json.dumps({"version": 1, "ids": []}), encoding="utf-8"
+    )
+    engine.HISTORY_ORDER.write_text(
+        json.dumps({"version": 1, "ids": [path.stem for path in history]}),
+        encoding="utf-8",
+    )
     os.replace(history[0], engine.QUEUE / history[0].name)
     os.replace(history[1], engine.QUEUE / history[1].name)
 
-    engine.repair_interrupted_timeline_transition()
+    prepare_timeline(engine)
 
-    assert engine.queue_files_in_order() == [
-        engine.QUEUE / history[1].name,
-        engine.QUEUE / history[0].name,
+    assert [path.read_text(encoding="utf-8") for path in engine.queue_files_in_order()] == [
+        "History 2",
+        "History 1",
     ]
-    assert engine.history_files_in_order() == [history[2]]
+    assert [
+        path.read_text(encoding="utf-8") for path in engine.history_files_in_order()
+    ] == ["History 3"]
+    assert all(
+        engine.SpeechicleFilename.parse(path.name)
+        for path in [*engine.QUEUE.glob("*.txt"), *engine.SPOKEN.glob("*.txt")]
+    )
 
 
 def test_startup_removes_legacy_active_history_duplicates(tmp_path: Path) -> None:
@@ -2416,13 +2530,22 @@ def test_startup_removes_legacy_active_history_duplicates(tmp_path: Path) -> Non
     active.write_text("Active", encoding="utf-8")
     duplicate.write_text("Active", encoding="utf-8")
     earlier.write_text("Earlier", encoding="utf-8")
-    engine.save_history_order([duplicate, earlier])
+    engine.QUEUE_ORDER.write_text(
+        json.dumps({"version": 1, "ids": [active.stem]}), encoding="utf-8"
+    )
+    engine.HISTORY_ORDER.write_text(
+        json.dumps({"version": 1, "ids": [duplicate.stem, earlier.stem]}),
+        encoding="utf-8",
+    )
 
-    engine.repair_interrupted_timeline_transition()
+    prepare_timeline(engine)
 
-    assert active.exists()
-    assert not duplicate.exists()
-    assert engine.history_files_in_order() == [earlier]
+    assert [path.read_text(encoding="utf-8") for path in engine.queue_files_in_order()] == [
+        "Active"
+    ]
+    assert [
+        path.read_text(encoding="utf-8") for path in engine.history_files_in_order()
+    ] == ["Earlier"]
 
 
 def test_startup_promotes_rows_above_a_legacy_history_replay(tmp_path: Path) -> None:
@@ -2432,16 +2555,33 @@ def test_startup_promotes_rows_above_a_legacy_history_replay(tmp_path: Path) -> 
     middle = engine.SPOKEN / "002-af_heart-say.txt"
     selected_history = engine.SPOKEN / "001-af_heart-say.txt"
     selected_queue = engine.QUEUE / selected_history.name
-    for path in (newest, middle, selected_history, selected_queue):
-        path.write_text(path.stem, encoding="utf-8")
-    engine.save_history_order([newest, middle, selected_history])
+    for path, text in (
+        (newest, "Newest"),
+        (middle, "Middle"),
+        (selected_history, "Selected"),
+        (selected_queue, "Selected"),
+    ):
+        path.write_text(text, encoding="utf-8")
+    engine.QUEUE_ORDER.write_text(
+        json.dumps({"version": 1, "ids": [selected_queue.stem]}),
+        encoding="utf-8",
+    )
+    engine.HISTORY_ORDER.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "ids": [newest.stem, middle.stem, selected_history.stem],
+            }
+        ),
+        encoding="utf-8",
+    )
 
-    engine.repair_interrupted_timeline_transition()
+    prepare_timeline(engine)
 
-    assert engine.queue_files_in_order() == [
-        selected_queue,
-        engine.QUEUE / middle.name,
-        engine.QUEUE / newest.name,
+    assert [path.read_text(encoding="utf-8") for path in engine.queue_files_in_order()] == [
+        "Selected",
+        "Middle",
+        "Newest",
     ]
     assert engine.history_files_in_order() == []
 
@@ -2482,42 +2622,38 @@ def test_startup_removes_a_promotion_duplicate_backup(tmp_path: Path) -> None:
         }
     )
 
-    engine.repair_interrupted_timeline_transition()
+    prepare_timeline(engine)
 
     assert not backup.exists()
-    assert duplicate_queue.read_text(encoding="utf-8") == "Active copy"
-    assert engine.queue_files_in_order() == [
-        engine.QUEUE / selected.name,
-        duplicate_queue,
+    assert [path.read_text(encoding="utf-8") for path in engine.queue_files_in_order()] == [
+        "Selected",
+        "Active copy",
     ]
+    assert all(
+        engine.SpeechicleFilename.parse(path.name)
+        for path in engine.QUEUE.glob("*.txt")
+    )
     assert engine.history_files_in_order() == []
     assert not engine.TIMELINE_INTENT.exists()
 
 
-def test_promotion_migrates_a_legacy_sequence_collision_before_moving(
+def test_preparation_rejects_a_nonidentical_canonical_identity_collision(
     tmp_path: Path,
 ) -> None:
     engine = load_engine("super_speech_engine_promotion_deferred_duplicate")
     configure_runtime(engine, tmp_path)
-    duplicate_history = engine.SPOKEN / "003-af_heart-say.txt"
+    duplicate_history = engine.SPOKEN / "003-sp_00000000000000000000000000000003-af_heart-say.txt"
     duplicate_queue = engine.QUEUE / duplicate_history.name
-    selected = engine.SPOKEN / "002-af_heart-say.txt"
+    selected = engine.SPOKEN / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
     duplicate_history.write_text("Legacy History copy", encoding="utf-8")
     duplicate_queue.write_text("Active copy", encoding="utf-8")
     selected.write_text("Selected", encoding="utf-8")
-    engine.save_queue_order([duplicate_queue])
-    engine.save_history_order([duplicate_history, selected])
-    target, _ = engine.promote_history_selection(selected)
+    with pytest.raises(RuntimeError, match="target identities are not unique"):
+        prepare_timeline(engine)
 
-    assert target == engine.QUEUE / selected.name
-    assert not engine.TIMELINE_INTENT.exists()
-    assert not list(engine.SPOKEN.glob("*.duplicate"))
-    assert engine.queue_files_in_order()[0] == target
-    assert any(
-        path.read_text(encoding="utf-8") == "Legacy History copy"
-        for path in [*engine.QUEUE.glob("*.txt"), *engine.SPOKEN.glob("*.txt")]
-    )
+    assert duplicate_history.read_text(encoding="utf-8") == "Legacy History copy"
     assert duplicate_queue.read_text(encoding="utf-8") == "Active copy"
+    assert selected.read_text(encoding="utf-8") == "Selected"
 
 
 def test_enqueue_waits_while_history_rows_are_moving(tmp_path: Path) -> None:
@@ -2547,9 +2683,9 @@ def test_history_selection_rolls_back_if_a_boundary_item_cannot_move(
     engine = load_engine("super_speech_engine_history_boundary_rollback")
     configure_runtime(engine, tmp_path)
     history = [
-        engine.SPOKEN / "003-af_heart-say.txt",
-        engine.SPOKEN / "002-af_heart-say.txt",
-        engine.SPOKEN / "001-bm_fable-say.txt",
+        engine.SPOKEN / "003-sp_00000000000000000000000000000003-af_heart-say.txt",
+        engine.SPOKEN / "002-sp_00000000000000000000000000000002-af_heart-say.txt",
+        engine.SPOKEN / "001-sp_00000000000000000000000000000001-bm_fable-say.txt",
     ]
     for path in history:
         path.write_text(path.stem, encoding="utf-8")
@@ -2579,7 +2715,7 @@ def test_history_selection_excludes_worker_claims_until_rollback_finishes(
 ) -> None:
     engine = load_engine("super_speech_engine_history_boundary_worker_lock")
     configure_runtime(engine, tmp_path)
-    source = engine.SPOKEN / "001-af_heart-say.txt"
+    source = engine.SPOKEN / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     source.write_text("History", encoding="utf-8")
     entered_save = threading.Event()
     release_save = threading.Event()
@@ -2627,9 +2763,9 @@ def test_history_selection_rollback_preserves_a_legacy_queue_duplicate(
 ) -> None:
     engine = load_engine("super_speech_engine_history_legacy_duplicate")
     configure_runtime(engine, tmp_path)
-    duplicate_history = engine.SPOKEN / "003-af_heart-say.txt"
+    duplicate_history = engine.SPOKEN / "003-sp_00000000000000000000000000000003-af_heart-say.txt"
     duplicate_queue = engine.QUEUE / duplicate_history.name
-    selected = engine.SPOKEN / "002-af_heart-say.txt"
+    selected = engine.SPOKEN / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
     duplicate_history.write_text("Legacy replay", encoding="utf-8")
     duplicate_queue.write_text("Active copy", encoding="utf-8")
     selected.write_text("Selected", encoding="utf-8")
@@ -2660,8 +2796,8 @@ def test_history_selection_reports_unconfirmed_if_rollback_cannot_finish(
     engine = load_engine("super_speech_engine_history_unconfirmed")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    first = engine.SPOKEN / "002-af_heart-say.txt"
-    selected = engine.SPOKEN / "001-af_heart-say.txt"
+    first = engine.SPOKEN / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
+    selected = engine.SPOKEN / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     first.write_text("First", encoding="utf-8")
     selected.write_text("Selected", encoding="utf-8")
     engine.save_history_order([first, selected])
@@ -2694,7 +2830,7 @@ def test_replaying_history_with_another_voice_preserves_text_and_gap(
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     engine.AVAILABLE_VOICES = {"af_heart", "bm_fable"}
-    archived = engine.SPOKEN / "007-bm_fable-g350-say.txt"
+    archived = engine.SPOKEN / "007-sp_00000000000000000000000000000007-bm_fable-g350-say.txt"
     archived.write_text("Say this another way", encoding="utf-8")
     state = engine.State()
 
@@ -2709,7 +2845,7 @@ def test_replaying_history_with_another_voice_preserves_text_and_gap(
     assert result["result_id"] == original_id
     assert variant is not None
     assert not archived.exists()
-    assert variant.name == "007-af_heart-g350-say.txt"
+    assert variant.name == "007-sp_00000000000000000000000000000007-af_heart-g350-say.txt"
     assert variant.read_text(encoding="utf-8") == "Say this another way"
     assert engine.claim_next_queued_chunk(state) == variant
 
@@ -2722,9 +2858,9 @@ def test_history_voice_change_keeps_the_row_position(
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     engine.AVAILABLE_VOICES = {"af_heart", "bm_fable"}
     history = [
-        engine.SPOKEN / "003-af_heart-say.txt",
-        engine.SPOKEN / "002-af_heart-say.txt",
-        engine.SPOKEN / "001-af_heart-say.txt",
+        engine.SPOKEN / "003-sp_00000000000000000000000000000003-af_heart-say.txt",
+        engine.SPOKEN / "002-sp_00000000000000000000000000000002-af_heart-say.txt",
+        engine.SPOKEN / "001-sp_00000000000000000000000000000001-af_heart-say.txt",
     ]
     for path in history:
         path.write_text(path.stem, encoding="utf-8")
@@ -2761,8 +2897,8 @@ def test_history_voice_rejection_restores_the_history_boundary(
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     engine.AVAILABLE_VOICES = {"af_heart"}
     history = [
-        engine.SPOKEN / "002-af_heart-say.txt",
-        engine.SPOKEN / "001-af_heart-say.txt",
+        engine.SPOKEN / "002-sp_00000000000000000000000000000002-af_heart-say.txt",
+        engine.SPOKEN / "001-sp_00000000000000000000000000000001-af_heart-say.txt",
     ]
     for path in history:
         path.write_text(path.stem, encoding="utf-8")
@@ -2789,9 +2925,9 @@ def test_changing_a_waiting_voice_keeps_the_selection_position(
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     engine.AVAILABLE_VOICES = {"af_heart", "bm_fable"}
-    older = engine.QUEUE / "001-af_heart-say.txt"
-    selected = engine.QUEUE / "002-bm_fable-g500-say.txt"
-    newer = engine.QUEUE / "003-bm_fable-say.txt"
+    older = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    selected = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-g500-say.txt"
+    newer = engine.QUEUE / "003-sp_00000000000000000000000000000003-bm_fable-say.txt"
     older.write_text("Older", encoding="utf-8")
     selected.write_text("Selected words", encoding="utf-8")
     newer.write_text("Newer", encoding="utf-8")
@@ -2807,7 +2943,7 @@ def test_changing_a_waiting_voice_keeps_the_selection_position(
 
     assert result["result_id"] == original_id
     assert variant is not None
-    assert variant.name == "002-af_heart-g500-say.txt"
+    assert variant.name == "002-sp_00000000000000000000000000000002-af_heart-g500-say.txt"
     assert variant.read_text(encoding="utf-8") == "Selected words"
     assert not older.exists()
     assert not selected.exists()
@@ -2824,7 +2960,7 @@ def test_changing_the_current_voice_replaces_it_without_changing_text(
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     engine.AVAILABLE_VOICES = {"af_heart", "bm_fable"}
-    current = engine.QUEUE / "001-af_heart-g600-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-g600-say.txt"
     current.write_text("Current words", encoding="utf-8")
     state = engine.State()
     set_current(engine, state, current)
@@ -2840,7 +2976,7 @@ def test_changing_the_current_voice_replaces_it_without_changing_text(
 
     assert result["result_id"] == original_id
     assert variant is not None
-    assert variant.name == "001-bm_fable-g600-say.txt"
+    assert variant.name == "001-sp_00000000000000000000000000000001-bm_fable-g600-say.txt"
     assert variant.read_text(encoding="utf-8") == "Current words"
     assert not current.exists()
     assert not (engine.SPOKEN / current.name).exists()
@@ -2881,8 +3017,8 @@ def test_engine_loop_replays_history_before_the_existing_queue(
     engine.CHUNK_GAP_S = 0
     engine.SILENT = False
 
-    queued = engine.QUEUE / "001-af_heart-say.txt"
-    archived = engine.SPOKEN / "007-bm_fable-say.txt"
+    queued = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    archived = engine.SPOKEN / "007-sp_00000000000000000000000000000007-bm_fable-say.txt"
     queued.write_text("First queued", encoding="utf-8")
     archived.write_text("Replay me", encoding="utf-8")
     play_request = engine.BASE / f"MUTATION.1.{'a' * 24}.json"
@@ -2977,8 +3113,8 @@ def test_idle_selection_replaces_worker_claims_and_becomes_next(
     engine = load_engine("super_speech_engine_play_idle_claimed")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    earlier = engine.QUEUE / "001-af_heart-say.txt"
-    selected = engine.QUEUE / "002-bm_fable-say.txt"
+    earlier = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    selected = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
     earlier.write_text("Earlier", encoding="utf-8")
     selected.write_text("Selected", encoding="utf-8")
     state = engine.State()
@@ -3001,8 +3137,8 @@ def test_selecting_a_prefetched_item_restarts_synthesis_at_piece_one(
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     monkeypatch.setattr(engine, "SPLIT_CHARS", 16)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    selected = engine.QUEUE / "002-bm_fable-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    selected = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
     current.write_text("Current", encoding="utf-8")
     selected.write_text("First sentence. Second sentence.", encoding="utf-8")
     state = engine.State()
@@ -3053,8 +3189,8 @@ def test_selection_interrupts_an_inter_chunk_gap(
     engine = load_engine("super_speech_engine_play_gap")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    selected = engine.QUEUE / "002-bm_fable-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    selected = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
     current.write_text("Current", encoding="utf-8")
     selected.write_text("Selected", encoding="utf-8")
     state = engine.State()
@@ -3073,9 +3209,9 @@ def test_reordering_during_a_gap_preserves_the_held_current_piece(
     engine = load_engine("super_speech_engine_queue_gap")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    held = engine.QUEUE / "001-af_heart-say.txt"
-    waiting = engine.QUEUE / "002-bm_fable-say.txt"
-    selected = engine.QUEUE / "003-af_heart-say.txt"
+    held = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
+    selected = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_heart-say.txt"
     held.write_text("Held", encoding="utf-8")
     waiting.write_text("Waiting", encoding="utf-8")
     selected.write_text("Selected", encoding="utf-8")
@@ -3104,9 +3240,9 @@ def test_queue_mutation_preserves_the_current_piece_held_before_playback(
     engine = load_engine("super_speech_engine_queue_held_piece_generation")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    waiting = engine.QUEUE / "002-bm_fable-say.txt"
-    moved = engine.QUEUE / "003-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
+    moved = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_heart-say.txt"
     for path in (current, waiting, moved):
         path.write_text(path.stem, encoding="utf-8")
     state = engine.State()
@@ -3137,7 +3273,7 @@ def test_stale_worker_release_preserves_a_replacement_current_claim(
 ) -> None:
     engine = load_engine("super_speech_engine_stale_worker_claim_release")
     configure_runtime(engine, tmp_path)
-    current = engine.QUEUE / "001-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     state = engine.State()
     set_current(engine, state, current)
@@ -3154,8 +3290,8 @@ def test_stale_worker_release_preserves_a_replacement_current_claim(
 def test_piece_transition_for_another_filename_is_ignored(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_foreign_piece_progress")
     configure_runtime(engine, tmp_path)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    other = engine.QUEUE / "002-bm_fable-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    other = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
     current.write_text("Current", encoding="utf-8")
     other.write_text("Other", encoding="utf-8")
     state = engine.State()
@@ -3171,8 +3307,8 @@ def test_stale_buffered_completion_cannot_clear_replacement_current(
 ) -> None:
     engine = load_engine("super_speech_engine_stale_current_completion")
     configure_runtime(engine, tmp_path)
-    stale = engine.QUEUE / "001-af_heart-say.txt"
-    replacement = engine.QUEUE / "002-bm_fable-say.txt"
+    stale = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    replacement = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
     stale.write_text("Stale", encoding="utf-8")
     replacement.write_text("Replacement", encoding="utf-8")
     state = engine.State()
@@ -3189,9 +3325,9 @@ def test_queue_mutation_keeps_an_active_playback_claim_without_buffered_audio(
     engine = load_engine("super_speech_engine_queue_active_piece_generation")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    waiting = engine.QUEUE / "002-bm_fable-say.txt"
-    moved = engine.QUEUE / "003-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
+    moved = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_heart-say.txt"
     for path in (current, waiting, moved):
         path.write_text(path.stem, encoding="utf-8")
     state = engine.State()
@@ -3219,9 +3355,9 @@ def test_queue_mutation_preserves_the_current_piece_held_during_a_gap(
     engine = load_engine("super_speech_engine_queue_gap_generation")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    waiting = engine.QUEUE / "002-bm_fable-say.txt"
-    moved = engine.QUEUE / "003-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
+    moved = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_heart-say.txt"
     for path in (current, waiting, moved):
         path.write_text(path.stem, encoding="utf-8")
     state = engine.State()
@@ -3251,7 +3387,7 @@ def test_failed_archive_keeps_chunk_claimed_instead_of_repeating(
 ) -> None:
     engine = load_engine("super_speech_engine_archive_failure")
     configure_runtime(engine, tmp_path)
-    current = engine.QUEUE / "001-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     state = engine.State()
     set_current(engine, state, current)
@@ -3272,7 +3408,7 @@ def test_failed_clear_archive_stops_instead_of_leaving_a_stuck_waiting_item(
 ) -> None:
     engine = load_engine("super_speech_engine_clear_archive_failure")
     configure_runtime(engine, tmp_path)
-    waiting = engine.QUEUE / "001-af_heart-say.txt"
+    waiting = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     waiting.write_text("Waiting", encoding="utf-8")
     state = engine.State()
     engine._record_claim(state, waiting)
@@ -3290,9 +3426,9 @@ def test_partial_clear_failure_rolls_back_the_visible_timeline(
 ) -> None:
     engine = load_engine("super_speech_engine_clear_rollback")
     configure_runtime(engine, tmp_path)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    first_waiting = engine.QUEUE / "002-af_heart-say.txt"
-    locked_waiting = engine.QUEUE / "003-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    first_waiting = engine.QUEUE / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
+    locked_waiting = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_heart-say.txt"
     for path in (current, first_waiting, locked_waiting):
         path.write_text(path.stem, encoding="utf-8")
     ordered = [current, first_waiting, locked_waiting]
@@ -3320,7 +3456,7 @@ def test_clear_archives_each_buffered_chunk_only_once(
 ) -> None:
     engine = load_engine("super_speech_engine_clear_unique_paths")
     configure_runtime(engine, tmp_path)
-    waiting = engine.QUEUE / "001-af_heart-say.txt"
+    waiting = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     waiting.write_text("Waiting", encoding="utf-8")
     state = engine.State()
     engine._record_claim(state, waiting)
@@ -3340,9 +3476,9 @@ def test_clear_archives_each_buffered_chunk_only_once(
 def test_clear_preserves_the_visible_order_of_waiting_speech(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_clear_stable_order")
     configure_runtime(engine, tmp_path)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    first_waiting = engine.QUEUE / "003-af_heart-say.txt"
-    second_waiting = engine.QUEUE / "002-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    first_waiting = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_heart-say.txt"
+    second_waiting = engine.QUEUE / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
     for path in (current, first_waiting, second_waiting):
         path.write_text(path.stem, encoding="utf-8")
     engine.save_queue_order([current, first_waiting, second_waiting])
@@ -3362,8 +3498,8 @@ def test_clear_preserves_the_visible_order_of_waiting_speech(tmp_path: Path) -> 
 def test_clear_does_not_manufacture_a_claim_for_a_preplay_current(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_clear_preplay_claim")
     configure_runtime(engine, tmp_path)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    waiting = engine.QUEUE / "002-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     waiting.write_text("Waiting", encoding="utf-8")
     state = engine.State()
@@ -3383,7 +3519,7 @@ def test_failed_synthesis_archive_stops_instead_of_leaving_a_stuck_claim(
 ) -> None:
     engine = load_engine("super_speech_engine_synth_archive_failure")
     configure_runtime(engine, tmp_path)
-    waiting = engine.QUEUE / "001-af_heart-say.txt"
+    waiting = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     waiting.write_text("Waiting", encoding="utf-8")
     state = engine.State()
 
@@ -3411,7 +3547,7 @@ def test_mid_item_synthesis_failure_emits_one_terminal_piece_and_stops(
 ) -> None:
     engine = load_engine("super_speech_engine_mid_item_synth_failure")
     configure_runtime(engine, tmp_path)
-    current = engine.QUEUE / "001-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     current.write_text("One. Two. Three.", encoding="utf-8")
     pieces = [
         SimpleNamespace(text=text, start=index * 5, end=index * 5 + len(text))
@@ -3459,8 +3595,8 @@ def test_invalidated_synthesis_failure_cannot_stop_the_selected_boundary(
 ) -> None:
     engine = load_engine("super_speech_engine_stale_synthesis_failure")
     configure_runtime(engine, tmp_path)
-    old = engine.QUEUE / "001-af_heart-say.txt"
-    selected = engine.QUEUE / "002-af_heart-say.txt"
+    old = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    selected = engine.QUEUE / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
     old.write_text("Old", encoding="utf-8")
     selected.write_text("Selected", encoding="utf-8")
     entered_synthesis = threading.Event()
@@ -3515,7 +3651,7 @@ def test_clear_wins_a_synthesis_failure_after_the_first_claim_check(
 ) -> None:
     engine = load_engine("super_speech_engine_clear_synth_failure_race")
     configure_runtime(engine, tmp_path)
-    current = engine.QUEUE / "001-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     state = engine.State()
     set_current(engine, state, current)
@@ -3562,7 +3698,7 @@ def test_preplay_terminal_item_releases_the_current_boundary(
 ) -> None:
     engine = load_engine(f"super_speech_engine_preplay_release_{failure}")
     configure_runtime(engine, tmp_path)
-    waiting = engine.QUEUE / "001-af_heart-say.txt"
+    waiting = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     waiting.write_text("" if failure == "empty" else "Waiting", encoding="utf-8")
     state = engine.State()
     set_current(engine, state, waiting)
@@ -3595,7 +3731,7 @@ def test_transient_current_read_failure_remains_claimable_during_stop(
 ) -> None:
     engine = load_engine("super_speech_engine_current_read_failure")
     configure_runtime(engine, tmp_path)
-    waiting = engine.QUEUE / "001-af_heart-say.txt"
+    waiting = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     waiting.write_text("Waiting", encoding="utf-8")
     state = engine.State()
     engine._record_claim(state, waiting)
@@ -3612,7 +3748,7 @@ def test_persistent_current_read_failure_cannot_hang_graceful_stop(
 ) -> None:
     engine = load_engine("super_speech_engine_current_read_failure_stop")
     configure_runtime(engine, tmp_path)
-    waiting = engine.QUEUE / "001-af_heart-say.txt"
+    waiting = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     waiting.write_text("Waiting", encoding="utf-8")
     state = engine.State()
     set_current(engine, state, waiting)
@@ -3641,7 +3777,7 @@ def test_persistent_current_read_failure_cannot_hang_graceful_stop(
 def test_stop_during_a_gap_keeps_the_next_chunk_queued(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_stop_gap")
     configure_runtime(engine, tmp_path)
-    next_chunk = engine.QUEUE / "002-bm_fable-say.txt"
+    next_chunk = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
     next_chunk.write_text("Next", encoding="utf-8")
     state = engine.State()
     engine._record_claim(state, next_chunk)
@@ -3670,7 +3806,7 @@ def test_clear_and_stop_follow_publication_order_during_a_gap(
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     engine.SIGNAL_TICK = 0.001
-    current = engine.QUEUE / "001-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     state = engine.State()
     set_current(engine, state, current)
@@ -3717,7 +3853,7 @@ def test_play_and_stop_follow_publication_order(
     engine = load_engine(f"super_speech_engine_play_stop_order_{play_is_newer}")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     state = engine.State()
     set_current(engine, state, current)
@@ -3758,7 +3894,7 @@ def test_stop_published_while_mutation_commits_survives_cleanup(
     engine = load_engine("super_speech_engine_stop_during_mutation")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    history = engine.SPOKEN / "001-af_heart-say.txt"
+    history = engine.SPOKEN / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     history.write_text("Delete", encoding="utf-8")
     request_id = request_mutation(
         engine, "delete", id=speechicle_id(engine, history)
@@ -3822,7 +3958,7 @@ def test_speak_waits_for_engine_acceptance_after_queueing_new_work(
     monkeypatch.setattr(
         engine,
         "enqueue_text",
-        lambda _text, _voice, _gap: engine.QUEUE / "001-af_heart-say.txt",
+        lambda _text, _voice, _gap: engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt",
     )
     monkeypatch.setattr(
         engine, "public_id_for_path", lambda _path: f"sp_{'1' * 32}"
@@ -3902,7 +4038,7 @@ def test_queue_acceptance_failure_reports_durable_work_as_queued(
 ) -> None:
     engine = load_engine("super_speech_engine_queue_acceptance_failed")
     configure_runtime(engine, tmp_path)
-    waiting = engine.QUEUE / "001-af_heart-say.txt"
+    waiting = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     waiting.write_text("Speak later", encoding="utf-8")
     engine.CONTINUE.touch()
 
@@ -3922,7 +4058,7 @@ def test_clear_during_a_gap_does_not_play_the_archived_chunk(
     engine = load_engine("super_speech_engine_clear_gap")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    next_chunk = engine.QUEUE / "002-bm_fable-say.txt"
+    next_chunk = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
     next_chunk.write_text("Next", encoding="utf-8")
     state = engine.State()
     engine._record_claim(state, next_chunk)
@@ -3937,8 +4073,8 @@ def test_clear_cannot_race_a_worker_refilling_a_full_buffer(tmp_path: Path) -> N
     engine = load_engine("super_speech_engine_clear_full_buffer")
     configure_runtime(engine, tmp_path)
     engine.SIGNAL_TICK = 0.001
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    queued = engine.QUEUE / "002-bm_fable-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    queued = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
     current.write_text("Current", encoding="utf-8")
     queued.write_text("Queued", encoding="utf-8")
     state = engine.State()
@@ -4075,7 +4211,7 @@ def test_failed_result_keeps_the_applied_claim_without_repeating_the_mutation(
     engine = load_engine("super_speech_engine_applied_claim")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    history = engine.SPOKEN / "001-af_heart-say.txt"
+    history = engine.SPOKEN / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     history.write_text("Delete once", encoding="utf-8")
     request_id = request_mutation(
         engine, "delete", id=speechicle_id(engine, history)
@@ -4146,6 +4282,8 @@ def test_serve_removes_stale_status_after_acquiring_the_lock(
         def release() -> None:
             pass
 
+        held = True
+
     monkeypatch.setattr(engine, "EngineInstanceLock", FakeLock)
     monkeypatch.setattr(
         engine,
@@ -4163,7 +4301,7 @@ def test_status_exposes_bounded_recent_history(tmp_path: Path) -> None:
     configure_runtime(engine, tmp_path)
     engine.HISTORY_LIMIT = 2
     for number in (1, 2, 3):
-        (engine.SPOKEN / f"{number:03d}-af_heart-say.txt").write_text(
+        (engine.SPOKEN / f"{number:03d}-sp_{number:032x}-af_heart-say.txt").write_text(
             f"History {number}", encoding="utf-8"
         )
 
@@ -4179,9 +4317,9 @@ def test_history_reordering_is_persisted_within_the_recent_window(tmp_path: Path
     engine = load_engine("super_speech_engine_history_order")
     configure_runtime(engine, tmp_path)
     engine.HISTORY_LIMIT = 2
-    first = engine.SPOKEN / "001-af_heart-say.txt"
-    second = engine.SPOKEN / "002-af_heart-say.txt"
-    third = engine.SPOKEN / "003-af_heart-say.txt"
+    first = engine.SPOKEN / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    second = engine.SPOKEN / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
+    third = engine.SPOKEN / "003-sp_00000000000000000000000000000003-af_heart-say.txt"
     for path in (first, second, third):
         path.write_text(path.stem, encoding="utf-8")
 
@@ -4205,8 +4343,8 @@ def test_history_reordering_is_persisted_within_the_recent_window(tmp_path: Path
 def test_new_history_item_stays_newest_after_manual_reordering(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_history_newest")
     configure_runtime(engine, tmp_path)
-    first = engine.SPOKEN / "001-af_heart-say.txt"
-    second = engine.SPOKEN / "002-af_heart-say.txt"
+    first = engine.SPOKEN / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    second = engine.SPOKEN / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
     first.write_text("First", encoding="utf-8")
     second.write_text("Second", encoding="utf-8")
     engine.save_history_order([first, second])
@@ -4222,9 +4360,9 @@ def test_new_archive_and_history_reorder_commit_in_one_serial_order(
 ) -> None:
     engine = load_engine("super_speech_engine_history_serial_order")
     configure_runtime(engine, tmp_path)
-    first = engine.SPOKEN / "001-af_heart-say.txt"
-    second = engine.SPOKEN / "002-af_heart-say.txt"
-    newest = engine.QUEUE / "003-af_heart-say.txt"
+    first = engine.SPOKEN / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    second = engine.SPOKEN / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
+    newest = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_heart-say.txt"
     for path in (first, second, newest):
         path.write_text(path.stem, encoding="utf-8")
     engine.save_history_order([first, second])
@@ -4273,8 +4411,8 @@ def test_history_snapshot_and_archive_cannot_deadlock_each_other(
 ) -> None:
     engine = load_engine("super_speech_engine_history_lock_order")
     configure_runtime(engine, tmp_path)
-    archived = engine.SPOKEN / "001-af_heart-say.txt"
-    queued = engine.QUEUE / "002-af_heart-say.txt"
+    archived = engine.SPOKEN / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    queued = engine.QUEUE / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
     archived.write_text("Earlier", encoding="utf-8")
     queued.write_text("New", encoding="utf-8")
     archive_holds_order = threading.Event()
@@ -4324,6 +4462,7 @@ def test_history_orders_legacy_suffixed_ids_by_their_leading_sequence(
     ):
         (engine.SPOKEN / name).write_text(name, encoding="utf-8")
 
+    prepare_timeline(engine)
     _, history = engine.history_snapshot()
 
     assert [item["text"] for item in history] == [
@@ -4337,7 +4476,7 @@ def test_history_orders_legacy_suffixed_ids_by_their_leading_sequence(
 def test_history_snapshot_refreshes_only_after_an_archive_move(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_history_cache")
     configure_runtime(engine, tmp_path)
-    first = engine.SPOKEN / "001-af_heart-say.txt"
+    first = engine.SPOKEN / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     first.write_text("First", encoding="utf-8")
 
     first_count, first_items = engine.history_snapshot()
@@ -4360,7 +4499,7 @@ def test_history_snapshot_keeps_rows_during_a_transient_text_lock(
 ) -> None:
     engine = load_engine("super_speech_engine_history_text_lock")
     configure_runtime(engine, tmp_path)
-    first = engine.SPOKEN / "001-af_heart-say.txt"
+    first = engine.SPOKEN / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     first.write_text("First", encoding="utf-8")
     assert engine.history_snapshot()[1][0]["text"] == "First"
     queued_second = engine.enqueue_text("Second", "af_heart")
@@ -4388,7 +4527,7 @@ def test_history_snapshot_keeps_rows_during_a_transient_text_lock(
 def test_timeline_plan_executes_moves_orders_and_cleanup(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_timeline_plan_success")
     configure_runtime(engine, tmp_path)
-    source = engine.QUEUE / "001-af_heart-say.txt"
+    source = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     target = engine.SPOKEN / source.name
     source.write_text("Speech", encoding="utf-8")
     row_id = speechicle_id(engine, source)
@@ -4425,8 +4564,8 @@ def test_timeline_plan_rolls_back_after_moves_and_one_order_write(
         f"super_speech_engine_timeline_plan_rollback_{rollback_fails}"
     )
     configure_runtime(engine, tmp_path)
-    current = engine.QUEUE / "002-af_heart-say.txt"
-    source = engine.SPOKEN / "001-af_heart-say.txt"
+    current = engine.QUEUE / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
+    source = engine.SPOKEN / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     target = engine.QUEUE / source.name
     current.write_text("Current", encoding="utf-8")
     source.write_text("History", encoding="utf-8")
@@ -4483,9 +4622,9 @@ def test_timeline_plan_rolls_back_after_moves_and_one_order_write(
 
 
 def build_archive_recovery_plan(engine):
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    waiting = engine.QUEUE / "002-af_heart-say.txt"
-    earlier = engine.SPOKEN / "003-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
+    earlier = engine.SPOKEN / "003-sp_00000000000000000000000000000003-af_heart-say.txt"
     for path in (current, waiting, earlier):
         path.write_text(path.stem, encoding="utf-8")
     current_id = speechicle_id(engine, current)
@@ -4537,7 +4676,7 @@ def test_new_timeline_plan_recovers_from_each_commit_checkpoint(
     if checkpoint not in {"intent", "history_order"}:
         engine._write_saved_order(engine.QUEUE_ORDER, list(plan.queue_ids))
 
-    engine.repair_interrupted_timeline_transition()
+    prepare_timeline(engine)
 
     assert engine.queue_files_in_order() == []
     assert engine.history_files_in_order() == [
@@ -4557,9 +4696,9 @@ def test_new_timeline_plan_recovers_a_voice_changing_promotion(
 ) -> None:
     engine = load_engine(f"super_speech_engine_plan_promote_{checkpoint}")
     configure_runtime(engine, tmp_path)
-    source = engine.SPOKEN / "001-af_heart-say.txt"
-    target = engine.QUEUE / "001-bm_fable-say.txt"
-    waiting = engine.QUEUE / "002-af_heart-say.txt"
+    source = engine.SPOKEN / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    target = engine.QUEUE / "001-sp_00000000000000000000000000000001-bm_fable-say.txt"
+    waiting = engine.QUEUE / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
     source.write_text("Selected", encoding="utf-8")
     waiting.write_text("Waiting", encoding="utf-8")
     source_id = speechicle_id(engine, source)
@@ -4585,7 +4724,7 @@ def test_new_timeline_plan_recovers_a_voice_changing_promotion(
     if checkpoint == "history_order":
         engine._write_saved_order(engine.HISTORY_ORDER, list(plan.history_ids))
 
-    engine.repair_interrupted_timeline_transition()
+    prepare_timeline(engine)
 
     assert target.read_text(encoding="utf-8") == "Selected"
     assert not source.exists()
@@ -4618,10 +4757,10 @@ def test_new_timeline_plan_rejects_malformed_or_contradictory_payloads(
     payload = json.loads(json.dumps(plan.intent_payload()))
     if malformation == "duplicate_source":
         payload["moves"][1]["source"] = dict(payload["moves"][0]["source"])
-        payload["moves"][1]["target"]["name"] = "001-bm_fable-say.txt"
+        payload["moves"][1]["target"]["name"] = "001-sp_00000000000000000000000000000001-bm_fable-say.txt"
     elif malformation == "duplicate_target":
         payload["moves"][1]["target"] = dict(payload["moves"][0]["target"])
-        payload["moves"][1]["source"]["name"] = "001-bm_fable-say.txt"
+        payload["moves"][1]["source"]["name"] = "001-sp_00000000000000000000000000000001-bm_fable-say.txt"
     elif malformation == "backup_in_queue":
         payload["moves"][0]["backup"] = {
             "root": "queue",
@@ -4634,14 +4773,14 @@ def test_new_timeline_plan_rejects_malformed_or_contradictory_payloads(
     elif malformation == "duplicate_id":
         payload["history_ids"].append(payload["history_ids"][0])
     elif malformation == "move_id_mismatch":
-        payload["moves"][1]["source"]["name"] = "004-af_heart-say.txt"
-        payload["moves"][1]["target"]["name"] = "004-af_heart-say.txt"
+        payload["moves"][1]["source"]["name"] = "004-sp_00000000000000000000000000000004-af_heart-say.txt"
+        payload["moves"][1]["target"]["name"] = "004-sp_00000000000000000000000000000004-af_heart-say.txt"
     else:
         payload["queue_ids"] = [payload["previous_queue_ids"][0]]
     engine._write_timeline_intent(payload)
 
     with pytest.raises(RuntimeError, match=error):
-        engine.repair_interrupted_timeline_transition()
+        prepare_timeline(engine)
 
     assert engine.TIMELINE_INTENT.exists()
     assert current.exists()
@@ -4665,7 +4804,12 @@ def test_each_legacy_timeline_intent_adapts_to_common_recovery(
     source_directory = engine.SPOKEN if operation == "promote" else engine.QUEUE
     source = source_directory / "001-af_heart-say.txt"
     source.write_text("Legacy", encoding="utf-8")
-    public_id = speechicle_id(engine, source)
+    public_id = f"sp_{'1' * 32}"
+    if order_version == 2:
+        engine.write_catalog(
+            engine.IDENTITY_INDEX,
+            engine.IdentityCatalog(2, {1: public_id}),
+        )
     saved_id = source.stem if order_version == 1 else public_id
     if operation == "archive":
         intent = {
@@ -4676,7 +4820,7 @@ def test_each_legacy_timeline_intent_adapts_to_common_recovery(
             "previous_history_ids": [],
             "desired_history_ids": [saved_id],
         }
-        expected = source
+        expected_root = engine.QUEUE
     else:
         intent = {
             "version": 1,
@@ -4686,21 +4830,22 @@ def test_each_legacy_timeline_intent_adapts_to_common_recovery(
             "queue_ids": [] if operation == "archive_batch" else [saved_id],
             "history_ids": [saved_id] if operation == "archive_batch" else [],
         }
-        expected = (
-            engine.SPOKEN / source.name
-            if operation == "archive_batch"
-            else engine.QUEUE / source.name
-        )
+        expected_root = engine.SPOKEN if operation == "archive_batch" else engine.QUEUE
     engine._write_timeline_intent(intent)
 
-    assert engine._recover_timeline_intent()
+    prepare_timeline(engine)
 
-    assert expected.read_text(encoding="utf-8") == "Legacy"
+    final_files = list(expected_root.glob("*.txt"))
+    assert len(final_files) == 1
+    assert final_files[0].read_text(encoding="utf-8") == "Legacy"
+    final_name = engine.SpeechicleFilename.parse(final_files[0].name)
+    if order_version == 2:
+        assert final_name.public_id == public_id
     assert not engine.TIMELINE_INTENT.exists()
     order_path = (
         engine.HISTORY_ORDER if operation == "archive_batch" else engine.QUEUE_ORDER
     )
-    assert json.loads(order_path.read_text(encoding="utf-8"))["version"] == order_version
+    assert json.loads(order_path.read_text(encoding="utf-8"))["version"] == 2
 
 
 def test_legacy_promotion_finishes_an_intermediate_voice_rename(
@@ -4727,11 +4872,14 @@ def test_legacy_promotion_finishes_an_intermediate_voice_rename(
         }
     )
 
-    engine.repair_interrupted_timeline_transition()
+    prepare_timeline(engine)
 
-    assert target.read_text(encoding="utf-8") == "Selected"
+    final_files = list(engine.QUEUE.glob("*.txt"))
+    assert len(final_files) == 1
+    assert final_files[0].read_text(encoding="utf-8") == "Selected"
+    assert engine.SpeechicleFilename.parse(final_files[0].name).voice == "bm_fable"
     assert not renamed_source.exists()
-    assert engine.queue_files_in_order() == [target]
+    assert engine.queue_files_in_order() == final_files
     assert not engine.TIMELINE_INTENT.exists()
 
 
@@ -4740,12 +4888,13 @@ def test_unsafe_legacy_intent_is_retained_without_partial_application(
 ) -> None:
     engine = load_engine("super_speech_engine_legacy_unsafe_intent")
     configure_runtime(engine, tmp_path)
-    first = engine.QUEUE / "001-af_heart-say.txt"
-    unsafe = engine.QUEUE / "002-af_heart-say.txt"
+    first = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    unsafe = engine.QUEUE / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
     first.write_text("First", encoding="utf-8")
     unsafe.write_text("Safe", encoding="utf-8")
     first_id = speechicle_id(engine, first)
     unsafe_id = speechicle_id(engine, unsafe)
+    write_upgrade_catalog(engine, first, unsafe)
     engine._write_timeline_intent(
         {
             "version": 1,
@@ -4761,7 +4910,7 @@ def test_unsafe_legacy_intent_is_retained_without_partial_application(
     )
 
     with pytest.raises(RuntimeError):
-        engine.repair_interrupted_timeline_transition()
+        prepare_timeline(engine)
 
     assert engine.TIMELINE_INTENT.exists()
     assert first.read_text(encoding="utf-8") == "First"
@@ -4776,7 +4925,7 @@ def test_new_timeline_plan_retains_journal_until_backup_cleanup_succeeds(
 ) -> None:
     engine = load_engine("super_speech_engine_plan_backup_cleanup")
     configure_runtime(engine, tmp_path)
-    source = engine.QUEUE / "001-af_heart-say.txt"
+    source = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     target = engine.SPOKEN / source.name
     backup = engine.SPOKEN / f".{source.name}.test.duplicate"
     source.write_text("Current", encoding="utf-8")
@@ -4807,14 +4956,14 @@ def test_new_timeline_plan_retains_journal_until_backup_cleanup_succeeds(
     monkeypatch.setattr(Path, "unlink", fail_backup_cleanup)
 
     with pytest.raises(PermissionError, match="backup locked"):
-        engine.repair_interrupted_timeline_transition()
+        prepare_timeline(engine)
 
     assert engine.TIMELINE_INTENT.exists()
     assert target.read_text(encoding="utf-8") == "Current"
     assert backup.read_text(encoding="utf-8") == "Duplicate"
 
     monkeypatch.setattr(Path, "unlink", real_unlink)
-    engine.repair_interrupted_timeline_transition()
+    prepare_timeline(engine)
     assert not backup.exists()
     assert not engine.TIMELINE_INTENT.exists()
 
@@ -4829,7 +4978,7 @@ def test_new_timeline_plan_retains_journal_when_a_row_cannot_be_recovered(
     current.unlink()
 
     with pytest.raises(RuntimeError, match="pending timeline row is missing"):
-        engine.repair_interrupted_timeline_transition()
+        prepare_timeline(engine)
 
     assert engine.TIMELINE_INTENT.exists()
     assert waiting.exists()
@@ -4842,10 +4991,21 @@ def test_startup_completes_an_interrupted_clear_batch(tmp_path: Path) -> None:
     current = engine.QUEUE / "001-af_heart-say.txt"
     waiting = engine.QUEUE / "002-af_heart-say.txt"
     earlier = engine.SPOKEN / "003-af_heart-say.txt"
-    for path in (current, waiting, earlier):
-        path.write_text(path.stem, encoding="utf-8")
-    engine.save_queue_order([current, waiting])
-    engine.save_history_order([earlier])
+    for path, text in (
+        (current, "Current"),
+        (waiting, "Waiting"),
+        (earlier, "Earlier"),
+    ):
+        path.write_text(text, encoding="utf-8")
+    public_ids = {sequence: f"sp_{sequence:032x}" for sequence in (1, 2, 3)}
+    engine.write_catalog(
+        engine.IDENTITY_INDEX,
+        engine.IdentityCatalog(4, public_ids),
+    )
+    engine._write_order_payload(
+        engine.QUEUE_ORDER, [public_ids[1], public_ids[2]], 2
+    )
+    engine._write_order_payload(engine.HISTORY_ORDER, [public_ids[3]], 2)
     engine._write_timeline_intent(
         {
             "version": 1,
@@ -4856,27 +5016,29 @@ def test_startup_completes_an_interrupted_clear_batch(tmp_path: Path) -> None:
                 {"source": waiting.name, "target": waiting.name},
             ],
             "previous_queue_ids": [
-                speechicle_id(engine, current),
-                speechicle_id(engine, waiting),
+                public_ids[1],
+                public_ids[2],
             ],
-            "previous_history_ids": [speechicle_id(engine, earlier)],
+            "previous_history_ids": [public_ids[3]],
             "queue_ids": [],
             "history_ids": [
-                speechicle_id(engine, waiting),
-                speechicle_id(engine, current),
-                speechicle_id(engine, earlier),
+                public_ids[2],
+                public_ids[1],
+                public_ids[3],
             ],
         }
     )
     os.replace(current, engine.SPOKEN / current.name)
 
-    engine.repair_interrupted_timeline_transition()
+    prepare_timeline(engine)
 
     assert engine.queue_files_in_order() == []
-    assert engine.history_files_in_order() == [
-        engine.SPOKEN / waiting.name,
-        engine.SPOKEN / current.name,
-        earlier,
+    assert [
+        path.read_text(encoding="utf-8") for path in engine.history_files_in_order()
+    ] == [
+        "Waiting",
+        "Current",
+        "Earlier",
     ]
     assert not engine.TIMELINE_INTENT.exists()
 
@@ -4886,9 +5048,9 @@ def test_archive_succeeds_when_committed_intent_cleanup_is_deferred(
 ) -> None:
     engine = load_engine("super_speech_engine_archive_deferred_cleanup")
     configure_runtime(engine, tmp_path)
-    current = engine.QUEUE / "001-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
-    engine.ensure_identity_catalog()
+    prepare_timeline(engine)
     waiting = engine.enqueue_text("Waiting", "af_heart")
     real_unlink = Path.unlink
 
@@ -4904,7 +5066,7 @@ def test_archive_succeeds_when_committed_intent_cleanup_is_deferred(
     assert engine.TIMELINE_INTENT.exists()
     pending_intent = engine.TIMELINE_INTENT.read_text(encoding="utf-8")
     pending_payload = json.loads(pending_intent)
-    assert pending_payload["version"] == 2
+    assert pending_payload["version"] == 3
     assert pending_payload["operation"] == "timeline_plan"
     assert pending_payload["moves"][0]["source"] == {
         "root": "queue",
@@ -4920,9 +5082,55 @@ def test_archive_succeeds_when_committed_intent_cleanup_is_deferred(
     assert engine.TIMELINE_INTENT.read_text(encoding="utf-8") == pending_intent
 
     monkeypatch.setattr(Path, "unlink", real_unlink)
-    engine.repair_interrupted_timeline_transition()
+    prepare_timeline(engine)
     assert not engine.TIMELINE_INTENT.exists()
     assert engine.history_files_in_order() == [engine.SPOKEN / current.name]
+
+
+def test_pending_timeline_plan_blocks_a_different_mutation_until_cleanup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_pending_plan_gate")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    earlier = engine.SPOKEN / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
+    current.write_text("Current", encoding="utf-8")
+    earlier.write_text("Earlier", encoding="utf-8")
+    prepare_timeline(engine)
+    real_unlink = Path.unlink
+
+    def locked_intent(path: Path, *args, **kwargs) -> None:
+        if path == engine.TIMELINE_INTENT:
+            raise PermissionError("locked")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", locked_intent)
+    assert engine.archive(current)
+    assert engine.TIMELINE_INTENT.exists()
+    request_id = request_mutation(
+        engine,
+        "delete",
+        id=speechicle_id(engine, earlier),
+    )
+
+    engine.process_mutation_requests(queue.Queue(), engine.State())
+
+    result = rejected_result(engine, request_id)
+    assert "locked" in str(result["error"])
+    assert earlier.exists()
+    assert engine.TIMELINE_INTENT.exists()
+
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    retry_id = request_mutation(
+        engine,
+        "delete",
+        id=speechicle_id(engine, earlier),
+    )
+    engine.process_mutation_requests(queue.Queue(), engine.State())
+    committed_result(engine, retry_id)
+    assert not earlier.exists()
+    assert not engine.TIMELINE_INTENT.exists()
 
 
 def test_archive_rollback_does_not_resurrect_an_already_archived_row(
@@ -4930,8 +5138,8 @@ def test_archive_rollback_does_not_resurrect_an_already_archived_row(
 ) -> None:
     engine = load_engine("super_speech_engine_archive_no_resurrection")
     configure_runtime(engine, tmp_path)
-    archived = engine.SPOKEN / "001-af_heart-say.txt"
-    blocked = engine.QUEUE / "002-af_heart-say.txt"
+    archived = engine.SPOKEN / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    blocked = engine.QUEUE / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
     archived.write_text("Earlier", encoding="utf-8")
     blocked.write_text("Blocked", encoding="utf-8")
     real_replace = engine.os.replace
@@ -4954,9 +5162,9 @@ def test_archive_rollback_restores_a_preexisting_history_copy(
 ) -> None:
     engine = load_engine("super_speech_engine_archive_duplicate_rollback")
     configure_runtime(engine, tmp_path)
-    duplicate_queue = engine.QUEUE / "001-af_heart-say.txt"
+    duplicate_queue = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     duplicate_history = engine.SPOKEN / duplicate_queue.name
-    blocked = engine.QUEUE / "002-af_heart-say.txt"
+    blocked = engine.QUEUE / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
     duplicate_queue.write_text("Active copy", encoding="utf-8")
     duplicate_history.write_text("History copy", encoding="utf-8")
     blocked.write_text("Blocked", encoding="utf-8")
@@ -4990,8 +5198,8 @@ def test_unconfirmed_archive_rollback_retains_its_recovery_intent(
 ) -> None:
     engine = load_engine("super_speech_engine_archive_unconfirmed_recovery")
     configure_runtime(engine, tmp_path)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    waiting = engine.QUEUE / "002-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     waiting.write_text("Waiting", encoding="utf-8")
     engine.save_queue_order([current, waiting])
@@ -5013,7 +5221,7 @@ def test_unconfirmed_archive_rollback_retains_its_recovery_intent(
     assert engine.TIMELINE_INTENT.exists()
 
     monkeypatch.setattr(engine.os, "replace", real_replace)
-    engine.repair_interrupted_timeline_transition()
+    prepare_timeline(engine)
 
     assert engine.queue_files_in_order() == []
     assert engine.history_files_in_order() == [
@@ -5026,7 +5234,7 @@ def test_unconfirmed_archive_rollback_retains_its_recovery_intent(
 def test_clear_archives_a_paused_current_and_publishes_idle(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_clear_paused_current")
     configure_runtime(engine, tmp_path)
-    current = engine.QUEUE / "001-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     current.write_text("Paused current", encoding="utf-8")
     state = engine.State()
     set_current(engine, state, current, piece_count=1)
@@ -5060,51 +5268,57 @@ def test_identity_migration_recovers_with_the_ids_saved_before_interruption(
         interrupted.HISTORY_ORDER, [malformed.stem, collision.stem], 1
     )
 
-    def stop_after_journal(_intent: dict[str, object]) -> None:
+    def stop_after_journal(_migration) -> None:
         raise RuntimeError("simulated interruption")
 
     monkeypatch.setattr(
-        interrupted, "_apply_identity_migration_intent", stop_after_journal
+        interrupted, "_converge_embed_public_ids", stop_after_journal
     )
     with pytest.raises(RuntimeError, match="simulated interruption"):
-        interrupted.ensure_identity_catalog()
+        prepare_timeline(interrupted)
     saved_intent = json.loads(
         interrupted.TIMELINE_INTENT.read_text(encoding="utf-8")
     )
+    saved_queue_ids = [
+        interrupted.SpeechicleFilename.parse(item["target_name"]).public_id
+        for item in saved_intent["queue_files"]
+    ]
+    saved_history_ids = [
+        interrupted.SpeechicleFilename.parse(item["target_name"]).public_id
+        for item in saved_intent["history_files"]
+    ]
 
     recovered = load_engine("super_speech_engine_identity_recovered")
     configure_runtime(recovered, tmp_path)
-    recovered.repair_interrupted_timeline_transition()
+    prepare_timeline(recovered)
 
-    catalog = json.loads(recovered.IDENTITY_INDEX.read_text(encoding="utf-8"))
-    assert catalog == saved_intent["catalog"]
+    assert not recovered.IDENTITY_INDEX.exists()
     assert json.loads(recovered.QUEUE_ORDER.read_text(encoding="utf-8")) == {
         "version": 2,
-        "ids": saved_intent["queue_ids"],
+        "ids": saved_queue_ids,
     }
     assert json.loads(recovered.HISTORY_ORDER.read_text(encoding="utf-8")) == {
         "version": 2,
-        "ids": saved_intent["history_ids"],
+        "ids": saved_history_ids,
     }
     files = [
         *recovered.QUEUE.glob("*.txt"),
         *recovered.SPOKEN.glob("*.txt"),
         *recovered.FAILED.glob("*.txt"),
     ]
-    sequences = [recovered.strict_sequence(path.name) for path in files]
-    assert None not in sequences
+    sequences = [recovered.SpeechicleFilename.parse(path.name).sequence for path in files]
     assert len(set(sequences)) == len(sequences)
     assert not recovered.TIMELINE_INTENT.exists()
 
 
-def test_deleted_identity_and_sequence_are_never_reused(
+def test_deleted_public_identity_is_not_reused_when_sequence_is_recycled(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     engine = load_engine("super_speech_engine_identity_delete")
     configure_runtime(engine, tmp_path)
     first = engine.enqueue_text("First", "af_heart")
     first_id = speechicle_id(engine, first)
-    first_sequence = engine.strict_sequence(first.name)
+    first_sequence = engine.SpeechicleFilename.parse(first.name).sequence
     assert engine.archive(first)
     engine.apply_delete_mutation(
         build_mutation(engine, "delete", id=first_id)
@@ -5113,7 +5327,7 @@ def test_deleted_identity_and_sequence_are_never_reused(
     second = engine.enqueue_text("Second", "af_heart")
     second_id = speechicle_id(engine, second)
 
-    assert engine.strict_sequence(second.name) > first_sequence
+    assert engine.SpeechicleFilename.parse(second.name).sequence == first_sequence
     assert second_id != first_id
     assert engine._find_chunk(engine.QUEUE, first_id) is None
     assert engine._find_chunk(engine.SPOKEN, first_id) is None
@@ -5188,8 +5402,8 @@ def test_skip_invalidates_buffered_audio_by_removing_its_claim(
 def test_public_status_contains_no_storage_filenames(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_public_status_shape")
     configure_runtime(engine, tmp_path)
-    waiting = engine.QUEUE / "001-af_heart-say.txt"
-    archived = engine.SPOKEN / "002-bm_fable-say.txt"
+    waiting = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    archived = engine.SPOKEN / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
     waiting.write_text("Waiting", encoding="utf-8")
     archived.write_text("History", encoding="utf-8")
 
@@ -5331,9 +5545,9 @@ def test_mutations_commit_and_publish_results_in_one_fifo_order(
     engine = load_engine("super_speech_engine_mutation_fifo")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    first = engine.QUEUE / "002-bm_fable-say.txt"
-    second = engine.QUEUE / "003-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    first = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
+    second = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_heart-say.txt"
     current.write_text("Current", encoding="utf-8")
     first.write_text("First waiting", encoding="utf-8")
     second.write_text("Second waiting", encoding="utf-8")
@@ -5374,9 +5588,9 @@ def test_later_waiting_move_does_not_hide_an_earlier_playback_selection(
     engine = load_engine("super_speech_engine_mutation_effect_priority")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    selected = engine.QUEUE / "002-bm_fable-say.txt"
-    waiting = engine.QUEUE / "003-af_heart-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    selected = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
+    waiting = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_heart-say.txt"
     for path in (current, selected, waiting):
         path.write_text(path.stem, encoding="utf-8")
     state = engine.State()
@@ -5401,8 +5615,8 @@ def test_every_mutation_outcome_contains_an_authoritative_snapshot(
     engine = load_engine("super_speech_engine_mutation_outcomes")
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
-    current = engine.QUEUE / "001-af_heart-say.txt"
-    waiting = engine.QUEUE / "002-bm_fable-say.txt"
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
     current.write_text("Current", encoding="utf-8")
     waiting.write_text("Waiting", encoding="utf-8")
     state = engine.State()
@@ -5450,9 +5664,9 @@ def test_timeline_revision_changes_only_with_the_timeline_and_survives_restart(
     configure_runtime(engine, tmp_path)
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     engine.AVAILABLE_VOICES = {"af_heart", "bm_fable"}
-    first = engine.QUEUE / "001-af_heart-say.txt"
-    second = engine.QUEUE / "002-af_heart-say.txt"
-    third = engine.QUEUE / "003-af_heart-say.txt"
+    first = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    second = engine.QUEUE / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
+    third = engine.QUEUE / "003-sp_00000000000000000000000000000003-af_heart-say.txt"
     for path in (first, second, third):
         path.write_text(path.stem, encoding="utf-8")
     state = engine.State()
