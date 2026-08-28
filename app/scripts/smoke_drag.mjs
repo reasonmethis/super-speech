@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -231,14 +231,25 @@ async function playbackExpansionSnapshot(page) {
 }
 
 try {
-  runEngine("pause");
   runEngine("speak", "Drag test one has enough words to keep silent playback active while the interface checks that playing and paused layouts stay perfectly aligned.");
   runEngine("speak", "Drag test two also has enough words to keep the silent replay observable during the double click interaction test.");
   runEngine("speak", "Drag test three");
   await waitFor(
     () => status().current && status().queue_count === 2,
-    "The silent drag fixture did not reach the paused queue state",
+    "The silent drag fixture did not reach the queue state",
     30_000,
+  );
+  await waitFor(
+    () => {
+      const current = status().current;
+      return current?.piece_start !== null && current?.piece_end !== null;
+    },
+    "The engine did not publish the current internal speech piece",
+  );
+  runEngine("pause");
+  await waitFor(
+    () => status().state === "paused",
+    "The engine did not settle into the paused fixture",
   );
   enginePid = status().engine_pid;
 
@@ -250,11 +261,8 @@ try {
   });
   const page = await electronApp.firstWindow();
   await waitFor(
-    () => {
-      const current = status().current;
-      return current?.piece_start !== null && current?.piece_end !== null;
-    },
-    "The engine did not publish the current internal speech piece",
+    async () => await page.locator("body").getAttribute("data-state") === "paused",
+    "The renderer did not settle into the paused fixture",
   );
   const followed = status().current;
   assert(followed, "Follow-along requires Current speech");
@@ -285,13 +293,16 @@ try {
     await page.locator("#playback-card").evaluate((card) => card.classList.contains("is-expanded")),
     "The playback card did not enter its expanded state",
   );
-  assert.equal(await page.locator("#current-text mark.current-piece").textContent(), followedText);
-  assert.equal(
-    await page.locator("#current-text mark.current-piece").evaluate(
-      (piece) => getComputedStyle(piece).padding,
-    ),
-    "0px",
-    "The current-piece highlight must not change text flow",
+  assert.deepEqual(
+    await page.evaluate(() => {
+      const piece = document.querySelector("#current-text mark.current-piece");
+      return {
+        text: piece?.textContent ?? null,
+        padding: piece ? getComputedStyle(piece).padding : null,
+      };
+    }),
+    { text: followedText, padding: "0px" },
+    "The current-piece highlight must preserve the current text and its flow",
   );
   assert(
     await page.locator(".queue-section").evaluate((section) => section.inert),
@@ -348,8 +359,14 @@ try {
         shellBorderWidth: style(".app-shell").borderWidth,
         brandShadow: style(".brand-mark").boxShadow,
         brandRadius: style(".brand-mark").borderRadius,
+        buttonAppearance: style(".playback-button").appearance,
+        buttonBackgroundImage: style(".playback-button").backgroundImage,
         buttonShadow: style(".playback-button").boxShadow,
         buttonFilter: style(".playback-button").filter,
+        buttonHalo: getComputedStyle(
+          document.querySelector(".playback-button"),
+          "::after",
+        ).display,
         iconFilter: style(".playback-icon").filter,
         controlOverflow: style(".playback-control").overflow,
       };
@@ -360,8 +377,11 @@ try {
       shellBorderWidth: "0px",
       brandShadow: "none",
       brandRadius: "0px",
+      buttonAppearance: "none",
+      buttonBackgroundImage: "none",
       buttonShadow: "none",
       buttonFilter: "none",
+      buttonHalo: "none",
       iconFilter: "none",
       controlOverflow: "visible",
     },
@@ -1186,10 +1206,12 @@ try {
     "speak",
     "Jump test older waiting speech should move into History when the newer target starts.",
   );
-  runEngine(
-    "speak",
-    "Jump test target has enough words to remain current while the renderer verifies stable timeline order after selection.",
-  );
+  const jumpTargetText = [
+    "Jump test target remains current while the renderer verifies stable timeline order after selection.",
+    "It stays active while the action menu changes the voice and the engine rebuilds the silent audio.",
+    "A final sentence leaves time for the pause command to settle before Clear all archives the active timeline.",
+  ].join(" ");
+  runEngine("speak", jumpTargetText);
   await waitFor(
     () => status().current && status().state === "paused" && status().queue_count >= 2,
     "The jump-to-here fixture did not reach the waiting queue",
@@ -1218,6 +1240,13 @@ try {
     "Jump-to-here did not start the selected waiting item",
     30_000,
   );
+  runEngine("pause");
+  await waitFor(
+    async () =>
+      status().state === "paused" &&
+      await page.locator("body").getAttribute("data-state") === "paused",
+    "The engine and renderer did not acknowledge Pause",
+  );
   await waitFor(
     async () =>
       await page.locator(`[data-item-id="${olderWaiting.id}"].is-history`).count() === 1 &&
@@ -1235,13 +1264,6 @@ try {
     "Jump-to-here changed row order instead of changing section membership",
   );
   assert(!status().queue.some(({ id }) => id === olderWaiting.id));
-  runEngine("pause");
-  await waitFor(
-    async () =>
-      status().state === "paused" &&
-      await page.locator("body").getAttribute("data-state") === "paused",
-    "The engine and renderer did not acknowledge Pause",
-  );
 
   const currentBeforeVoiceChange = status().current;
   assert(currentBeforeVoiceChange, "Voice change requires current speech");
@@ -1275,6 +1297,12 @@ try {
   assert.equal(status().current?.text, currentBeforeVoiceChange.text);
   assert.equal(status().current?.id, currentBeforeVoiceChange.id);
   runEngine("pause");
+  await waitFor(
+    async () =>
+      status().state === "paused" &&
+      await page.locator("body").getAttribute("data-state") === "paused",
+    "The changed voice did not settle into Paused",
+  );
 
   const clearIds = [
     ...(status().current ? [status().current.id] : []),
@@ -1372,6 +1400,12 @@ try {
   );
 
   console.log("Super Speech pointer drag and cancellation smoke test passed");
+} catch (error) {
+  const engineLog = path.join(runtime, "engine.log");
+  if (existsSync(engineLog)) {
+    console.error(`Silent engine log:\n${readFileSync(engineLog, "utf8").slice(-8_000)}`);
+  }
+  throw error;
 } finally {
   await electronApp?.close().catch(() => undefined);
   try {

@@ -131,9 +131,15 @@ body[data-theme="light"] .app-shell {
 }
 
 body[data-theme="light"] .playback-button {
+  border-color: transparent;
+  background: var(--accent);
   box-shadow: none;
   filter: none;
   transition: transform 160ms ease;
+}
+
+body[data-theme="light"] .playback-button::after {
+  display: none;
 }
 
 body[data-theme="light"] .playback-button:not(:disabled):hover,
@@ -391,6 +397,7 @@ body[data-state="playing"] .ring-two {
   border: 1px solid rgba(255, 255, 255, 0.28);
   border-radius: 50%;
   outline: 0;
+  appearance: none;
   background:
     radial-gradient(circle at 35% 25%, rgba(255, 255, 255, 0.24), transparent 30%),
     linear-gradient(145deg, var(--accent), var(--accent-deep));
