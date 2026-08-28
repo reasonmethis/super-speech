@@ -3950,8 +3950,13 @@ def test_timeline_plan_executes_moves_orders_and_cleanup(tmp_path: Path) -> None
     source.write_text("Speech", encoding="utf-8")
     row_id = speechicle_id(engine, source)
     plan = engine.TimelinePlan(
-        operation="archive_batch",
-        moves=(engine.TimelineMove(source, target),),
+        kind="archive",
+        moves=(
+            engine.TimelineMove(
+                engine.TimelineLocation("queue", source.name),
+                engine.TimelineLocation("history", target.name),
+            ),
+        ),
         previous_queue_ids=(row_id,),
         previous_history_ids=(),
         queue_ids=(),
@@ -3987,8 +3992,13 @@ def test_timeline_plan_rolls_back_after_moves_and_one_order_write(
     engine.save_queue_order([current])
     engine.save_history_order([source])
     plan = engine.TimelinePlan(
-        operation="promote",
-        moves=(engine.TimelineMove(source, target),),
+        kind="promote",
+        moves=(
+            engine.TimelineMove(
+                engine.TimelineLocation("history", source.name),
+                engine.TimelineLocation("queue", target.name),
+            ),
+        ),
         previous_queue_ids=(current_id,),
         previous_history_ids=(source_id,),
         queue_ids=(source_id, current_id),
@@ -4027,6 +4037,360 @@ def test_timeline_plan_rolls_back_after_moves_and_one_order_write(
     assert engine.queue_files_in_order() == [current]
     assert engine.history_files_in_order() == [source]
     assert not engine.TIMELINE_INTENT.exists()
+
+
+def build_archive_recovery_plan(engine):
+    current = engine.QUEUE / "001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-af_heart-say.txt"
+    earlier = engine.SPOKEN / "003-af_heart-say.txt"
+    for path in (current, waiting, earlier):
+        path.write_text(path.stem, encoding="utf-8")
+    current_id = speechicle_id(engine, current)
+    waiting_id = speechicle_id(engine, waiting)
+    earlier_id = speechicle_id(engine, earlier)
+    engine.save_queue_order([current, waiting])
+    engine.save_history_order([earlier])
+    plan = engine.TimelinePlan(
+        kind="archive",
+        moves=tuple(
+            engine.TimelineMove(
+                engine.TimelineLocation("queue", path.name),
+                engine.TimelineLocation("history", path.name),
+            )
+            for path in (current, waiting)
+        ),
+        previous_queue_ids=(current_id, waiting_id),
+        previous_history_ids=(earlier_id,),
+        queue_ids=(),
+        history_ids=(waiting_id, current_id, earlier_id),
+    )
+    return plan, current, waiting, earlier
+
+
+@pytest.mark.parametrize(
+    "checkpoint",
+    ["intent", "history_order", "queue_order", "move_1", "move_2", "converged"],
+)
+def test_new_timeline_plan_recovers_from_each_commit_checkpoint(
+    tmp_path: Path,
+    checkpoint: str,
+) -> None:
+    engine = load_engine(f"super_speech_engine_plan_checkpoint_{checkpoint}")
+    configure_runtime(engine, tmp_path)
+    plan, current, waiting, earlier = build_archive_recovery_plan(engine)
+    engine._write_timeline_intent(plan.intent_payload())
+    move_count = {
+        "intent": 0,
+        "history_order": 0,
+        "queue_order": 0,
+        "move_1": 1,
+        "move_2": 2,
+        "converged": 2,
+    }[checkpoint]
+    for source in (current, waiting)[:move_count]:
+        os.replace(source, engine.SPOKEN / source.name)
+    if checkpoint != "intent":
+        engine._write_saved_order(engine.HISTORY_ORDER, list(plan.history_ids))
+    if checkpoint not in {"intent", "history_order"}:
+        engine._write_saved_order(engine.QUEUE_ORDER, list(plan.queue_ids))
+
+    engine.repair_interrupted_timeline_transition()
+
+    assert engine.queue_files_in_order() == []
+    assert engine.history_files_in_order() == [
+        engine.SPOKEN / waiting.name,
+        engine.SPOKEN / current.name,
+        earlier,
+    ]
+    assert not engine.TIMELINE_INTENT.exists()
+
+
+@pytest.mark.parametrize(
+    "checkpoint", ["intent", "move", "queue_order", "history_order"]
+)
+def test_new_timeline_plan_recovers_a_voice_changing_promotion(
+    tmp_path: Path,
+    checkpoint: str,
+) -> None:
+    engine = load_engine(f"super_speech_engine_plan_promote_{checkpoint}")
+    configure_runtime(engine, tmp_path)
+    source = engine.SPOKEN / "001-af_heart-say.txt"
+    target = engine.QUEUE / "001-bm_fable-say.txt"
+    waiting = engine.QUEUE / "002-af_heart-say.txt"
+    source.write_text("Selected", encoding="utf-8")
+    waiting.write_text("Waiting", encoding="utf-8")
+    source_id = speechicle_id(engine, source)
+    waiting_id = speechicle_id(engine, waiting)
+    plan = engine.TimelinePlan(
+        kind="promote",
+        moves=(
+            engine.TimelineMove(
+                engine.TimelineLocation("history", source.name),
+                engine.TimelineLocation("queue", target.name),
+            ),
+        ),
+        previous_queue_ids=(waiting_id,),
+        previous_history_ids=(source_id,),
+        queue_ids=(source_id, waiting_id),
+        history_ids=(),
+    )
+    engine._write_timeline_intent(plan.intent_payload())
+    if checkpoint != "intent":
+        os.replace(source, target)
+    if checkpoint in {"queue_order", "history_order"}:
+        engine._write_saved_order(engine.QUEUE_ORDER, list(plan.queue_ids))
+    if checkpoint == "history_order":
+        engine._write_saved_order(engine.HISTORY_ORDER, list(plan.history_ids))
+
+    engine.repair_interrupted_timeline_transition()
+
+    assert target.read_text(encoding="utf-8") == "Selected"
+    assert not source.exists()
+    assert engine.queue_files_in_order() == [target, waiting]
+    assert engine.history_files_in_order() == []
+    assert not engine.TIMELINE_INTENT.exists()
+
+
+@pytest.mark.parametrize(
+    ("malformation", "error"),
+    [
+        ("duplicate_source", "duplicate move"),
+        ("duplicate_target", "duplicate move"),
+        ("backup_in_queue", "invalid timeline backup"),
+        ("path_traversal", "invalid timeline source filename"),
+        ("unknown_root", "invalid timeline source storage root"),
+        ("duplicate_id", "duplicate final History IDs"),
+        ("contradictory_orders", "same ID in both sections"),
+        ("move_id_mismatch", "move files contradict"),
+    ],
+)
+def test_new_timeline_plan_rejects_malformed_or_contradictory_payloads(
+    tmp_path: Path,
+    malformation: str,
+    error: str,
+) -> None:
+    engine = load_engine(f"super_speech_engine_plan_invalid_{malformation}")
+    configure_runtime(engine, tmp_path)
+    plan, current, waiting, earlier = build_archive_recovery_plan(engine)
+    payload = json.loads(json.dumps(plan.intent_payload()))
+    if malformation == "duplicate_source":
+        payload["moves"][1]["source"] = dict(payload["moves"][0]["source"])
+        payload["moves"][1]["target"]["name"] = "001-bm_fable-say.txt"
+    elif malformation == "duplicate_target":
+        payload["moves"][1]["target"] = dict(payload["moves"][0]["target"])
+        payload["moves"][1]["source"]["name"] = "001-bm_fable-say.txt"
+    elif malformation == "backup_in_queue":
+        payload["moves"][0]["backup"] = {
+            "root": "queue",
+            "name": f".{current.name}.test.duplicate",
+        }
+    elif malformation == "path_traversal":
+        payload["moves"][0]["source"]["name"] = f"../{current.name}"
+    elif malformation == "unknown_root":
+        payload["moves"][0]["source"]["root"] = "failed"
+    elif malformation == "duplicate_id":
+        payload["history_ids"].append(payload["history_ids"][0])
+    elif malformation == "move_id_mismatch":
+        payload["moves"][1]["source"]["name"] = "004-af_heart-say.txt"
+        payload["moves"][1]["target"]["name"] = "004-af_heart-say.txt"
+    else:
+        payload["queue_ids"] = [payload["previous_queue_ids"][0]]
+    engine._write_timeline_intent(payload)
+
+    with pytest.raises(RuntimeError, match=error):
+        engine.repair_interrupted_timeline_transition()
+
+    assert engine.TIMELINE_INTENT.exists()
+    assert current.exists()
+    assert waiting.exists()
+    assert earlier.exists()
+    assert not list(engine.SPOKEN.glob("001-*.txt"))
+    assert not list(engine.SPOKEN.glob("002-*.txt"))
+
+
+@pytest.mark.parametrize("order_version", [1, 2])
+@pytest.mark.parametrize("operation", ["archive", "archive_batch", "promote"])
+def test_each_legacy_timeline_intent_adapts_to_common_recovery(
+    tmp_path: Path,
+    operation: str,
+    order_version: int,
+) -> None:
+    engine = load_engine(
+        f"super_speech_engine_legacy_{operation}_{order_version}"
+    )
+    configure_runtime(engine, tmp_path)
+    source_directory = engine.SPOKEN if operation == "promote" else engine.QUEUE
+    source = source_directory / "001-af_heart-say.txt"
+    source.write_text("Legacy", encoding="utf-8")
+    public_id = speechicle_id(engine, source)
+    saved_id = source.stem if order_version == 1 else public_id
+    if operation == "archive":
+        intent = {
+            "version": 1,
+            "operation": operation,
+            "order_version": order_version,
+            "name": source.name,
+            "previous_history_ids": [],
+            "desired_history_ids": [saved_id],
+        }
+        expected = source
+    else:
+        intent = {
+            "version": 1,
+            "operation": operation,
+            "order_version": order_version,
+            "moves": [{"source": source.name, "target": source.name}],
+            "queue_ids": [] if operation == "archive_batch" else [saved_id],
+            "history_ids": [saved_id] if operation == "archive_batch" else [],
+        }
+        expected = (
+            engine.SPOKEN / source.name
+            if operation == "archive_batch"
+            else engine.QUEUE / source.name
+        )
+    engine._write_timeline_intent(intent)
+
+    assert engine._recover_timeline_intent()
+
+    assert expected.read_text(encoding="utf-8") == "Legacy"
+    assert not engine.TIMELINE_INTENT.exists()
+    order_path = (
+        engine.HISTORY_ORDER if operation == "archive_batch" else engine.QUEUE_ORDER
+    )
+    assert json.loads(order_path.read_text(encoding="utf-8"))["version"] == order_version
+
+
+def test_legacy_promotion_finishes_an_intermediate_voice_rename(
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_legacy_promotion_voice_rename")
+    configure_runtime(engine, tmp_path)
+    renamed_source = engine.QUEUE / "001-af_heart-say.txt"
+    target = engine.QUEUE / "001-bm_fable-say.txt"
+    renamed_source.write_text("Selected", encoding="utf-8")
+    engine._write_timeline_intent(
+        {
+            "version": 1,
+            "operation": "promote",
+            "moves": [
+                {
+                    "source": renamed_source.name,
+                    "target": target.name,
+                    "backup": None,
+                }
+            ],
+            "queue_ids": [target.stem],
+            "history_ids": [],
+        }
+    )
+
+    engine.repair_interrupted_timeline_transition()
+
+    assert target.read_text(encoding="utf-8") == "Selected"
+    assert not renamed_source.exists()
+    assert engine.queue_files_in_order() == [target]
+    assert not engine.TIMELINE_INTENT.exists()
+
+
+def test_unsafe_legacy_intent_is_retained_without_partial_application(
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_legacy_unsafe_intent")
+    configure_runtime(engine, tmp_path)
+    first = engine.QUEUE / "001-af_heart-say.txt"
+    unsafe = engine.QUEUE / "002-af_heart-say.txt"
+    first.write_text("First", encoding="utf-8")
+    unsafe.write_text("Safe", encoding="utf-8")
+    first_id = speechicle_id(engine, first)
+    unsafe_id = speechicle_id(engine, unsafe)
+    engine._write_timeline_intent(
+        {
+            "version": 1,
+            "operation": "archive_batch",
+            "order_version": 2,
+            "moves": [
+                {"source": first.name, "target": first.name},
+                {"source": f"../{unsafe.name}", "target": unsafe.name},
+            ],
+            "queue_ids": [],
+            "history_ids": [unsafe_id, first_id],
+        }
+    )
+
+    with pytest.raises(RuntimeError):
+        engine.repair_interrupted_timeline_transition()
+
+    assert engine.TIMELINE_INTENT.exists()
+    assert first.read_text(encoding="utf-8") == "First"
+    assert unsafe.read_text(encoding="utf-8") == "Safe"
+    assert not (engine.SPOKEN / first.name).exists()
+    assert not (engine.SPOKEN / unsafe.name).exists()
+
+
+def test_new_timeline_plan_retains_journal_until_backup_cleanup_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_plan_backup_cleanup")
+    configure_runtime(engine, tmp_path)
+    source = engine.QUEUE / "001-af_heart-say.txt"
+    target = engine.SPOKEN / source.name
+    backup = engine.SPOKEN / f".{source.name}.test.duplicate"
+    source.write_text("Current", encoding="utf-8")
+    row_id = speechicle_id(engine, source)
+    target.write_text("Duplicate", encoding="utf-8")
+    plan = engine.TimelinePlan(
+        kind="archive",
+        moves=(
+            engine.TimelineMove(
+                engine.TimelineLocation("queue", source.name),
+                engine.TimelineLocation("history", target.name),
+                engine.TimelineLocation("history", backup.name),
+            ),
+        ),
+        previous_queue_ids=(row_id,),
+        previous_history_ids=(),
+        queue_ids=(),
+        history_ids=(row_id,),
+    )
+    engine._write_timeline_intent(plan.intent_payload())
+    real_unlink = Path.unlink
+
+    def fail_backup_cleanup(path: Path, *args, **kwargs) -> None:
+        if path == backup:
+            raise PermissionError("backup locked")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_backup_cleanup)
+
+    with pytest.raises(PermissionError, match="backup locked"):
+        engine.repair_interrupted_timeline_transition()
+
+    assert engine.TIMELINE_INTENT.exists()
+    assert target.read_text(encoding="utf-8") == "Current"
+    assert backup.read_text(encoding="utf-8") == "Duplicate"
+
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    engine.repair_interrupted_timeline_transition()
+    assert not backup.exists()
+    assert not engine.TIMELINE_INTENT.exists()
+
+
+def test_new_timeline_plan_retains_journal_when_a_row_cannot_be_recovered(
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_plan_missing_row")
+    configure_runtime(engine, tmp_path)
+    plan, current, waiting, earlier = build_archive_recovery_plan(engine)
+    engine._write_timeline_intent(plan.intent_payload())
+    current.unlink()
+
+    with pytest.raises(RuntimeError, match="pending timeline row is missing"):
+        engine.repair_interrupted_timeline_transition()
+
+    assert engine.TIMELINE_INTENT.exists()
+    assert waiting.exists()
+    assert earlier.exists()
 
 
 def test_startup_completes_an_interrupted_clear_batch(tmp_path: Path) -> None:
@@ -4096,6 +4460,17 @@ def test_archive_succeeds_when_committed_intent_cleanup_is_deferred(
     assert (engine.SPOKEN / current.name).exists()
     assert engine.TIMELINE_INTENT.exists()
     pending_intent = engine.TIMELINE_INTENT.read_text(encoding="utf-8")
+    pending_payload = json.loads(pending_intent)
+    assert pending_payload["version"] == 2
+    assert pending_payload["operation"] == "timeline_plan"
+    assert pending_payload["moves"][0]["source"] == {
+        "root": "queue",
+        "name": current.name,
+    }
+    assert pending_payload["moves"][0]["target"] == {
+        "root": "history",
+        "name": current.name,
+    }
     with pytest.raises(PermissionError, match="locked"):
         engine.archive(waiting)
     assert waiting.exists()
