@@ -1863,7 +1863,6 @@ class State:
         # Active playback-boundary item, including synthesis and inter-item gaps
         self.current: CurrentProjection | None = None
         self.read_failures: dict[str, float] = {}
-        self.skip_name: str | None = None  # skipped chunk whose banked pieces must be dropped
         self.stop = threading.Event()    # tell the worker to exit
         self.saw_stop = False            # latched STOP - finish current chunk, then exit
         self.timeline_revision = timeline_revision
@@ -2689,29 +2688,11 @@ def _replace_queue_voice_unlocked(source: Path, voice: str) -> Path:
     target = _voice_variant_path(source, voice)
     if target == source:
         return source
-    with _queue_order_lock:
-        if target.exists():
-            raise RuntimeError(f"voice target already exists: {target.stem}")
-        ordered = queue_files_in_order()
-        try:
-            position = ordered.index(source)
-        except ValueError as error:
-            raise ValueError(f"waiting chunk not found: {source.stem}") from error
-        os.replace(source, target)
-        ordered[position] = target
-        try:
-            save_queue_order(ordered)
-        except OSError as error:
-            try:
-                os.replace(target, source)
-                save_queue_order(
-                    ordered[:position] + [source] + ordered[position + 1 :]
-                )
-            except OSError as rollback_error:
-                raise MutationOutcomeUnconfirmed(
-                    f"voice change rollback failed: {rollback_error}"
-                ) from error
-            raise
+    if not source.is_file():
+        raise ValueError(f"waiting chunk not found: {source.stem}")
+    if target.exists():
+        raise RuntimeError(f"voice target already exists: {target.stem}")
+    os.replace(source, target)
     return target
 
 
@@ -2971,7 +2952,6 @@ def _apply_play_mutation_locked(
             voice_from_name(target.name),
             skip_initial_gap=True,
         )
-        st.skip_name = None
         st.saw_stop = False
     if public_id_for_path(target) != chunk_id:
         st.stop.set()
@@ -3021,7 +3001,6 @@ def do_clear(buf: "queue.Queue", st: State) -> bool:
             log("clear could not archive the timeline; stopping")
             return False
         st.claims.clear()
-        st.skip_name = None
         current_name = st.current.filename if st.current is not None else None
         clear_current_playback(st, current_name)
     log(f"clear; archived {len(ordered)} row(s), dropped {discarded} piece(s)")
@@ -3369,7 +3348,6 @@ def _claimed(st: State, name: str, generation: int | None = None) -> bool:
     with st.lock:
         return (
             name in st.claims
-            and st.skip_name != name
             and (generation is None or st.claims[name] == generation)
         )
 
@@ -3520,10 +3498,7 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
             )
             while not st.stop.is_set():
                 with st.lock:
-                    if (
-                        st.claims.get(nxt.name) != generation
-                        or nxt.name == st.skip_name
-                    ):
+                    if st.claims.get(nxt.name) != generation:
                         break
                     try:
                         buf.put_nowait(entry)
@@ -3706,8 +3681,6 @@ def finish_chunk_playback(path: Path, outcome: str, last: bool, st: State) -> bo
                 f"could not archive {path.name}; stopping so it can be retried"
             )
         clear_current_playback(st, path.name)
-        if outcome == "skip":
-            st.skip_name = path.name
     return True
 
 
@@ -3862,8 +3835,6 @@ def run_engine_loop(
                     path.name,
                     claim_generation,
                 )
-                if first and st.skip_name and not stale:
-                    st.skip_name = None
             if stale:
                 continue
 

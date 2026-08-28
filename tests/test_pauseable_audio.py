@@ -5146,6 +5146,45 @@ def test_voice_and_history_lifecycle_preserve_one_public_identity(
     assert replayed.name.endswith("-af_heart-g250-say.txt")
 
 
+def test_voice_change_does_not_rewrite_stable_queue_order(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_voice_order_is_stable")
+    configure_runtime(engine, tmp_path)
+    engine.AVAILABLE_VOICES = {"af_heart", "bm_fable"}
+    current = engine.enqueue_text("Current", "af_heart")
+    waiting = engine.enqueue_text("Waiting", "af_heart")
+    engine.save_queue_order([current, waiting])
+    saved_order = engine.QUEUE_ORDER.read_bytes()
+    monkeypatch.setattr(
+        engine,
+        "_write_order_payload",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("order was rewritten")),
+    )
+
+    changed = engine._replace_queue_voice(waiting, "bm_fable")
+
+    assert engine.QUEUE_ORDER.read_bytes() == saved_order
+    assert engine.queue_files_in_order() == [current, changed]
+
+
+def test_skip_invalidates_buffered_audio_by_removing_its_claim(
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_skip_claim_generation")
+    configure_runtime(engine, tmp_path)
+    current = engine.enqueue_text("Current", "af_heart")
+    state = engine.State()
+    _, generation = engine._record_claim(state, current)
+    set_current(engine, state, current)
+
+    assert engine.finish_chunk_playback(current, "skip", True, state)
+
+    assert engine.buffered_piece_is_stale(state, current.name, generation)
+    assert not hasattr(state, "skip_name")
+
+
 def test_public_status_contains_no_storage_filenames(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_public_status_shape")
     configure_runtime(engine, tmp_path)
