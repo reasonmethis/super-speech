@@ -602,7 +602,7 @@ export function runtimeStatusForMutationSnapshot(
   ) {
     return runtime;
   }
-  return {
+  return adoptTimelineSnapshot(runtime, {
     ...snapshot,
     state: runtimeStateForSnapshot(
       runtime.installed,
@@ -611,7 +611,7 @@ export function runtimeStatusForMutationSnapshot(
     ),
     engine_running: runtime.engine_running,
     installed: runtime.installed,
-  };
+  });
 }
 
 export interface DesktopApi {

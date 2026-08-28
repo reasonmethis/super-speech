@@ -704,25 +704,62 @@ test("mutation snapshots must belong to the live engine process", () => {
     engine_running: true,
     installed: true,
   };
-  const currentSnapshot = {
+  const newerSnapshot = {
     ...status,
     timeline_revision: 3,
     updated_at: 21,
     engine_pid: 200,
   };
   const lateSnapshot = {
-    ...currentSnapshot,
+    ...newerSnapshot,
     timeline_revision: 80,
     updated_at: 80,
     engine_pid: 100,
   };
 
-  assert.deepEqual(runtimeStatusForMutationSnapshot(currentSnapshot, runtime), {
-    ...currentSnapshot,
+  assert.deepEqual(runtimeStatusForMutationSnapshot(newerSnapshot, runtime), {
+    ...newerSnapshot,
     engine_running: true,
     installed: true,
   });
   assert.equal(runtimeStatusForMutationSnapshot(lateSnapshot, runtime), runtime);
   const stopped = { ...runtime, state: "stopped" as const, engine_pid: null, engine_running: false };
-  assert.equal(runtimeStatusForMutationSnapshot(currentSnapshot, stopped), stopped);
+  assert.equal(runtimeStatusForMutationSnapshot(newerSnapshot, stopped), stopped);
+});
+
+test("mutation snapshots cannot regress the live process timeline", () => {
+  const runtime: RuntimeStatus = {
+    ...status,
+    timeline_revision: 5,
+    updated_at: 20,
+    engine_pid: 200,
+    engine_running: true,
+    installed: true,
+  };
+  const olderRevision = {
+    ...status,
+    timeline_revision: 4,
+    updated_at: 100,
+    engine_pid: 200,
+  };
+  const olderPublication = {
+    ...status,
+    timeline_revision: 5,
+    updated_at: 19,
+    engine_pid: 200,
+  };
+  const newerSnapshot = {
+    ...status,
+    timeline_revision: 6,
+    updated_at: 1,
+    engine_pid: 200,
+  };
+
+  assert.equal(runtimeStatusForMutationSnapshot(olderRevision, runtime), runtime);
+  assert.equal(runtimeStatusForMutationSnapshot(olderPublication, runtime), runtime);
+  assert.deepEqual(runtimeStatusForMutationSnapshot(newerSnapshot, runtime), {
+    ...newerSnapshot,
+    engine_running: true,
+    installed: true,
+  });
 });
