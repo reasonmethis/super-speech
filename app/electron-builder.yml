@@ -31,8 +31,12 @@ extraResources:
     to: integrations/super-speech
     filter:
       - SKILL.md
-      - engine/**
-      - scripts/**
+      - engine/*.py
+      - engine/pyproject.toml
+      - engine/requirements-runtime.txt
+      - scripts/*.py
+      - scripts/*.ps1
+      - scripts/*.sh
 win:
   icon: build/icon.ico
   artifactName: Super-Speech-Win-${arch}-${version}-Setup.${ext}

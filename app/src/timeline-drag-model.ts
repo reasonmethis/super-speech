@@ -1,52 +1,52 @@
-import { moveQueueItemBefore } from "./runtime.ts";
+import { moveSpeechicleItemBefore } from "./runtime.ts";
 
-interface QueueDragBase {
+interface TimelineDragBase {
   pointerId: number;
   sourceId: string;
   initialVisualOrder: readonly string[];
-  kind: "upcoming" | "history";
+  kind: "waiting" | "history";
 }
 
-export type QueueDragState =
-  | (QueueDragBase & { phase: "armed" })
-  | (QueueDragBase & {
-      phase: "queue";
+export type TimelineDragState =
+  | (TimelineDragBase & { phase: "armed" })
+  | (TimelineDragBase & {
+      phase: "section";
       previewVisualOrder: readonly string[];
     })
-  | (QueueDragBase & {
-      kind: "upcoming";
+  | (TimelineDragBase & {
+      kind: "waiting";
       phase: "history";
       previewVisualOrder: readonly string[];
     });
 
-export type QueueDragCommand =
+export type TimelineDragCommand =
   | {
       type: "move";
-      kind: "upcoming" | "history";
+      kind: "waiting" | "history";
       id: string;
       beforeId: string | null;
     }
   | { type: "archive"; id: string };
 
-export type QueueDragEvent =
-  | { type: "preview-queue"; pointerId: number; beforeId: string | null }
+export type TimelineDragEvent =
+  | { type: "preview-section"; pointerId: number; beforeId: string | null }
   | { type: "preview-history"; pointerId: number }
   | { type: "finish"; pointerId: number; commit: boolean }
   | { type: "cancel" };
 
-export interface QueueDragTransition {
-  state: QueueDragState | null;
+export interface TimelineDragTransition {
+  state: TimelineDragState | null;
   visualOrder: readonly string[] | null;
-  command: QueueDragCommand | null;
+  command: TimelineDragCommand | null;
 }
 
-export interface QueueRowBounds {
+export interface TimelineRowBounds {
   id: string;
   top: number;
   height: number;
 }
 
-export interface QueueListBounds {
+export interface TimelineListBounds {
   left: number;
   right: number;
   bottom: number;
@@ -57,12 +57,12 @@ const NO_CHANGE = {
   command: null,
 } as const;
 
-export function startQueueDrag(
+export function startTimelineDrag(
   pointerId: number,
   sourceId: string,
   visualOrder: readonly string[],
-  kind: "upcoming" | "history" = "upcoming",
-): QueueDragState | null {
+  kind: "waiting" | "history" = "waiting",
+): TimelineDragState | null {
   if (!visualOrder.includes(sourceId) || new Set(visualOrder).size !== visualOrder.length) {
     return null;
   }
@@ -75,7 +75,7 @@ export function startQueueDrag(
   };
 }
 
-function settleDrag(state: QueueDragState, commit: boolean): QueueDragTransition {
+function settleDrag(state: TimelineDragState, commit: boolean): TimelineDragTransition {
   if (!commit || state.phase === "armed") {
     return {
       state: null,
@@ -101,7 +101,7 @@ function settleDrag(state: QueueDragState, commit: boolean): QueueDragTransition
       command: null,
     };
   }
-  const engineOrder = state.kind === "upcoming"
+  const engineOrder = state.kind === "waiting"
     ? [...state.previewVisualOrder].reverse()
     : [...state.previewVisualOrder];
   const sourceIndex = engineOrder.indexOf(state.sourceId);
@@ -117,10 +117,10 @@ function settleDrag(state: QueueDragState, commit: boolean): QueueDragTransition
   };
 }
 
-export function transitionQueueDrag(
-  state: QueueDragState | null,
-  event: QueueDragEvent,
-): QueueDragTransition {
+export function transitionTimelineDrag(
+  state: TimelineDragState | null,
+  event: TimelineDragEvent,
+): TimelineDragTransition {
   if (event.type === "cancel") {
     return state ? settleDrag(state, false) : { state: null, ...NO_CHANGE };
   }
@@ -131,10 +131,10 @@ export function transitionQueueDrag(
     return settleDrag(state, event.commit);
   }
   if (event.type === "preview-history") {
-    if (state.kind !== "upcoming") {
+    if (state.kind !== "waiting") {
       return { state, ...NO_CHANGE };
     }
-    const previewVisualOrder = state.phase === "queue"
+    const previewVisualOrder = state.phase === "section"
       ? state.previewVisualOrder
       : state.initialVisualOrder;
     return {
@@ -152,14 +152,14 @@ export function transitionQueueDrag(
   }
 
   const items = state.initialVisualOrder.map((id) => ({ id }));
-  const previewVisualOrder = moveQueueItemBefore(
+  const previewVisualOrder = moveSpeechicleItemBefore(
     items,
     state.sourceId,
     event.beforeId,
   ).map(({ id }) => id);
   return {
     state: {
-      phase: "queue",
+      phase: "section",
       pointerId: state.pointerId,
       sourceId: state.sourceId,
       initialVisualOrder: state.initialVisualOrder,
@@ -171,9 +171,9 @@ export function transitionQueueDrag(
   };
 }
 
-export function queueDropBeforeId(
+export function sectionDropBeforeId(
   sourceId: string,
-  rows: readonly QueueRowBounds[],
+  rows: readonly TimelineRowBounds[],
   draggedCenterY: number,
 ): string | null {
   return rows.find(
@@ -192,7 +192,7 @@ export function pointerMovedBeyondThreshold(
 }
 
 export function isHistoryDropArea(
-  list: QueueListBounds,
+  list: TimelineListBounds,
   dividerTop: number,
   pointerX: number,
   pointerY: number,

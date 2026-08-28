@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   ENGINE_STATUS_VERSION,
@@ -7,7 +8,9 @@ import {
   currentPieceSegments,
   engineProcessIsLive,
   isSpeechicleId,
-  moveQueueItemBefore,
+  moveSpeechicleItemBefore,
+  mutationResultMatchesRequest,
+  ownedEngineRestartReason,
   playbackPresentation,
   parseEngineStatus,
   parseEngineProcessStatus,
@@ -40,6 +43,18 @@ const status: EngineStatus = {
   history: [],
 };
 
+test("matches the shared engine status protocol corpus", () => {
+  const corpus = JSON.parse(
+    readFileSync(
+      new URL("../../tests/fixtures/status_protocol.json", import.meta.url),
+      "utf8",
+    ),
+  ) as { valid: unknown[]; invalid: unknown[] };
+
+  assert.equal(corpus.valid.every((item) => parseEngineStatus(item) !== null), true);
+  assert.equal(corpus.invalid.every((item) => parseEngineStatus(item) === null), true);
+});
+
 test("accepts status from the current engine process", () => {
   assert.equal(statusForEngineProcess(status, 41), status);
 });
@@ -57,6 +72,41 @@ test("does not treat a stale heartbeat as a live engine", () => {
   assert.equal(engineProcessIsLive(process, true, () => false, 101), false);
   assert.equal(engineProcessIsLive(process, false, () => true, 101), true);
   assert.equal(engineProcessIsLive(process, true, () => true, 1_000), true);
+});
+
+test("restarts an owned engine that hangs after becoming ready", () => {
+  const health = {
+    startedAtMs: 1_000,
+    ready: true,
+    statusUpdatedAtSeconds: 2,
+  };
+  assert.equal(ownedEngineRestartReason(health, 31_999, 120_000, 30_000), null);
+  assert.equal(
+    ownedEngineRestartReason(health, 32_000, 120_000, 30_000),
+    "became unresponsive",
+  );
+  assert.equal(
+    ownedEngineRestartReason(
+      { ...health, statusUpdatedAtSeconds: 59 },
+      60_000,
+      120_000,
+      30_000,
+    ),
+    null,
+  );
+});
+
+test("gives an owned engine its full startup allowance", () => {
+  const starting = {
+    startedAtMs: 1_000,
+    ready: false,
+    statusUpdatedAtSeconds: null,
+  };
+  assert.equal(ownedEngineRestartReason(starting, 120_999, 120_000, 30_000), null);
+  assert.equal(
+    ownedEngineRestartReason(starting, 121_000, 120_000, 30_000),
+    "did not finish starting",
+  );
 });
 
 test("a stopped engine cannot be presented as active because work is queued", () => {
@@ -85,6 +135,25 @@ test("an incompatible external engine cannot leave the app loading forever", () 
 test("accepts a complete current-version status", () => {
   assert.equal(ENGINE_STATUS_VERSION, 13);
   assert.equal(parseEngineStatus(status), status);
+});
+
+test("represents unreadable Current as one empty pending piece", () => {
+  const unreadable = {
+    id: speechicleId(80),
+    text: "",
+    voice: "af_heart",
+    piece: 0,
+    piece_count: 1,
+    piece_start: null,
+    piece_end: null,
+    elapsed_seconds: 0,
+  };
+  const snapshot = { ...status, state: "playing", current: unreadable };
+  assert.deepEqual(parseEngineStatus(snapshot), snapshot);
+  assert.equal(
+    parseEngineStatus({ ...snapshot, current: { ...unreadable, piece_count: 0 } }),
+    null,
+  );
 });
 
 test("requires a nonnegative integer timeline revision", () => {
@@ -396,14 +465,14 @@ test("keeps newest waiting speech above current speech and history", () => {
         id: newest.id,
         text: newest.text,
         voice: newest.voice,
-        kind: "upcoming",
+        kind: "waiting",
         position: 2,
       },
       {
         id: next.id,
         text: next.text,
         voice: next.voice,
-        kind: "upcoming",
+        kind: "waiting",
         position: 1,
       },
       {
@@ -451,19 +520,19 @@ test("keeps row order stable when current speech enters history", () => {
   );
 });
 
-test("moves a queue item before a stable ID or to the end", () => {
+test("moves a Speechicle before a stable ID or to the end", () => {
   const items = [{ id: "one" }, { id: "two" }, { id: "three" }];
 
   assert.deepEqual(
-    moveQueueItemBefore(items, "three", "one").map(({ id }) => id),
+    moveSpeechicleItemBefore(items, "three", "one").map(({ id }) => id),
     ["three", "one", "two"],
   );
   assert.deepEqual(
-    moveQueueItemBefore(items, "one", null).map(({ id }) => id),
+    moveSpeechicleItemBefore(items, "one", null).map(({ id }) => id),
     ["two", "three", "one"],
   );
   assert.deepEqual(
-    moveQueueItemBefore(items, "two", "missing").map(({ id }) => id),
+    moveSpeechicleItemBefore(items, "two", "missing").map(({ id }) => id),
     ["one", "two", "three"],
   );
 });
@@ -594,6 +663,28 @@ test("normalizes committed and failed mutation results", () => {
       snapshot: status,
     }),
     null,
+  );
+});
+
+test("a committed Play result must identify the selected Speechicle", () => {
+  const id = speechicleId(8);
+  const play = { type: "play", id } as const;
+  const committed = {
+    outcome: "committed",
+    requestId: "1".repeat(24),
+    resultId: id,
+    snapshot: status,
+  } as const;
+  assert.equal(mutationResultMatchesRequest(play, committed), true);
+  assert.equal(
+    mutationResultMatchesRequest(play, { ...committed, resultId: speechicleId(9) }),
+    false,
+  );
+  const { resultId: _resultId, ...missingResultId } = committed;
+  assert.equal(mutationResultMatchesRequest(play, missingResultId), false);
+  assert.equal(
+    mutationResultMatchesRequest({ type: "clear" }, missingResultId),
+    true,
   );
 });
 

@@ -5,7 +5,7 @@ import {
   VOICE_OPTIONS,
   adoptTimelineSnapshot,
   currentPieceSegments,
-  moveQueueItemBefore,
+  moveSpeechicleItemBefore,
   playbackPresentation,
   timelineItems,
   type PlaybackPresentation,
@@ -16,11 +16,11 @@ import {
 import {
   isHistoryDropArea,
   pointerMovedBeyondThreshold,
-  queueDropBeforeId,
-  startQueueDrag,
-  transitionQueueDrag,
-  type QueueDragState,
-} from "./queue-drag-model";
+  sectionDropBeforeId,
+  startTimelineDrag,
+  transitionTimelineDrag,
+  type TimelineDragState,
+} from "./timeline-drag-model";
 
 const demoStatus: RuntimeStatus = {
   version: ENGINE_STATUS_VERSION,
@@ -62,7 +62,7 @@ const demoStatus: RuntimeStatus = {
     },
     {
       id: "sp_00000000000000000000000000000012",
-      text: "The app keeps upcoming speech intact when you choose something else.",
+      text: "The app keeps waiting speech intact when you choose something else.",
       voice: "af_aoede",
     },
   ],
@@ -80,13 +80,15 @@ const voicePill = requiredElement<HTMLSpanElement>("voice-pill");
 const voiceLabel = requiredElement<HTMLSpanElement>("voice-label");
 const metadataRow = requiredElement<HTMLDivElement>("metadata-row");
 const clearQueueButton = requiredElement<HTMLButtonElement>("clear-queue-button");
-const queueList = requiredElement<HTMLDivElement>("queue-list");
+const speechicleList = requiredElement<HTMLDivElement>("speechicle-list");
 const queueActionMenu = requiredElement<HTMLDivElement>("queue-action-menu");
 const commandStatus = requiredElement<HTMLDivElement>("command-status");
+commandStatus.removeAttribute("role");
+commandStatus.removeAttribute("aria-live");
 const versionLabel = requiredElement<HTMLSpanElement>("version-label");
 const ambientRings = [...document.querySelectorAll<HTMLElement>(".ring")];
 const playbackBackground = [
-  ...document.querySelectorAll<HTMLElement>(".queue-section, footer"),
+  ...document.querySelectorAll<HTMLElement>(".timeline-section, footer"),
 ];
 const desktopApi = window.superSpeech;
 const themeButtons = [...document.querySelectorAll<HTMLButtonElement>("[data-theme-choice]")];
@@ -136,10 +138,10 @@ interface TimelineMutationFailure {
   type: TimelineMutation["type"];
 }
 
-type DraggableKind = "upcoming" | "history";
+type DraggableKind = "waiting" | "history";
 
-interface QueuePointerDrag {
-  state: QueueDragState;
+interface TimelinePointerDrag {
+  state: TimelineDragState;
   startX: number;
   startY: number;
   pointerOffsetX: number;
@@ -148,7 +150,7 @@ interface QueuePointerDrag {
   height: number;
 }
 
-interface ChunkPointerGesture {
+interface SpeechiclePointerGesture {
   pointerId: number;
   button: HTMLButtonElement;
   startX: number;
@@ -156,7 +158,7 @@ interface ChunkPointerGesture {
   moved: boolean;
 }
 
-interface PendingChunkExpansion {
+interface PendingSpeechicleExpansion {
   itemId: string;
   timeoutId: number;
 }
@@ -167,10 +169,10 @@ let pendingTimelineMutation: PendingTimelineMutation | null = null;
 let failedTimelineMutation: TimelineMutationFailure | null = null;
 let expandedItemId: string | null = null;
 let renderedTimelineKey: string | null = null;
-let queuePointerDrag: QueuePointerDrag | null = null;
-let chunkPointerGesture: ChunkPointerGesture | null = null;
-const suppressedChunkClicks = new WeakSet<HTMLButtonElement>();
-let pendingChunkExpansion: PendingChunkExpansion | null = null;
+let timelinePointerDrag: TimelinePointerDrag | null = null;
+let speechiclePointerGesture: SpeechiclePointerGesture | null = null;
+const suppressedSpeechicleClicks = new WeakSet<HTMLButtonElement>();
+let pendingSpeechicleExpansion: PendingSpeechicleExpansion | null = null;
 let openMenuItemId: string | null = null;
 let revealedCurrentItemId: string | null = null;
 let ringSettlingAnimations: Animation[] = [];
@@ -255,13 +257,13 @@ function itemReference(
   if (item.kind === "current") {
     return "current speech";
   }
-  if (item.kind === "upcoming") {
+  if (item.kind === "waiting") {
     return `waiting speech ${waitingPosition}, ${summary}`;
   }
   return `history speech, ${summary}`;
 }
 
-function chunkActionLabel(
+function speechicleActionLabel(
   item: TimelineItem,
   expanded: boolean,
   reference = itemReference(item),
@@ -423,6 +425,9 @@ function setPlaybackState(state: PlaybackPresentation["state"]): void {
 }
 
 function render(status: RuntimeStatus): void {
+  if (status.state !== currentStatus.state) {
+    commandStatus.textContent = "";
+  }
   currentStatus = status;
   const presentation = playbackPresentation(
     status,
@@ -434,7 +439,7 @@ function render(status: RuntimeStatus): void {
   setPlaybackState(presentation.state);
 
   statusDot.className = `status-dot state-${presentation.state}`;
-  statusLabel.textContent = copy.label;
+  statusLabel.textContent = commandStatus.textContent || copy.label;
   playbackCopy.classList.toggle("is-hidden", !showPlaybackCopy);
   playbackTitle.textContent = copy.title ?? "";
   const followedCurrent = status.current?.id === presentation.item?.id
@@ -447,7 +452,7 @@ function render(status: RuntimeStatus): void {
     const restoreFocus = playbackCopy.contains(document.activeElement);
     setPlaybackExpanded(false);
     if (restoreFocus) {
-      queueList.focus({ preventScroll: true });
+      speechicleList.focus({ preventScroll: true });
     }
   }
   if (canExpand) {
@@ -524,12 +529,12 @@ function render(status: RuntimeStatus): void {
 }
 
 function clearHistoryDropIndicator(): void {
-  for (const element of queueList.querySelectorAll(".is-history-drop")) {
+  for (const element of speechicleList.querySelectorAll(".is-history-drop")) {
     element.classList.remove("is-history-drop");
   }
 }
 
-function beginQueuePointerDrag(
+function beginTimelinePointerDrag(
   event: PointerEvent,
   id: string,
   row: HTMLElement,
@@ -544,13 +549,13 @@ function beginQueuePointerDrag(
     return;
   }
 
-  cancelQueuePointerDrag();
+  cancelTimelinePointerDrag();
   event.preventDefault();
   const bounds = row.getBoundingClientRect();
-  const visualOrder = kind === "upcoming"
+  const visualOrder = kind === "waiting"
     ? [...currentStatus.queue].reverse().map(({ id }) => id)
     : currentStatus.history.map(({ id }) => id);
-  const state = startQueueDrag(
+  const state = startTimelineDrag(
     event.pointerId,
     id,
     visualOrder,
@@ -560,8 +565,8 @@ function beginQueuePointerDrag(
     return;
   }
   handle.focus({ preventScroll: true });
-  queueList.setPointerCapture(event.pointerId);
-  queuePointerDrag = {
+  speechicleList.setPointerCapture(event.pointerId);
+  timelinePointerDrag = {
     state,
     startX: event.clientX,
     startY: event.clientY,
@@ -573,22 +578,22 @@ function beginQueuePointerDrag(
 }
 
 function draggableRow(kind: DraggableKind, id: string): HTMLElement | null {
-  return [...queueList.querySelectorAll<HTMLElement>(`.queue-item.is-${kind}`)]
+  return [...speechicleList.querySelectorAll<HTMLElement>(`.speechicle-item.is-${kind}`)]
     .find((row) => row.dataset.itemId === id) ?? null;
 }
 
 function activeDragGhost(): HTMLElement | null {
-  return document.querySelector<HTMLElement>(".queue-drag-ghost");
+  return document.querySelector<HTMLElement>(".timeline-drag-ghost");
 }
 
-function activateQueuePointerDrag(drag: QueuePointerDrag): boolean {
+function activateTimelinePointerDrag(drag: TimelinePointerDrag): boolean {
   const row = draggableRow(drag.state.kind, drag.state.sourceId);
   if (!row) {
     return false;
   }
   const bounds = row.getBoundingClientRect();
   const ghost = row.cloneNode(true) as HTMLElement;
-  ghost.classList.add("queue-drag-ghost");
+  ghost.classList.add("timeline-drag-ghost");
   ghost.setAttribute("aria-hidden", "true");
   for (const element of ghost.querySelectorAll<HTMLElement>(
     "[id], [aria-controls], [aria-labelledby], [aria-describedby]",
@@ -607,33 +612,33 @@ function activateQueuePointerDrag(drag: QueuePointerDrag): boolean {
   ghost.style.width = `${bounds.width}px`;
   ghost.style.height = `${bounds.height}px`;
   document.body.append(ghost);
-  queueList.classList.add("is-queue-dragging");
+  speechicleList.classList.add("is-timeline-dragging");
   row.classList.add("is-drag-source");
   return true;
 }
 
-function clearQueueDragVisuals(): void {
-  for (const ghost of document.querySelectorAll(".queue-drag-ghost")) {
+function clearTimelineDragVisuals(): void {
+  for (const ghost of document.querySelectorAll(".timeline-drag-ghost")) {
     ghost.remove();
   }
-  for (const row of queueList.querySelectorAll(".is-drag-source")) {
+  for (const row of speechicleList.querySelectorAll(".is-drag-source")) {
     row.classList.remove("is-drag-source");
   }
-  queueList.classList.remove("is-queue-dragging");
+  speechicleList.classList.remove("is-timeline-dragging");
   clearHistoryDropIndicator();
 }
 
 function releaseQueuePointer(pointerId: number): void {
   try {
-    if (queueList.hasPointerCapture(pointerId)) {
-      queueList.releasePointerCapture(pointerId);
+    if (speechicleList.hasPointerCapture(pointerId)) {
+      speechicleList.releasePointerCapture(pointerId);
     }
   } finally {
-    clearQueueDragVisuals();
+    clearTimelineDragVisuals();
   }
 }
 
-function beginChunkPointerGesture(
+function beginSpeechiclePointerGesture(
   event: PointerEvent,
   button: HTMLButtonElement,
 ): void {
@@ -641,11 +646,11 @@ function beginChunkPointerGesture(
     event.button !== 0 ||
     !event.isPrimary ||
     button.disabled ||
-    chunkPointerGesture
+    speechiclePointerGesture
   ) {
     return;
   }
-  chunkPointerGesture = {
+  speechiclePointerGesture = {
     pointerId: event.pointerId,
     button,
     startX: event.clientX,
@@ -654,13 +659,13 @@ function beginChunkPointerGesture(
   };
 }
 
-function suppressNextChunkClick(button: HTMLButtonElement): void {
-  suppressedChunkClicks.add(button);
-  window.setTimeout(() => suppressedChunkClicks.delete(button), 0);
+function suppressNextSpeechicleClick(button: HTMLButtonElement): void {
+  suppressedSpeechicleClicks.add(button);
+  window.setTimeout(() => suppressedSpeechicleClicks.delete(button), 0);
 }
 
-function recordChunkPointerMovement(
-  gesture: ChunkPointerGesture,
+function recordSpeechiclePointerMovement(
+  gesture: SpeechiclePointerGesture,
   event: PointerEvent,
 ): void {
   gesture.moved ||= pointerMovedBeyondThreshold(
@@ -672,69 +677,69 @@ function recordChunkPointerMovement(
   );
 }
 
-function updateChunkPointerGesture(event: PointerEvent): void {
-  const gesture = chunkPointerGesture;
+function updateSpeechiclePointerGesture(event: PointerEvent): void {
+  const gesture = speechiclePointerGesture;
   if (!gesture || event.pointerId !== gesture.pointerId) {
     return;
   }
-  recordChunkPointerMovement(gesture, event);
+  recordSpeechiclePointerMovement(gesture, event);
   if ((event.buttons & 1) === 0) {
     if (gesture.moved) {
-      suppressNextChunkClick(gesture.button);
+      suppressNextSpeechicleClick(gesture.button);
     }
-    chunkPointerGesture = null;
+    speechiclePointerGesture = null;
   }
 }
 
-function finishChunkPointerGesture(event: PointerEvent): void {
-  const gesture = chunkPointerGesture;
+function finishSpeechiclePointerGesture(event: PointerEvent): void {
+  const gesture = speechiclePointerGesture;
   if (!gesture || event.pointerId !== gesture.pointerId) {
     return;
   }
-  recordChunkPointerMovement(gesture, event);
+  recordSpeechiclePointerMovement(gesture, event);
   if (gesture.moved) {
-    suppressNextChunkClick(gesture.button);
+    suppressNextSpeechicleClick(gesture.button);
   }
-  chunkPointerGesture = null;
+  speechiclePointerGesture = null;
 }
 
-function cancelChunkPointerGesture(pointerId?: number): void {
-  if (pointerId !== undefined && chunkPointerGesture?.pointerId !== pointerId) {
+function cancelSpeechiclePointerGesture(pointerId?: number): void {
+  if (pointerId !== undefined && speechiclePointerGesture?.pointerId !== pointerId) {
     return;
   }
-  chunkPointerGesture = null;
+  speechiclePointerGesture = null;
 }
 
-function cancelPendingChunkExpansion(): void {
-  if (pendingChunkExpansion) {
-    window.clearTimeout(pendingChunkExpansion.timeoutId);
-    pendingChunkExpansion = null;
+function cancelPendingSpeechicleExpansion(): void {
+  if (pendingSpeechicleExpansion) {
+    window.clearTimeout(pendingSpeechicleExpansion.timeoutId);
+    pendingSpeechicleExpansion = null;
   }
 }
 
-function scheduleChunkExpansion(itemId: string): void {
-  cancelPendingChunkExpansion();
-  const expansion: PendingChunkExpansion = {
+function scheduleSpeechicleExpansion(itemId: string): void {
+  cancelPendingSpeechicleExpansion();
+  const expansion: PendingSpeechicleExpansion = {
     itemId,
     timeoutId: window.setTimeout(() => {
-      if (pendingChunkExpansion !== expansion) {
+      if (pendingSpeechicleExpansion !== expansion) {
         return;
       }
-      pendingChunkExpansion = null;
+      pendingSpeechicleExpansion = null;
       const expanding = expandedItemId !== itemId;
       setExpandedItem(expanding ? itemId : null);
       if (expanding) {
-        queueList.querySelector<HTMLElement>(
+        speechicleList.querySelector<HTMLElement>(
           `[data-item-id="${itemId}"]`,
         )?.scrollIntoView({ block: "nearest" });
       }
     }, CHUNK_DOUBLE_CLICK_MS),
   };
-  pendingChunkExpansion = expansion;
+  pendingSpeechicleExpansion = expansion;
 }
 
 function applyDragVisualOrder(kind: DraggableKind, visualOrder: readonly string[]): void {
-  const rows = [...queueList.querySelectorAll<HTMLElement>(`.queue-item.is-${kind}`)];
+  const rows = [...speechicleList.querySelectorAll<HTMLElement>(`.speechicle-item.is-${kind}`)];
   const currentOrder = rows.map((row) => row.dataset.itemId ?? "");
   if (
     visualOrder.length === currentOrder.length &&
@@ -751,15 +756,15 @@ function applyDragVisualOrder(kind: DraggableKind, visualOrder: readonly string[
     }
   }
   const rowsById = new Map(rows.map((row) => [row.dataset.itemId ?? "", row]));
-  const anchor = kind === "upcoming"
-    ? queueList.querySelector<HTMLElement>(
+  const anchor = kind === "waiting"
+    ? speechicleList.querySelector<HTMLElement>(
         '.timeline-divider[data-section="current"], .timeline-divider[data-section="history"]',
       )
     : null;
   for (const id of visualOrder) {
     const row = rowsById.get(id);
     if (row) {
-      kind === "upcoming" ? queueList.insertBefore(row, anchor) : queueList.append(row);
+      kind === "waiting" ? speechicleList.insertBefore(row, anchor) : speechicleList.append(row);
     }
   }
   updateTimelineRows(visibleTimelineItems());
@@ -786,13 +791,13 @@ function applyDragVisualOrder(kind: DraggableKind, visualOrder: readonly string[
   }
 }
 
-function updateQueuePointerDrag(event: PointerEvent): void {
-  const drag = queuePointerDrag;
+function updateTimelinePointerDrag(event: PointerEvent): void {
+  const drag = timelinePointerDrag;
   if (!drag || event.pointerId !== drag.state.pointerId) {
     return;
   }
   if ((event.buttons & 1) === 0) {
-    cancelQueuePointerDrag();
+    cancelTimelinePointerDrag();
     return;
   }
   event.preventDefault();
@@ -806,20 +811,20 @@ function updateQueuePointerDrag(event: PointerEvent): void {
     )) {
       return;
     }
-    if (!activateQueuePointerDrag(drag)) {
-      cancelQueuePointerDrag();
+    if (!activateTimelinePointerDrag(drag)) {
+      cancelTimelinePointerDrag();
       return;
     }
   }
 
-  const listBounds = queueList.getBoundingClientRect();
+  const listBounds = speechicleList.getBoundingClientRect();
   const left = Math.min(
     Math.max(event.clientX - drag.pointerOffsetX, listBounds.left),
     listBounds.right - drag.width,
   );
   const ghost = activeDragGhost();
   if (!ghost) {
-    cancelQueuePointerDrag();
+    cancelTimelinePointerDrag();
     return;
   }
   const ghostTop = event.clientY - drag.pointerOffsetY;
@@ -827,15 +832,15 @@ function updateQueuePointerDrag(event: PointerEvent): void {
   ghost.style.top = `${ghostTop}px`;
 
   clearHistoryDropIndicator();
-  if (drag.state.kind === "upcoming") {
+  if (drag.state.kind === "waiting") {
     const pointed = document.elementFromPoint(event.clientX, event.clientY);
     const historyTarget = pointed instanceof Element
-      ? pointed.closest<HTMLElement>(".history-drop-target, .queue-item.is-history")
+      ? pointed.closest<HTMLElement>(".history-drop-target, .speechicle-item.is-history")
       : null;
-    const historyDivider = queueList.querySelector<HTMLElement>(
+    const historyDivider = speechicleList.querySelector<HTMLElement>(
       ".timeline-divider.history-drop-target",
     );
-    const overHistory = historyTarget && queueList.contains(historyTarget)
+    const overHistory = historyTarget && speechicleList.contains(historyTarget)
       ? historyTarget
       : historyDivider && isHistoryDropArea(
           listBounds,
@@ -847,7 +852,7 @@ function updateQueuePointerDrag(event: PointerEvent): void {
         : null;
     if (overHistory) {
       overHistory.classList.add("is-history-drop");
-      const transition = transitionQueueDrag(drag.state, {
+      const transition = transitionTimelineDrag(drag.state, {
         type: "preview-history",
         pointerId: event.pointerId,
       });
@@ -862,9 +867,9 @@ function updateQueuePointerDrag(event: PointerEvent): void {
   }
 
   const rows = [
-    ...queueList.querySelectorAll<HTMLElement>(`.queue-item.is-${drag.state.kind}`),
+    ...speechicleList.querySelectorAll<HTMLElement>(`.speechicle-item.is-${drag.state.kind}`),
   ];
-  const beforeId = queueDropBeforeId(
+  const beforeId = sectionDropBeforeId(
     drag.state.sourceId,
     rows.map((row) => {
       const bounds = row.getBoundingClientRect();
@@ -880,8 +885,8 @@ function updateQueuePointerDrag(event: PointerEvent): void {
     }),
     ghostTop + drag.height / 2,
   );
-  const transition = transitionQueueDrag(drag.state, {
-    type: "preview-queue",
+  const transition = transitionTimelineDrag(drag.state, {
+    type: "preview-section",
     pointerId: event.pointerId,
     beforeId,
   });
@@ -893,17 +898,17 @@ function updateQueuePointerDrag(event: PointerEvent): void {
   }
 }
 
-function finishQueuePointerDrag(event: PointerEvent, commit: boolean): void {
-  const drag = queuePointerDrag;
+function finishTimelinePointerDrag(event: PointerEvent, commit: boolean): void {
+  const drag = timelinePointerDrag;
   if (!drag || event.pointerId !== drag.state.pointerId) {
     return;
   }
-  const transition = transitionQueueDrag(drag.state, {
+  const transition = transitionTimelineDrag(drag.state, {
     type: "finish",
     pointerId: event.pointerId,
     commit,
   });
-  queuePointerDrag = null;
+  timelinePointerDrag = null;
   let command = transition.command;
   let projectionFailed = false;
   try {
@@ -911,7 +916,7 @@ function finishQueuePointerDrag(event: PointerEvent, commit: boolean): void {
       applyDragVisualOrder(drag.state.kind, transition.visualOrder);
     }
   } catch (error) {
-    console.error("Could not settle queue drag", error);
+    console.error("Could not settle timeline drag", error);
     command = null;
     projectionFailed = true;
   } finally {
@@ -925,7 +930,7 @@ function finishQueuePointerDrag(event: PointerEvent, commit: boolean): void {
   if (command?.type === "archive") {
     void archiveWaitingItem(command.id);
   } else if (command?.type === "move") {
-    if (command.kind === "upcoming") {
+    if (command.kind === "waiting") {
       void moveWaitingItem(command.id, command.beforeId);
     } else {
       void moveHistoryItem(command.id, command.beforeId);
@@ -933,21 +938,21 @@ function finishQueuePointerDrag(event: PointerEvent, commit: boolean): void {
   }
 }
 
-function cancelQueuePointerDrag(): void {
-  const drag = queuePointerDrag;
+function cancelTimelinePointerDrag(): void {
+  const drag = timelinePointerDrag;
   if (!drag) {
-    clearQueueDragVisuals();
+    clearTimelineDragVisuals();
     return;
   }
-  const transition = transitionQueueDrag(drag.state, { type: "cancel" });
-  queuePointerDrag = null;
+  const transition = transitionTimelineDrag(drag.state, { type: "cancel" });
+  timelinePointerDrag = null;
   let projectionFailed = false;
   try {
     if (transition.visualOrder) {
       applyDragVisualOrder(drag.state.kind, transition.visualOrder);
     }
   } catch (error) {
-    console.error("Could not cancel queue drag", error);
+    console.error("Could not cancel timeline drag", error);
     projectionFailed = true;
   } finally {
     releaseQueuePointer(drag.state.pointerId);
@@ -1013,17 +1018,17 @@ type TimelineSection = TimelineItem["kind"];
 
 function requiredTimelineSections(items: TimelineItem[]): TimelineSection[] {
   const present = new Set(items.map(({ kind }) => kind));
-  if (present.has("upcoming")) {
+  if (present.has("waiting")) {
     present.add("history");
   }
-  return (["upcoming", "current", "history"] as const)
+  return (["waiting", "current", "history"] as const)
     .filter((section) => present.has(section));
 }
 
 function reconcileTimelineNodes(items: TimelineItem[]): boolean {
-  const rows = [...queueList.querySelectorAll<HTMLElement>(".queue-item")];
+  const rows = [...speechicleList.querySelectorAll<HTMLElement>(".speechicle-item")];
   const rowsById = new Map(rows.map((row) => [row.dataset.itemId, row]));
-  const dividers = [...queueList.querySelectorAll<HTMLElement>(".timeline-divider")];
+  const dividers = [...speechicleList.querySelectorAll<HTMLElement>(".timeline-divider")];
   const dividersBySection = new Map(
     dividers.map((divider) => [divider.dataset.section as TimelineSection, divider]),
   );
@@ -1049,15 +1054,15 @@ function reconcileTimelineNodes(items: TimelineItem[]): boolean {
   for (const item of items) {
     const section = item.kind;
     if (section !== activeSection) {
-      queueList.append(dividersBySection.get(section)!);
+      speechicleList.append(dividersBySection.get(section)!);
       insertedSections.add(section);
       activeSection = section;
     }
-    queueList.append(rowsById.get(item.id)!);
+    speechicleList.append(rowsById.get(item.id)!);
   }
   for (const section of sections) {
     if (!insertedSections.has(section)) {
-      queueList.append(dividersBySection.get(section)!);
+      speechicleList.append(dividersBySection.get(section)!);
     }
   }
   return true;
@@ -1069,11 +1074,11 @@ function setOpenActionMenu(itemId: string | null): void {
     ? visibleTimelineItems().find(({ id }) => id === itemId)
     : null;
   const target = item
-    ? queueList.querySelector<HTMLElement>(`[data-item-id="${item.id}"]`)
+    ? speechicleList.querySelector<HTMLElement>(`[data-item-id="${item.id}"]`)
     : null;
   const button = target?.querySelector<HTMLButtonElement>(".queue-menu-button");
   if (itemId) {
-    const listBounds = queueList.getBoundingClientRect();
+    const listBounds = speechicleList.getBoundingClientRect();
     const targetBounds = target?.getBoundingClientRect();
     if (
       !item ||
@@ -1086,7 +1091,7 @@ function setOpenActionMenu(itemId: string | null): void {
     }
   }
   openMenuItemId = itemId;
-  for (const row of queueList.querySelectorAll<HTMLElement>(".queue-item")) {
+  for (const row of speechicleList.querySelectorAll<HTMLElement>(".speechicle-item")) {
     const open = row.dataset.itemId === itemId;
     row.querySelector<HTMLButtonElement>(".queue-menu-button")
       ?.setAttribute("aria-expanded", String(open));
@@ -1115,7 +1120,7 @@ function setOpenActionMenu(itemId: string | null): void {
     "Copy text",
     () => void desktopApi?.copyText(item.text),
   ));
-  if (item.kind === "upcoming") {
+  if (item.kind === "waiting") {
     actions.push(createMenuAction(
       "Delete",
       () => void archiveWaitingItem(item.id),
@@ -1132,7 +1137,7 @@ function setOpenActionMenu(itemId: string | null): void {
 
   const edgeGap = 8;
   const itemGap = 4;
-  const listBounds = queueList.getBoundingClientRect();
+  const listBounds = speechicleList.getBoundingClientRect();
   const buttonBounds = button.getBoundingClientRect();
   const availableTop = Math.max(edgeGap, listBounds.top + edgeGap);
   const availableBottom = Math.min(window.innerHeight - edgeGap, listBounds.bottom - edgeGap);
@@ -1160,7 +1165,7 @@ function setOpenActionMenu(itemId: string | null): void {
 
 function closeActionMenu(restoreFocus: boolean): void {
   const button = restoreFocus && openMenuItemId
-    ? queueList.querySelector<HTMLButtonElement>(
+    ? speechicleList.querySelector<HTMLButtonElement>(
         `[data-item-id="${openMenuItemId}"] .queue-menu-button`,
       )
     : null;
@@ -1168,7 +1173,7 @@ function closeActionMenu(restoreFocus: boolean): void {
   if (button) {
     button.focus({ preventScroll: true });
   } else if (restoreFocus === false) {
-    queueList.focus({ preventScroll: true });
+    speechicleList.focus({ preventScroll: true });
   }
 }
 
@@ -1223,7 +1228,7 @@ function createVoiceSelect(item: TimelineItem): HTMLSelectElement {
 }
 
 function updateTimelineDividers(items: TimelineItem[], historyTotal: number): void {
-  const waitingCount = items.filter(({ kind }) => kind === "upcoming").length;
+  const waitingCount = items.filter(({ kind }) => kind === "waiting").length;
   const historyCount = items.filter(({ kind }) => kind === "history").length;
   const currentLabel = ({
       loading: "Preparing",
@@ -1234,7 +1239,7 @@ function updateTimelineDividers(items: TimelineItem[], historyTotal: number): vo
       idle: "Idle",
     } satisfies Record<RuntimeStatus["state"], string>)[currentStatus.state];
   const labels: Record<TimelineSection, [string, string]> = {
-    upcoming: ["Waiting", waitingCount.toLocaleString()],
+    waiting: ["Waiting", waitingCount.toLocaleString()],
     current: ["Current", currentLabel],
     history: [
       "History",
@@ -1243,7 +1248,7 @@ function updateTimelineDividers(items: TimelineItem[], historyTotal: number): vo
         : historyCount.toLocaleString(),
     ],
   };
-  for (const divider of queueList.querySelectorAll<HTMLElement>(".timeline-divider")) {
+  for (const divider of speechicleList.querySelectorAll<HTMLElement>(".timeline-divider")) {
     const section = divider.dataset.section as TimelineSection;
     const [title, count] = labels[section];
     divider.querySelector<HTMLElement>(".timeline-divider-title")!.textContent = title;
@@ -1270,7 +1275,7 @@ function revealCurrentItem(): void {
   if (currentId === revealedCurrentItemId) {
     return;
   }
-  const row = queueList.querySelector<HTMLElement>(`[data-item-id="${currentId}"]`);
+  const row = speechicleList.querySelector<HTMLElement>(`[data-item-id="${currentId}"]`);
   if (row) {
     row.scrollIntoView({ block: "center" });
     revealedCurrentItemId = currentId;
@@ -1278,12 +1283,12 @@ function revealCurrentItem(): void {
 }
 
 function renderTimeline(items: TimelineItem[], historyTotal: number): void {
-  const pendingExpansionId = pendingChunkExpansion?.itemId;
+  const pendingExpansionId = pendingSpeechicleExpansion?.itemId;
   if (
     pendingExpansionId &&
     !items.some((item) => item.id === pendingExpansionId)
   ) {
-    cancelPendingChunkExpansion();
+    cancelPendingSpeechicleExpansion();
   }
   if (!items.some((item) => item.id === expandedItemId)) {
     expandedItemId = null;
@@ -1303,26 +1308,26 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     revealCurrentItem();
     return;
   }
-  cancelQueuePointerDrag();
+  cancelTimelinePointerDrag();
   setOpenActionMenu(null);
   renderedTimelineKey = timelineKey;
 
-  const previousScrollTop = queueList.scrollTop;
+  const previousScrollTop = speechicleList.scrollTop;
   const focusedControl = document.activeElement instanceof HTMLElement
-    ? document.activeElement.closest<HTMLElement>(".queue-item")
+    ? document.activeElement.closest<HTMLElement>(".speechicle-item")
     : null;
   const focusedItemId = focusedControl?.dataset.itemId;
   const focusedControlClass = [
-    "queue-drag-handle",
-    "queue-chunk",
+    "timeline-drag-handle",
+    "speechicle-content",
     "queue-menu-button",
   ].find((className) => document.activeElement?.classList.contains(className));
-  queueList.replaceChildren();
+  speechicleList.replaceChildren();
   if (items.length === 0) {
     const empty = document.createElement("div");
     empty.className = "queue-empty";
     empty.innerHTML = '<span class="empty-check">&#10003;</span><span>No speech yet</span>';
-    queueList.append(empty);
+    speechicleList.append(empty);
     return;
   }
 
@@ -1331,16 +1336,16 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
   for (const item of items) {
     const section = item.kind;
     if (!insertedSections.has(section)) {
-      queueList.append(createTimelineDivider(section));
+      speechicleList.append(createTimelineDivider(section));
       insertedSections.add(section);
     }
 
     const row = document.createElement("div");
-    row.className = "queue-item";
+    row.className = "speechicle-item";
     row.dataset.itemId = item.id;
     row.dataset.voice = item.voice;
     const isCurrent = item.kind === "current";
-    const isUpcoming = item.kind === "upcoming";
+    const isWaiting = item.kind === "waiting";
     const isExpanded = item.id === expandedItemId;
     const reference = itemReference(item);
     row.classList.add(`is-${item.kind}`);
@@ -1349,9 +1354,9 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     }
 
     const rowControls: HTMLElement[] = [];
-    if (isUpcoming || item.kind === "history") {
+    if (isWaiting || item.kind === "history") {
       const dragHandle = document.createElement("button");
-      dragHandle.className = "queue-drag-handle";
+      dragHandle.className = "timeline-drag-handle";
       dragHandle.type = "button";
       dragHandle.title = item.kind === "history"
         ? "Drag to reorder History"
@@ -1371,9 +1376,9 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
       rowControls.push(dragHandle);
     }
 
-    const chunk = document.createElement("button");
-    chunk.className = "queue-chunk";
-    chunk.type = "button";
+    const speechicle = document.createElement("button");
+    speechicle.className = "speechicle-content";
+    speechicle.type = "button";
 
     const copy = document.createElement("div");
     copy.className = "queue-copy";
@@ -1382,7 +1387,7 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     const meta = document.createElement("span");
     meta.className = "queue-meta";
     copy.append(text, meta);
-    chunk.append(copy);
+    speechicle.append(copy);
 
     const accessibleText = document.createElement("div");
     accessibleText.id = `speech-full-${item.id}`;
@@ -1391,28 +1396,28 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     accessibleText.setAttribute("role", "region");
     accessibleText.setAttribute("aria-label", `Full text for ${reference}`);
     accessibleText.textContent = item.text;
-    chunk.setAttribute("aria-controls", accessibleText.id);
-    chunk.setAttribute("aria-expanded", String(isExpanded));
-    chunk.setAttribute("aria-label", chunkActionLabel(item, isExpanded));
-    chunk.addEventListener("click", (event) => {
-      if (suppressedChunkClicks.delete(chunk)) {
+    speechicle.setAttribute("aria-controls", accessibleText.id);
+    speechicle.setAttribute("aria-expanded", String(isExpanded));
+    speechicle.setAttribute("aria-label", speechicleActionLabel(item, isExpanded));
+    speechicle.addEventListener("click", (event) => {
+      if (suppressedSpeechicleClicks.delete(speechicle)) {
         event.preventDefault();
         return;
       }
       if (event.detail > 1) {
-        cancelPendingChunkExpansion();
+        cancelPendingSpeechicleExpansion();
         return;
       }
-      scheduleChunkExpansion(item.id);
+      scheduleSpeechicleExpansion(item.id);
     });
-    chunk.addEventListener("dblclick", (event) => {
+    speechicle.addEventListener("dblclick", (event) => {
       event.preventDefault();
-      cancelPendingChunkExpansion();
+      cancelPendingSpeechicleExpansion();
       void playTimelineItem(item);
     });
 
     const actions = document.createElement("div");
-    actions.className = "chunk-actions";
+    actions.className = "speechicle-actions";
     const menuButton = document.createElement("button");
     menuButton.className = "queue-menu-button";
     menuButton.type = "button";
@@ -1425,25 +1430,25 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
       setOpenActionMenu(openMenuItemId === item.id ? null : item.id);
     });
     actions.append(menuButton);
-    rowControls.push(chunk, actions, accessibleText);
+    rowControls.push(speechicle, actions, accessibleText);
     row.classList.toggle("is-expanded", isExpanded);
     row.append(...rowControls);
-    queueList.append(row);
+    speechicleList.append(row);
   }
   for (const section of sections) {
     if (!insertedSections.has(section)) {
-      queueList.append(createTimelineDivider(section));
+      speechicleList.append(createTimelineDivider(section));
     }
   }
-  queueList.scrollTop = previousScrollTop;
+  speechicleList.scrollTop = previousScrollTop;
   updateTimelineDividers(items, historyTotal);
   updateTimelineRows(items);
   revealCurrentItem();
   if (focusedItemId) {
-    const row = queueList.querySelector<HTMLElement>(`[data-item-id="${focusedItemId}"]`);
+    const row = speechicleList.querySelector<HTMLElement>(`[data-item-id="${focusedItemId}"]`);
     const preferred = focusedControlClass
       ? row?.querySelector<HTMLButtonElement>(`.${focusedControlClass}`)
-      : row?.querySelector<HTMLButtonElement>(".queue-chunk");
+      : row?.querySelector<HTMLButtonElement>(".speechicle-content");
     const fallback = row?.querySelector<HTMLButtonElement>(".queue-menu-button");
     (preferred?.disabled ? fallback : preferred)?.focus({ preventScroll: true });
   }
@@ -1452,7 +1457,7 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
 function updateTimelineRows(items: TimelineItem[]): void {
   const itemById = new Map(items.map((item) => [item.id, item]));
   const displayedWaitingRows = [
-    ...queueList.querySelectorAll<HTMLElement>(".queue-item.is-upcoming"),
+    ...speechicleList.querySelectorAll<HTMLElement>(".speechicle-item.is-waiting"),
   ];
   const displayedWaitingPositions = new Map(
     displayedWaitingRows.map((row, index) => [
@@ -1464,7 +1469,7 @@ function updateTimelineRows(items: TimelineItem[]): void {
     ? pendingTimelineMutation.item.id
     : null;
   const timelineCommandInFlight = commandPending || pendingTimelineMutation !== null;
-  for (const row of queueList.querySelectorAll<HTMLElement>(".queue-item")) {
+  for (const row of speechicleList.querySelectorAll<HTMLElement>(".speechicle-item")) {
     const item = itemById.get(row.dataset.itemId ?? "");
     if (!item) {
       continue;
@@ -1477,15 +1482,15 @@ function updateTimelineRows(items: TimelineItem[]): void {
     const failed = item.id === failedTimelineMutation?.id;
     row.classList.toggle("is-pending", pending !== null);
     row.classList.toggle("is-error", failed);
-    const chunk = row.querySelector<HTMLButtonElement>(".queue-chunk");
-    if (chunk) {
-      chunk.setAttribute("aria-busy", String(pending !== null));
-      chunk.setAttribute(
+    const speechicle = row.querySelector<HTMLButtonElement>(".speechicle-content");
+    if (speechicle) {
+      speechicle.setAttribute("aria-busy", String(pending !== null));
+      speechicle.setAttribute(
         "aria-label",
-        chunkActionLabel(item, row.classList.contains("is-expanded"), reference),
+        speechicleActionLabel(item, row.classList.contains("is-expanded"), reference),
       );
     }
-    const dragHandle = row.querySelector<HTMLButtonElement>(".queue-drag-handle");
+    const dragHandle = row.querySelector<HTMLButtonElement>(".timeline-drag-handle");
     if (dragHandle) {
       dragHandle.disabled = timelineCommandInFlight;
       dragHandle.setAttribute(
@@ -1534,14 +1539,14 @@ function updateTimelineRows(items: TimelineItem[]): void {
 function setExpandedItem(id: string | null): void {
   expandedItemId = id;
   const itemById = new Map(visibleTimelineItems().map((item) => [item.id, item]));
-  for (const row of queueList.querySelectorAll<HTMLElement>(".queue-item")) {
+  for (const row of speechicleList.querySelectorAll<HTMLElement>(".speechicle-item")) {
     const expanded = row.dataset.itemId === id;
     row.classList.toggle("is-expanded", expanded);
-    const chunk = row.querySelector<HTMLButtonElement>(".queue-chunk");
+    const speechicle = row.querySelector<HTMLButtonElement>(".speechicle-content");
     const item = itemById.get(row.dataset.itemId ?? "");
-    chunk?.setAttribute("aria-expanded", String(expanded));
-    if (chunk && item) {
-      chunk.setAttribute("aria-label", chunkActionLabel(item, expanded));
+    speechicle?.setAttribute("aria-expanded", String(expanded));
+    if (speechicle && item) {
+      speechicle.setAttribute("aria-label", speechicleActionLabel(item, expanded));
     }
     const accessibleText = row.querySelector<HTMLElement>(".queue-full-text");
     if (accessibleText) {
@@ -1575,10 +1580,10 @@ async function moveWaitingItem(id: string, beforeId: string | null): Promise<voi
     return;
   }
   const item = visibleTimelineItems().find((entry) => entry.id === id);
-  if (!item || item.kind !== "upcoming") {
+  if (!item || item.kind !== "waiting") {
     return;
   }
-  const reordered = moveQueueItemBefore(currentStatus.queue, id, beforeId);
+  const reordered = moveSpeechicleItemBefore(currentStatus.queue, id, beforeId);
   const previousIds = currentStatus.queue.map((item) => item.id);
   if (reordered.every((item, index) => item.id === previousIds[index])) {
     return;
@@ -1601,7 +1606,7 @@ async function moveHistoryItem(id: string, beforeId: string | null): Promise<voi
   if (!item || item.kind !== "history") {
     return;
   }
-  const reordered = moveQueueItemBefore(currentStatus.history, id, beforeId);
+  const reordered = moveSpeechicleItemBefore(currentStatus.history, id, beforeId);
   const previousIds = currentStatus.history.map((item) => item.id);
   if (reordered.every((item, index) => item.id === previousIds[index])) {
     return;
@@ -1628,7 +1633,7 @@ async function archiveWaitingItem(id: string): Promise<void> {
     {
       kind: "row",
       mutation: { type: "archive", id },
-      item: { ...item, kind: "upcoming", position: null },
+      item: { ...item, kind: "waiting", position: null },
     },
     "Could not move waiting speech to History. Try again.",
   );
@@ -1675,14 +1680,6 @@ async function runTimelineMutation(
     }
     const result = await desktopApi.mutateTimeline(mutation);
     currentStatus = adoptTimelineSnapshot(currentStatus, result.snapshot);
-    if (
-      result.outcome === "committed" &&
-      mutation.type === "play" &&
-      result.resultId !== undefined &&
-      result.resultId !== mutation.id
-    ) {
-      throw new Error("Engine protocol error: timeline mutation changed the selected ID");
-    }
     if (result.outcome === "rejected") {
       failedTimelineMutation = { id: failureId, type: mutation.type };
       commandStatus.textContent = failureMessage;
@@ -1705,7 +1702,7 @@ async function runTimelineMutation(
     renderedTimelineKey = null;
     render(currentStatus);
     if (restoreTimelineFocus) {
-      queueList.focus({ preventScroll: true });
+      speechicleList.focus({ preventScroll: true });
     }
   }
 }
@@ -1736,12 +1733,13 @@ async function runPlaybackAction(): Promise<void> {
   if (
     commandPending ||
     (pendingTimelineMutation && pendingTimelineMutation.kind !== "play") ||
-    queuePointerDrag ||
+    timelinePointerDrag ||
     action === "inactive"
   ) {
     return;
   }
   commandPending = true;
+  commandStatus.textContent = "";
   render(currentStatus);
   if (action === "setup") {
     try {
@@ -1772,6 +1770,9 @@ async function runPlaybackAction(): Promise<void> {
     }
   } catch (error) {
     console.error("Could not change playback state", error);
+    commandStatus.textContent = paused
+      ? "Could not pause speech. Try again."
+      : "Could not resume speech. Try again.";
     if (pendingTimelineMutation === pendingPlay && previousPendingState) {
       pendingPlay.playbackState = previousPendingState;
     }
@@ -1829,9 +1830,9 @@ requiredElement<HTMLButtonElement>("hide-button").addEventListener("click", () =
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
-    cancelQueuePointerDrag();
-    cancelChunkPointerGesture();
-    cancelPendingChunkExpansion();
+    cancelTimelinePointerDrag();
+    cancelSpeechiclePointerGesture();
+    cancelPendingSpeechicleExpansion();
     setOpenActionMenu(null);
   } else {
     void refreshStatus();
@@ -1839,54 +1840,54 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("focus", () => void refreshStatus());
 
-queueList.addEventListener("pointerdown", (event) => {
+speechicleList.addEventListener("pointerdown", (event) => {
   const target = event.target;
   if (!(target instanceof Element)) {
     return;
   }
-  const handle = target.closest<HTMLButtonElement>(".queue-drag-handle");
+  const handle = target.closest<HTMLButtonElement>(".timeline-drag-handle");
   const row = handle?.closest<HTMLElement>(
-    ".queue-item.is-upcoming, .queue-item.is-history",
+    ".speechicle-item.is-waiting, .speechicle-item.is-history",
   );
   const id = row?.dataset.itemId;
   if (handle && row && id) {
-    beginQueuePointerDrag(
+    beginTimelinePointerDrag(
       event,
       id,
       row,
       handle,
-      row.classList.contains("is-history") ? "history" : "upcoming",
+      row.classList.contains("is-history") ? "history" : "waiting",
     );
     return;
   }
-  const chunk = target.closest<HTMLButtonElement>(".queue-chunk");
-  if (chunk && queueList.contains(chunk)) {
-    beginChunkPointerGesture(event, chunk);
+  const speechicle = target.closest<HTMLButtonElement>(".speechicle-content");
+  if (speechicle && speechicleList.contains(speechicle)) {
+    beginSpeechiclePointerGesture(event, speechicle);
   }
 });
-queueList.addEventListener("scroll", () => {
+speechicleList.addEventListener("scroll", () => {
   if (openMenuItemId) {
     setOpenActionMenu(openMenuItemId);
   }
 }, { passive: true });
-window.addEventListener("pointermove", updateQueuePointerDrag, true);
-window.addEventListener("pointermove", updateChunkPointerGesture, true);
+window.addEventListener("pointermove", updateTimelinePointerDrag, true);
+window.addEventListener("pointermove", updateSpeechiclePointerGesture, true);
 window.addEventListener("pointerup", (event) => {
-  finishQueuePointerDrag(event, true);
-  finishChunkPointerGesture(event);
+  finishTimelinePointerDrag(event, true);
+  finishSpeechiclePointerGesture(event);
 }, true);
 window.addEventListener("pointercancel", (event) => {
-  finishQueuePointerDrag(event, false);
-  cancelChunkPointerGesture(event.pointerId);
+  finishTimelinePointerDrag(event, false);
+  cancelSpeechiclePointerGesture(event.pointerId);
 }, true);
-queueList.addEventListener("lostpointercapture", (event) => {
-  if (queuePointerDrag?.state.pointerId === event.pointerId) {
-    cancelQueuePointerDrag();
+speechicleList.addEventListener("lostpointercapture", (event) => {
+  if (timelinePointerDrag?.state.pointerId === event.pointerId) {
+    cancelTimelinePointerDrag();
   }
 });
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
-    cancelQueuePointerDrag();
+    cancelTimelinePointerDrag();
     closeActionMenu(true);
     if (playbackExpanded) {
       setPlaybackExpanded(false);
@@ -1899,15 +1900,15 @@ document.addEventListener("pointerdown", (event) => {
   if (
     openMenuItemId &&
     event.target instanceof Element &&
-    !event.target.closest(".chunk-actions, #queue-action-menu")
+    !event.target.closest(".speechicle-actions, #queue-action-menu")
   ) {
     setOpenActionMenu(null);
   }
 }, true);
 window.addEventListener("blur", () => {
-  cancelQueuePointerDrag();
-  cancelChunkPointerGesture();
-  cancelPendingChunkExpansion();
+  cancelTimelinePointerDrag();
+  cancelSpeechiclePointerGesture();
+  cancelPendingSpeechicleExpansion();
   setOpenActionMenu(null);
 });
 

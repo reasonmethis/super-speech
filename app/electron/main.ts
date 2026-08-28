@@ -2,6 +2,7 @@ import {
   app,
   BrowserWindow,
   clipboard,
+  dialog,
   ipcMain,
   Menu,
   nativeImage,
@@ -9,17 +10,14 @@ import {
   Tray,
 } from "electron";
 import { spawn, type ChildProcess } from "node:child_process";
-import { createHash } from "node:crypto";
 import {
   closeSync,
-  cpSync,
   existsSync,
   mkdirSync,
   openSync,
   readFileSync,
   statSync,
   unlinkSync,
-  writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -29,6 +27,8 @@ import {
   IPC_CHANNELS,
   compatibleEngineIsRunning,
   engineProcessIsLive,
+  mutationResultMatchesRequest,
+  ownedEngineRestartReason,
   parseEngineStatus,
   parseEngineProcessStatus,
   parseTimelineMutation,
@@ -45,15 +45,27 @@ import {
   type TimelineMutationResult,
   type VersionInfo,
 } from "../src/runtime";
+import { writeTextAtomically } from "./atomic-file";
+import {
+  MANAGED_SKILL_HASH_KIND,
+  managedSkillHashForTarget,
+  syncManagedSkillTree,
+} from "./managed-skill";
+import {
+  trayPlaybackControl,
+  trayPlaybackControlKey,
+} from "./tray-menu";
 
 const HEARTBEAT_FRESHNESS_MS = 15_000;
 const ENGINE_STABLE_AFTER_MS = 30_000;
 const ENGINE_START_TIMEOUT_MS = 120_000;
+const ENGINE_UNRESPONSIVE_TIMEOUT_MS = 30_000;
+const ENGINE_TERMINATE_TIMEOUT_MS = 5_000;
 const ENGINE_RESTART_MAX_DELAY_MS = 30_000;
 const ENGINE_FAILURES_BEFORE_ERROR = 3;
 const MODEL_MIN_BYTES = 300_000_000;
 const VOICES_MIN_BYTES = 20_000_000;
-const SETUP_URL = "https://github.com/reasonmethis/super-speech#install";
+const SETUP_URL = "https://github.com/reasonmethis/super-speech#desktop-app";
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const rendererDir = path.join(moduleDir, "..", "dist");
 const smokeTest = process.argv.includes("--smoke-test");
@@ -64,12 +76,14 @@ let tray: Tray | null = null;
 let ownedEngine: ChildProcess | null = null;
 let ownedEngineStartedAt: number | null = null;
 let ownedEngineReadyAt: number | null = null;
+let ownedEngineTerminationRequestedAt: number | null = null;
 let engineStartPromise: Promise<void> | null = null;
 let engineHealthTimer: NodeJS.Timeout | null = null;
 let engineRestartFailures = 0;
 let engineRestartTimer: NodeJS.Timeout | null = null;
 let quitting = false;
 let lastEngineStatus: EngineStatus | null = null;
+let lastTrayPlaybackControlKey: string | null = null;
 
 interface EngineLaunch {
   command: string;
@@ -79,6 +93,8 @@ interface EngineLaunch {
 interface AgentSkillInstall {
   paths: string[];
   hash: string | null;
+  hashKind: string | null;
+  hashes: Record<string, string>;
 }
 
 function runtimeDir(): string {
@@ -337,6 +353,9 @@ async function mutateTimeline(
   if (!result) {
     throw new Error("Engine protocol error: incomplete timeline mutation result");
   }
+  if (!mutationResultMatchesRequest(mutation, result)) {
+    throw new Error("Engine protocol error: timeline mutation did not confirm the selected ID");
+  }
   return runtimeMutationResult(result);
 }
 
@@ -351,38 +370,52 @@ function packagedSkillDirectory(): string {
     : path.join(app.getAppPath(), "..", "skills", "super-speech");
 }
 
-function fileHash(filePath: string): string {
-  return createHash("sha256").update(readFileSync(filePath)).digest("hex");
-}
-
-function previousAgentSkillHash(base: string): string | null {
+function previousAgentSkillInstall(base: string): AgentSkillInstall {
   try {
     const manifest = JSON.parse(
       readFileSync(path.join(base, "install.json"), "utf8"),
-    ) as { agent_skill_hash?: unknown };
-    return typeof manifest.agent_skill_hash === "string"
-      ? manifest.agent_skill_hash
-      : null;
+    ) as Record<string, unknown>;
+    const paths = Array.isArray(manifest.agent_skills)
+      ? manifest.agent_skills.filter((item): item is string => typeof item === "string")
+      : [];
+    const hashes = manifest.agent_skill_hashes &&
+        typeof manifest.agent_skill_hashes === "object"
+      ? Object.fromEntries(
+          Object.entries(manifest.agent_skill_hashes).filter(
+            (entry): entry is [string, string] => typeof entry[1] === "string",
+          ),
+        )
+      : {};
+    return {
+      paths,
+      hash: typeof manifest.agent_skill_hash === "string"
+        ? manifest.agent_skill_hash
+        : null,
+      hashKind: typeof manifest.agent_skill_hash_kind === "string"
+        ? manifest.agent_skill_hash_kind
+        : null,
+      hashes,
+    };
   } catch {
-    return null;
+    return { paths: [], hash: null, hashKind: null, hashes: {} };
   }
 }
 
-function installAgentSkills(base: string): AgentSkillInstall {
+function installAgentSkills(previous: AgentSkillInstall): AgentSkillInstall {
   const agentHome = process.env.SUPER_SPEECH_AGENT_HOME;
   if ((!app.isPackaged && !agentHome) || process.env.SUPER_SPEECH_SKIP_SKILL_INSTALL) {
-    return { paths: [], hash: null };
+    return previous;
   }
   const sourceDirectory = packagedSkillDirectory();
   const sourceSkill = path.join(sourceDirectory, "SKILL.md");
   if (!existsSync(sourceSkill)) {
-    return { paths: [], hash: null };
+    return previous;
   }
 
   const home = agentHome ?? homedir();
-  const sourceHash = fileHash(sourceSkill);
-  const previousHash = previousAgentSkillHash(base);
   const installed: string[] = [];
+  const hashes: Record<string, string> = {};
+  let sourceHash: string | null = null;
   for (const agentDirectory of [".codex", ".claude"]) {
     const agentRoot = path.join(home, agentDirectory);
     if (!existsSync(agentRoot)) {
@@ -390,24 +423,46 @@ function installAgentSkills(base: string): AgentSkillInstall {
     }
     const targetDirectory = path.join(agentRoot, "skills", "super-speech");
     const target = path.join(targetDirectory, "SKILL.md");
-    if (!existsSync(target) || (previousHash && fileHash(target) === previousHash)) {
-      mkdirSync(targetDirectory, { recursive: true });
-      cpSync(sourceDirectory, targetDirectory, {
-        recursive: true,
-        filter: (source) => path.basename(source) !== "runtime",
-      });
+    const previousHash = managedSkillHashForTarget(
+      previous.hashKind,
+      previous.hash,
+      previous.hashes,
+      target,
+    );
+    try {
+      const result = syncManagedSkillTree(
+        sourceDirectory,
+        targetDirectory,
+        previousHash,
+      );
+      if (result.hash) {
+        hashes[target] = result.hash;
+        sourceHash = result.sourceHash;
+      }
+    } catch (error) {
+      console.error(`Could not update the agent skill at ${targetDirectory}`, error);
+      if (previousHash) {
+        hashes[target] = previousHash;
+      }
     }
     installed.push(target);
   }
-  return { paths: installed, hash: sourceHash };
+  return {
+    paths: installed,
+    hash: sourceHash ?? previous.hash,
+    hashKind: Object.keys(hashes).length > 0
+      ? MANAGED_SKILL_HASH_KIND
+      : previous.hashKind,
+    hashes,
+  };
 }
 
-function writeInstallManifest(
+async function writeInstallManifest(
   base: string,
   launch: EngineLaunch | null,
   agentSkills: AgentSkillInstall,
-): void {
-  writeFileSync(
+): Promise<void> {
+  await writeTextAtomically(
     path.join(base, "install.json"),
     `${JSON.stringify(
       {
@@ -418,11 +473,12 @@ function writeInstallManifest(
         model_directory: modelDirectory(),
         agent_skills: agentSkills.paths,
         agent_skill_hash: agentSkills.hash,
+        agent_skill_hash_kind: agentSkills.hashKind,
+        agent_skill_hashes: agentSkills.hashes,
       },
       null,
       2,
     )}\n`,
-    "utf8",
   );
 }
 
@@ -475,7 +531,14 @@ async function startEngineOnce(): Promise<boolean> {
   mkdirSync(path.join(base, "spoken"), { recursive: true });
   mkdirSync(path.join(base, "failed"), { recursive: true });
   const launch = engineLaunch();
-  writeInstallManifest(base, launch, installAgentSkills(base));
+  const previousAgentSkills = previousAgentSkillInstall(base);
+  let agentSkills = previousAgentSkills;
+  try {
+    agentSkills = installAgentSkills(previousAgentSkills);
+  } catch (error) {
+    console.error("Could not synchronize the optional agent skill", error);
+  }
+  await writeInstallManifest(base, launch, agentSkills);
 
   const storedSnapshot = readStatusSnapshot(base);
   const storedEngine = parseEngineStatus(storedSnapshot);
@@ -515,6 +578,7 @@ async function startEngineOnce(): Promise<boolean> {
     ownedEngine = child;
     ownedEngineStartedAt = Date.now();
     ownedEngineReadyAt = null;
+    ownedEngineTerminationRequestedAt = null;
     const restartAfterUnexpectedExit = () => {
       if (ownedEngine !== child) {
         return;
@@ -522,6 +586,7 @@ async function startEngineOnce(): Promise<boolean> {
       ownedEngine = null;
       ownedEngineStartedAt = null;
       ownedEngineReadyAt = null;
+      ownedEngineTerminationRequestedAt = null;
       scheduleEngineRestart();
     };
     child.once("error", restartAfterUnexpectedExit);
@@ -531,6 +596,7 @@ async function startEngineOnce(): Promise<boolean> {
     ownedEngine = null;
     ownedEngineStartedAt = null;
     ownedEngineReadyAt = null;
+    ownedEngineTerminationRequestedAt = null;
     return false;
   } finally {
     closeSync(logDescriptor);
@@ -541,27 +607,58 @@ function engineCanRecover(installed: boolean): boolean {
   return !quitting && installed && engineLaunch() !== null;
 }
 
+function restartUnhealthyOwnedEngine(reason: string): void {
+  const child = ownedEngine;
+  if (!child || child.exitCode !== null) {
+    return;
+  }
+  console.error(`Super Speech engine ${reason}; restarting`);
+  if (child.kill()) {
+    ownedEngineTerminationRequestedAt = Date.now();
+  }
+}
+
 function startEngineHealthMonitor(): void {
   if (engineHealthTimer) {
     return;
   }
   engineHealthTimer = setInterval(() => {
     const status = getStatus();
+    refreshTrayMenu(status);
     if (
       ownedEngine &&
       ownedEngine.exitCode === null &&
-      ownedEngineStartedAt !== null &&
-      ownedEngineReadyAt === null &&
-      Date.now() - ownedEngineStartedAt >= ENGINE_START_TIMEOUT_MS
+      ownedEngineTerminationRequestedAt !== null
     ) {
-      // A process that never leaves Loading is not a successful engine start
-      ownedEngineStartedAt = null;
-      if (!ownedEngine.kill()) {
-        ownedEngine = null;
-        ownedEngineReadyAt = null;
-        scheduleEngineRestart();
+      if (
+        Date.now() - ownedEngineTerminationRequestedAt >=
+        ENGINE_TERMINATE_TIMEOUT_MS
+      ) {
+        console.error("Super Speech engine did not exit after termination; forcing it");
+        ownedEngine.kill("SIGKILL");
+        ownedEngineTerminationRequestedAt = Date.now();
       }
       return;
+    }
+    if (ownedEngine && ownedEngine.exitCode === null && ownedEngineStartedAt !== null) {
+      const ownedPublication = statusForEngineProcess(
+        lastEngineStatus,
+        ownedEngine.pid,
+      );
+      const restartReason = ownedEngineRestartReason(
+        {
+          startedAtMs: ownedEngineStartedAt,
+          ready: ownedEngineReadyAt !== null,
+          statusUpdatedAtSeconds: ownedPublication?.updated_at ?? null,
+        },
+        Date.now(),
+        ENGINE_START_TIMEOUT_MS,
+        ENGINE_UNRESPONSIVE_TIMEOUT_MS,
+      );
+      if (restartReason) {
+        restartUnhealthyOwnedEngine(restartReason);
+        return;
+      }
     }
     if (
       !quitting &&
@@ -590,12 +687,14 @@ function stopOwnedEngine(): void {
   if (!ownedEngine || ownedEngine.exitCode !== null) {
     ownedEngineStartedAt = null;
     ownedEngineReadyAt = null;
+    ownedEngineTerminationRequestedAt = null;
     return;
   }
   ownedEngine.kill();
   ownedEngine = null;
   ownedEngineStartedAt = null;
   ownedEngineReadyAt = null;
+  ownedEngineTerminationRequestedAt = null;
   const heartbeat = path.join(runtimeDir(), "engine.alive");
   if (existsSync(heartbeat)) {
     unlinkSync(heartbeat);
@@ -759,15 +858,31 @@ function refreshTrayMenu(status = getStatus()): void {
   if (!tray) {
     return;
   }
+  const controlKey = trayPlaybackControlKey(status.state);
+  if (controlKey === lastTrayPlaybackControlKey) {
+    return;
+  }
+  lastTrayPlaybackControlKey = controlKey;
+  const control = trayPlaybackControl(status.state);
   const paused = status.state === "paused";
-  const canPause = status.state === "playing" || status.state === "paused";
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: "Open Super Speech", click: showWindow },
       {
-        label: paused ? "Resume Speech" : "Pause Speech",
-        enabled: canPause,
-        click: () => void setPaused(!paused),
+        label: control.label,
+        enabled: control.enabled,
+        click: () => {
+          void setPaused(!paused).catch((error) => {
+            console.error(
+              `Could not ${paused ? "resume" : "pause"} speech from the tray`,
+              error,
+            );
+            dialog.showErrorBox(
+              "Super Speech",
+              `Could not ${paused ? "resume" : "pause"} speech. Try again.`,
+            );
+          });
+        },
       },
       { label: "Open runtime folder", click: () => void shell.openPath(runtimeDir()) },
       { label: "Third-party notices", click: () => void shell.openPath(noticesPath()) },

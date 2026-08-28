@@ -48,13 +48,13 @@ export const VOICE_OPTIONS = [
   ["bm_lewis", "Lewis", "UK male"],
 ] as const;
 
-export interface QueueItem {
+export interface SpeechicleItem {
   id: string;
   text: string;
   voice: string;
 }
 
-export interface CurrentItem extends QueueItem {
+export interface CurrentItem extends SpeechicleItem {
   piece: number;
   piece_count: number;
   piece_start: number | null;
@@ -90,14 +90,36 @@ export interface EngineStatus {
   engine_pid: number | null;
   current: CurrentItem | null;
   queue_count: number;
-  queue: QueueItem[];
+  queue: SpeechicleItem[];
   history_count: number;
-  history: QueueItem[];
+  history: SpeechicleItem[];
 }
 
 export interface EngineProcessStatus {
   updated_at: number;
   engine_pid: number | null;
+}
+
+export interface OwnedEngineHealth {
+  startedAtMs: number;
+  ready: boolean;
+  statusUpdatedAtSeconds: number | null;
+}
+
+export function ownedEngineRestartReason(
+  health: OwnedEngineHealth,
+  nowMs: number,
+  startupTimeoutMs: number,
+  unresponsiveTimeoutMs: number,
+): "did not finish starting" | "became unresponsive" | null {
+  if (!health.ready) {
+    return nowMs - health.startedAtMs >= startupTimeoutMs
+      ? "did not finish starting"
+      : null;
+  }
+  const statusFresh = health.statusUpdatedAtSeconds !== null &&
+    nowMs - health.statusUpdatedAtSeconds * 1_000 < unresponsiveTimeoutMs;
+  return statusFresh ? null : "became unresponsive";
 }
 
 export function engineProcessIsLive(
@@ -160,20 +182,20 @@ export function statusAfterPauseCommand(
   };
 }
 
-export type TimelineItemKind = "current" | "upcoming" | "history";
+export type TimelineItemKind = "current" | "waiting" | "history";
 
-export interface TimelineItem extends QueueItem {
+export interface TimelineItem extends SpeechicleItem {
   kind: TimelineItemKind;
   position: number | null;
 }
 
 export type PlaybackPresentation =
-  | { state: "playing" | "paused"; item: QueueItem }
-  | { state: "loading"; item: QueueItem | null }
+  | { state: "playing" | "paused"; item: SpeechicleItem }
+  | { state: "loading"; item: SpeechicleItem | null }
   | { state: "idle" | "setup_required" | "stopped"; item: null };
 
 export type PendingPlayback = {
-  item: QueueItem;
+  item: SpeechicleItem;
   state: "playing" | "paused";
 };
 
@@ -216,11 +238,11 @@ const RUNTIME_STATES = new Set<RuntimeState>([
   "stopped",
 ]);
 
-function isQueueItem(value: unknown): value is QueueItem {
+function isSpeechicleItem(value: unknown): value is SpeechicleItem {
   if (!value || typeof value !== "object") {
     return false;
   }
-  const item = value as Partial<QueueItem> & Record<string, unknown>;
+  const item = value as Partial<SpeechicleItem> & Record<string, unknown>;
   return (
     isSpeechicleId(item.id) &&
     !("filename" in item) &&
@@ -230,7 +252,7 @@ function isQueueItem(value: unknown): value is QueueItem {
 }
 
 function isCurrentItem(value: unknown): value is CurrentItem {
-  if (!isQueueItem(value)) {
+  if (!isSpeechicleItem(value)) {
     return false;
   }
   const item = value as Partial<CurrentItem>;
@@ -273,7 +295,7 @@ function playbackBoundaryMatchesState(value: Record<string, unknown>): boolean {
 }
 
 function hasStatusCore(value: Record<string, unknown>): boolean {
-  const queue = Array.isArray(value.queue) && value.queue.every(isQueueItem)
+  const queue = Array.isArray(value.queue) && value.queue.every(isSpeechicleItem)
     ? value.queue
     : null;
   const current = value.current === null || isCurrentItem(value.current)
@@ -304,7 +326,7 @@ function isEngineStatusCurrent(
     value.version === ENGINE_STATUS_VERSION &&
     hasStatusCore(value) &&
     Array.isArray(value.history) &&
-    value.history.every(isQueueItem) &&
+    value.history.every(isSpeechicleItem) &&
     new Set(value.history.map(({ id }) => id)).size === value.history.length &&
     Number.isInteger(value.history_count) &&
     (value.history_count as number) >= value.history.length
@@ -312,12 +334,12 @@ function isEngineStatusCurrent(
     return false;
   }
   const current = value.current as CurrentItem | null;
-  const queue = value.queue as QueueItem[];
+  const queue = value.queue as SpeechicleItem[];
   const activeIds = new Set([
     ...(current ? [current.id] : []),
     ...queue.map(({ id }) => id),
   ]);
-  return (value.history as QueueItem[]).every(({ id }) => !activeIds.has(id));
+  return (value.history as SpeechicleItem[]).every(({ id }) => !activeIds.has(id));
 }
 
 export function parseEngineStatus(value: unknown): EngineStatus | null {
@@ -353,7 +375,7 @@ export function parseEngineProcessStatus(value: unknown): EngineProcessStatus | 
 }
 
 function timelineItem(
-  item: QueueItem,
+  item: SpeechicleItem,
   kind: TimelineItemKind,
   position: number | null,
 ): TimelineItem {
@@ -369,17 +391,17 @@ function timelineItem(
 export function timelineItems(
   status: Pick<EngineStatus, "current" | "queue" | "history">,
 ): TimelineItem[] {
-  const upcoming = status.queue.map((item, index) =>
-    timelineItem(item, "upcoming", index + 1)
+  const waiting = status.queue.map((item, index) =>
+    timelineItem(item, "waiting", index + 1)
   );
   return [
-    ...upcoming.reverse(),
+    ...waiting.reverse(),
     ...(status.current ? [timelineItem(status.current, "current", null)] : []),
     ...status.history.map((item) => timelineItem(item, "history", null)),
   ];
 }
 
-export function moveQueueItemBefore<T extends { id: string }>(
+export function moveSpeechicleItemBefore<T extends { id: string }>(
   items: readonly T[],
   id: string,
   beforeId: string | null,
@@ -551,6 +573,15 @@ export function parseTimelineMutationResult(
     };
   }
   return null;
+}
+
+export function mutationResultMatchesRequest(
+  mutation: TimelineMutation,
+  result: TimelineMutationResult,
+): boolean {
+  return result.outcome !== "committed" ||
+    mutation.type !== "play" ||
+    result.resultId === mutation.id;
 }
 
 export function adoptTimelineSnapshot(

@@ -108,20 +108,20 @@ async function beginDrag(page, handle, deltaY = -65) {
   await page.mouse.down();
   await page.mouse.move(from.x, from.y + deltaY, { steps: 8 });
   await waitFor(
-    async () => await page.locator(".queue-drag-ghost").count() === 1,
+    async () => await page.locator(".timeline-drag-ghost").count() === 1,
     "The drag preview did not activate",
   );
 }
 
 async function assertDragClean(page) {
-  assert.equal(await page.locator(".queue-drag-ghost").count(), 0);
+  assert.equal(await page.locator(".timeline-drag-ghost").count(), 0);
   assert.equal(await page.locator(".is-drag-source").count(), 0);
-  assert.equal(await page.locator(".queue-drag-placeholder").count(), 0);
-  const ids = await page.locator(".queue-item.is-upcoming").evaluateAll((items) =>
+  assert.equal(await page.locator(".timeline-drag-placeholder").count(), 0);
+  const ids = await page.locator(".speechicle-item.is-waiting").evaluateAll((items) =>
     items.map((item) => item.getAttribute("data-item-id"))
   );
   assert.equal(new Set(ids).size, ids.length, "Waiting cards must have unique IDs");
-  const historyIds = await page.locator(".queue-item.is-history").evaluateAll((items) =>
+  const historyIds = await page.locator(".speechicle-item.is-history").evaluateAll((items) =>
     items.map((item) => item.getAttribute("data-item-id"))
   );
   assert.equal(new Set(historyIds).size, historyIds.length, "History cards must have unique IDs");
@@ -130,7 +130,7 @@ async function assertDragClean(page) {
 async function actionMenuIsFullyVisible(page) {
   return page.locator("#queue-action-menu:not([hidden])").evaluate((menu) => {
     const bounds = menu.getBoundingClientRect();
-    const listBounds = document.querySelector("#queue-list").getBoundingClientRect();
+    const listBounds = document.querySelector("#speechicle-list").getBoundingClientRect();
     const center = document.elementFromPoint(
       bounds.left + bounds.width / 2,
       bounds.top + bounds.height / 2,
@@ -145,13 +145,13 @@ async function actionMenuIsFullyVisible(page) {
 }
 
 async function visibleHistoryDropPoint(page) {
-  await page.locator("#queue-list").evaluate((list) => {
+  await page.locator("#speechicle-list").evaluate((list) => {
     list.scrollTop = list.scrollHeight;
   });
   const dividerBounds = await page.locator(
     ".timeline-divider.history-drop-target",
   ).boundingBox();
-  const listBounds = await page.locator("#queue-list").boundingBox();
+  const listBounds = await page.locator("#speechicle-list").boundingBox();
   assert(dividerBounds && listBounds, "History must be visible during a drag");
   const point = {
     x: dividerBounds.x + dividerBounds.width / 2,
@@ -280,11 +280,11 @@ try {
     await page.locator("#playback-copy").getAttribute("aria-describedby"),
     "playback-title current-text",
   );
-  await page.locator(".queue-item.is-current").waitFor();
+  await page.locator(".speechicle-item.is-current").waitFor();
   assert(
-    await page.locator(".queue-item.is-current").evaluate((row) => {
+    await page.locator(".speechicle-item.is-current").evaluate((row) => {
       const rowBounds = row.getBoundingClientRect();
-      const listBounds = document.querySelector("#queue-list").getBoundingClientRect();
+      const listBounds = document.querySelector("#speechicle-list").getBoundingClientRect();
       return rowBounds.top >= listBounds.top && rowBounds.bottom <= listBounds.bottom;
     }),
     "The app must reveal the current row when playback first appears",
@@ -308,7 +308,7 @@ try {
     "The current-piece highlight must preserve the current text and its flow",
   );
   assert(
-    await page.locator(".queue-section").evaluate((section) => section.inert),
+    await page.locator(".timeline-section").evaluate((section) => section.inert),
     "Expanded playback must remove the covered timeline from keyboard navigation",
   );
   const expandedPlayback = await playbackExpansionSnapshot(page);
@@ -332,7 +332,7 @@ try {
     "Escape did not collapse the playback card",
   );
   assert(
-    await page.locator(".queue-section").evaluate((section) => !section.inert),
+    await page.locator(".timeline-section").evaluate((section) => !section.inert),
     "Collapsing playback did not restore timeline navigation",
   );
   const settingsButton = page.locator("#settings-button");
@@ -428,9 +428,9 @@ try {
     false,
     "The maximize button must restore the window",
   );
-  await page.locator(".queue-item.is-upcoming").first().waitFor();
+  await page.locator(".speechicle-item.is-waiting").first().waitFor();
   await waitFor(
-    async () => await page.locator(".queue-item.is-upcoming").count() === 2,
+    async () => await page.locator(".speechicle-item.is-waiting").count() === 2,
     "The Electron window did not render two waiting items",
   );
   await waitFor(
@@ -445,29 +445,29 @@ try {
       }))
     ),
     [
-      { section: "upcoming", title: "Waiting" },
+      { section: "waiting", title: "Waiting" },
       { section: "current", title: "Current" },
       { section: "history", title: "History" },
     ],
     "Current, Waiting, and History must have explicit timeline boundaries",
   );
   assert.equal(
-    await page.locator(".queue-item.is-current .queue-drag-handle").count(),
+    await page.locator(".speechicle-item.is-current .timeline-drag-handle").count(),
     0,
     "Current speech must be the only row without a reorder handle",
   );
   assert.equal(
-    await page.locator(".queue-item.is-upcoming:not(:has(.queue-drag-handle))").count(),
+    await page.locator(".speechicle-item.is-waiting:not(:has(.timeline-drag-handle))").count(),
     0,
     "Every waiting row must have a reorder handle",
   );
   assert.equal(
-    await page.locator("#queue-list").evaluate((list) => getComputedStyle(list).maskImage),
+    await page.locator("#speechicle-list").evaluate((list) => getComputedStyle(list).maskImage),
     "none",
     "The Speechicles viewport must have a clean bottom edge",
   );
   assert.equal(
-    await page.locator(".queue-item").first().evaluate((row) => getComputedStyle(row).borderRadius),
+    await page.locator(".speechicle-item").first().evaluate((row) => getComputedStyle(row).borderRadius),
     "9px",
     "Speechicle cards must use the tighter corner radius",
   );
@@ -534,7 +534,7 @@ try {
     Element.prototype.animate = function (keyframes, options) {
       if (
         this instanceof HTMLElement &&
-        this.classList.contains("queue-item") &&
+        this.classList.contains("speechicle-item") &&
         JSON.stringify(keyframes).includes("translateY")
       ) {
         globalThis.__queueReorderAnimationRequests += 1;
@@ -543,7 +543,7 @@ try {
     };
   });
 
-  const rows = page.locator(".queue-item.is-upcoming");
+  const rows = page.locator(".speechicle-item.is-waiting");
   await rows.first().scrollIntoViewIfNeeded();
   const firstId = await rows.nth(0).getAttribute("data-item-id");
   const secondId = await rows.nth(1).getAttribute("data-item-id");
@@ -554,7 +554,7 @@ try {
   await rows.nth(1).evaluate((row) => {
     row.dataset.smokeNode = "midpoint-source";
   });
-  const sourceHandle = rows.nth(1).locator(".queue-drag-handle");
+  const sourceHandle = rows.nth(1).locator(".timeline-drag-handle");
   const sourceHandleBounds = await sourceHandle.boundingBox();
   assert(sourceHandleBounds, "Drag handle must be visible");
   const grabPoint = {
@@ -578,7 +578,7 @@ try {
     secondId,
     "The row did not switch when its center reached the destination midpoint",
   );
-  const dragged = await page.locator(".queue-drag-ghost").boundingBox();
+  const dragged = await page.locator(".timeline-drag-ghost").boundingBox();
   assert(dragged, "The floating drag preview must stay visible");
   assert(
     Math.abs(dragged.y + dragged.height / 2 - (firstStart.y + firstStart.height / 2)) < 1,
@@ -595,8 +595,8 @@ try {
   );
   const reorderedReferences = await page.locator(`[data-item-id="${secondId}"]`).evaluate(
     (row) => [
-      row.querySelector(".queue-drag-handle")?.getAttribute("aria-label"),
-      row.querySelector(".queue-chunk")?.getAttribute("aria-label"),
+      row.querySelector(".timeline-drag-handle")?.getAttribute("aria-label"),
+      row.querySelector(".speechicle-content")?.getAttribute("aria-label"),
       row.querySelector(".queue-menu-button")?.getAttribute("aria-label"),
       row.querySelector(".queue-full-text")?.getAttribute("aria-label"),
     ],
@@ -631,28 +631,28 @@ try {
 
   await beginDrag(
     page,
-    page.locator(`[data-item-id="${secondId}"] .queue-drag-handle`),
+    page.locator(`[data-item-id="${secondId}"] .timeline-drag-handle`),
     70,
   );
   runEngine("speak", "Drag refresh cancellation");
   await waitFor(
     async () =>
-      await page.locator(".queue-item.is-upcoming").count() === 3 &&
-      await page.locator(".queue-drag-ghost").count() === 0,
+      await page.locator(".speechicle-item.is-waiting").count() === 3 &&
+      await page.locator(".timeline-drag-ghost").count() === 0,
     "A queue refresh did not cancel and clean the active drag",
   );
   await page.mouse.up();
   await assertDragClean(page);
   assert.equal(
-    await page.locator(`[data-item-id="${secondId}"].is-upcoming`).count(),
+    await page.locator(`[data-item-id="${secondId}"].is-waiting`).count(),
     1,
     "A queue refresh lost the dragged card",
   );
 
-  const archivedRow = page.locator(`[data-item-id="${secondId}"].is-upcoming`);
+  const archivedRow = page.locator(`[data-item-id="${secondId}"].is-waiting`);
   const archivedBounds = await archivedRow.boundingBox();
-  const archivedHandleBounds = await archivedRow.locator(".queue-drag-handle").boundingBox();
-  const waitingCards = page.locator(".queue-item.is-upcoming:not(.queue-drag-ghost)");
+  const archivedHandleBounds = await archivedRow.locator(".timeline-drag-handle").boundingBox();
+  const waitingCards = page.locator(".speechicle-item.is-waiting:not(.timeline-drag-ghost)");
   const lastWaitingBounds = await waitingCards.last().boundingBox();
   assert(
     archivedBounds && archivedHandleBounds && lastWaitingBounds,
@@ -675,7 +675,7 @@ try {
     "The archive gesture must first preview a move to the last position",
   );
   const firstOtherBounds = await layoutBounds(page.locator(
-    `.queue-item.is-upcoming:not(.queue-drag-ghost):not([data-item-id="${secondId}"])`,
+    `.speechicle-item.is-waiting:not(.timeline-drag-ghost):not([data-item-id="${secondId}"])`,
   ).first());
   assert(firstOtherBounds, "The first neighboring card must be visible");
   await page.mouse.move(archiveGrab.x, pointerYForDraggedCenter(firstOtherBounds));
@@ -685,7 +685,7 @@ try {
     "Crossing the same cards upward must retarget the preview",
   );
   const lastOtherBounds = await layoutBounds(page.locator(
-    `.queue-item.is-upcoming:not(.queue-drag-ghost):not([data-item-id="${secondId}"])`,
+    `.speechicle-item.is-waiting:not(.timeline-drag-ghost):not([data-item-id="${secondId}"])`,
   ).last());
   assert(lastOtherBounds, "The last neighboring card must be visible");
   await page.mouse.move(archiveGrab.x, pointerYForDraggedCenter(lastOtherBounds, 2));
@@ -719,11 +719,11 @@ try {
     animationCountBeforeHistory,
     "Entering History must not start a backtracking queue animation",
   );
-  await page.locator("#queue-list").evaluate((list) => {
+  await page.locator("#speechicle-list").evaluate((list) => {
     list.scrollTop = 0;
   });
   const exitTargetBounds = await layoutBounds(page.locator(
-    `.queue-item.is-upcoming:not(.queue-drag-ghost):not([data-item-id="${secondId}"])`,
+    `.speechicle-item.is-waiting:not(.timeline-drag-ghost):not([data-item-id="${secondId}"])`,
   ).first());
   assert(exitTargetBounds, "A queue target must remain visible after entering History");
   await page.mouse.move(archiveGrab.x, pointerYForDraggedCenter(exitTargetBounds));
@@ -773,7 +773,7 @@ try {
     "The engine did not persist the mouse-driven archive",
   );
 
-  const remainingRows = page.locator(".queue-item.is-upcoming");
+  const remainingRows = page.locator(".speechicle-item.is-waiting");
   await waitFor(
     async () => {
       const visualOrder = await remainingRows.evaluateAll((items) =>
@@ -785,7 +785,7 @@ try {
   );
 
   const copyLefts = await page.locator(
-    ".queue-item.is-current .queue-copy, .queue-item.is-upcoming .queue-copy, .queue-item.is-history .queue-copy",
+    ".speechicle-item.is-current .queue-copy, .speechicle-item.is-waiting .queue-copy, .speechicle-item.is-history .queue-copy",
   ).evaluateAll((copies) => copies.map((copy) => copy.getBoundingClientRect().left));
   assert(copyLefts.length >= 3, "Current, waiting, and History rows must all be visible");
   assert(
@@ -797,7 +797,7 @@ try {
     0,
     "Timeline labels must not shift row copy",
   );
-  const renderedHistoryCount = await page.locator(".queue-item.is-history").count();
+  const renderedHistoryCount = await page.locator(".speechicle-item.is-history").count();
   const historyCountLabel = renderedHistoryCount < status().history_count
     ? `${renderedHistoryCount.toLocaleString()} recent of ${status().history_count.toLocaleString()}`
     : renderedHistoryCount.toLocaleString();
@@ -820,8 +820,8 @@ try {
   const menuRow = remainingRows.first();
   const menuRowId = await menuRow.getAttribute("data-item-id");
   const menuRowBounds = await menuRow.boundingBox();
-  const dragHandleBounds = await menuRow.locator(".queue-drag-handle").boundingBox();
-  const actionAreaBounds = await menuRow.locator(".chunk-actions").boundingBox();
+  const dragHandleBounds = await menuRow.locator(".timeline-drag-handle").boundingBox();
+  const actionAreaBounds = await menuRow.locator(".speechicle-actions").boundingBox();
   const menuButton = menuRow.locator(".queue-menu-button");
   const menuButtonBounds = await menuButton.boundingBox();
   assert(
@@ -839,13 +839,13 @@ try {
     ) < 0.5,
     "The row action button must be vertically centered",
   );
-  await menuRow.locator(".queue-chunk").click();
+  await menuRow.locator(".speechicle-content").click();
   await waitFor(
     async () => await menuRow.evaluate((row) => row.classList.contains("is-expanded")),
     "The row did not expand for its alignment check",
   );
   const expandedRowBounds = await menuRow.boundingBox();
-  const expandedDragBounds = await menuRow.locator(".queue-drag-handle").boundingBox();
+  const expandedDragBounds = await menuRow.locator(".timeline-drag-handle").boundingBox();
   const expandedMenuBounds = await menuButton.boundingBox();
   assert(
     expandedRowBounds && expandedDragBounds && expandedMenuBounds,
@@ -866,7 +866,7 @@ try {
       path: path.join(screenshot.dir, `${screenshot.name}-expanded${screenshot.ext}`),
     });
   }
-  await menuRow.locator(".queue-chunk").click();
+  await menuRow.locator(".speechicle-content").click();
   await waitFor(
     async () => await menuRow.evaluate((row) => !row.classList.contains("is-expanded")),
     "The row did not collapse after its alignment check",
@@ -928,11 +928,11 @@ try {
   assert.equal(
     await electronApp.evaluate(() => globalThis.__superSpeechSmokeClipboard),
     status().queue.find((item) => item.id === menuRowId)?.text,
-    "Copy text must write the full waiting chunk",
+    "Copy text must write the full waiting speechicle",
   );
   await page.locator("#speech-heading").click();
   assert.equal(await visibleActions.count(), 0, "Clicking outside did not close the action menu");
-  const historyMenuButton = page.locator(".queue-item.is-history .queue-menu-button").first();
+  const historyMenuButton = page.locator(".speechicle-item.is-history .queue-menu-button").first();
   await historyMenuButton.scrollIntoViewIfNeeded();
   await historyMenuButton.click();
   assert(
@@ -956,25 +956,25 @@ try {
 
   const playbackBeforeHistoryGesture = status();
   const historyPlay = page.locator(
-    `[data-item-id="${secondId}"].is-history .queue-chunk`,
+    `[data-item-id="${secondId}"].is-history .speechicle-content`,
   );
   const historyBounds = await historyPlay.boundingBox();
   assert(historyBounds, "Archived card must be visible for the gesture test");
   await historyPlay.click();
   await waitFor(
     async () => await page.locator(`[data-item-id="${secondId}"].is-expanded`).count() === 1,
-    "A single chunk click did not expand its text",
+    "A single speechicle click did not expand its text",
   );
   await new Promise((resolve) => setTimeout(resolve, 800));
   assert.equal(
     status().current?.id,
     playbackBeforeHistoryGesture.current?.id,
-    "A single chunk click started playback",
+    "A single speechicle click started playback",
   );
   await historyPlay.click();
   await waitFor(
     async () => await page.locator(`[data-item-id="${secondId}"].is-expanded`).count() === 0,
-    "A second single click did not collapse the chunk",
+    "A second single click did not collapse the speechicle",
   );
   const historyPoint = {
     x: historyBounds.x + historyBounds.width / 2,
@@ -986,7 +986,7 @@ try {
   await page.mouse.up();
   await new Promise((resolve) => setTimeout(resolve, 1_000));
   const playbackAfterHistoryGesture = status();
-  assert.equal(await page.locator(".queue-item.is-pending").count(), 0);
+  assert.equal(await page.locator(".speechicle-item.is-pending").count(), 0);
   assert.equal(
     playbackAfterHistoryGesture.current?.id,
     playbackBeforeHistoryGesture.current?.id,
@@ -1006,7 +1006,7 @@ try {
   const orderBeforeBlur = await remainingRows.evaluateAll((items) =>
     items.map((item) => item.getAttribute("data-item-id"))
   );
-  await beginDrag(page, remainingRows.first().locator(".queue-drag-handle"), 70);
+  await beginDrag(page, remainingRows.first().locator(".timeline-drag-handle"), 70);
   await page.evaluate(() => {
     window.dispatchEvent(new PointerEvent("pointermove", {
       pointerId: 1,
@@ -1015,7 +1015,7 @@ try {
     }));
   });
   await waitFor(
-    async () => await page.locator(".queue-drag-ghost").count() === 0,
+    async () => await page.locator(".timeline-drag-ghost").count() === 0,
     "A pointer move without the primary button left drag artifacts behind",
   );
   await page.mouse.up();
@@ -1028,10 +1028,10 @@ try {
     "Losing the primary button changed the queue order",
   );
 
-  await beginDrag(page, remainingRows.first().locator(".queue-drag-handle"), 70);
+  await beginDrag(page, remainingRows.first().locator(".timeline-drag-handle"), 70);
   await page.evaluate(() => window.dispatchEvent(new Event("blur")));
   await waitFor(
-    async () => await page.locator(".queue-drag-ghost").count() === 0,
+    async () => await page.locator(".timeline-drag-ghost").count() === 0,
     "Window blur left drag artifacts behind",
   );
   await page.mouse.up();
@@ -1057,13 +1057,13 @@ try {
     () => !status().queue.some(({ id }) => id === deletedId),
     "The engine did not persist the Delete menu action",
   );
-  const historyRows = page.locator(".queue-item.is-history");
+  const historyRows = page.locator(".speechicle-item.is-history");
   await waitFor(
     async () => await historyRows.count() >= 2,
     "History did not expose enough rows to test reordering",
   );
   assert.equal(
-    await page.locator(".queue-item.is-history:not(:has(.queue-drag-handle))").count(),
+    await page.locator(".speechicle-item.is-history:not(:has(.timeline-drag-handle))").count(),
     0,
     "Every History row must have a reorder handle",
   );
@@ -1073,7 +1073,7 @@ try {
   const secondHistoryId = await historyRows.nth(1).getAttribute("data-item-id");
   const firstHistoryBounds = await historyRows.nth(0).boundingBox();
   const secondHistoryBounds = await historyRows.nth(1).boundingBox();
-  const firstHistoryHandle = historyRows.nth(0).locator(".queue-drag-handle");
+  const firstHistoryHandle = historyRows.nth(0).locator(".timeline-drag-handle");
   await historyRows.nth(0).evaluate((row) => {
     row.dataset.smokeNode = "history-source";
   });
@@ -1094,7 +1094,7 @@ try {
   await page.mouse.down();
   await page.mouse.move(historyGrab.x, historyGrab.y + 6);
   await waitFor(
-    async () => await page.locator(".queue-drag-ghost").count() === 1,
+    async () => await page.locator(".timeline-drag-ghost").count() === 1,
     "History drag did not activate",
   );
   await page.mouse.move(historyGrab.x, historyDestinationY, { steps: 4 });
@@ -1122,7 +1122,7 @@ try {
     "The engine did not persist the History reorder",
   );
   await waitFor(
-    () => page.locator(`[data-item-id="${firstHistoryId}"] .queue-drag-handle`).isEnabled(),
+    () => page.locator(`[data-item-id="${firstHistoryId}"] .timeline-drag-handle`).isEnabled(),
     "The renderer did not finish reconciling the History reorder",
   );
   assert.deepEqual(
@@ -1150,7 +1150,7 @@ try {
     "The engine did not delete the History item",
   );
 
-  const historyOrderBeforePlay = await page.locator(".queue-item").evaluateAll((rows) =>
+  const historyOrderBeforePlay = await page.locator(".speechicle-item").evaluateAll((rows) =>
     rows.map((row) => row.getAttribute("data-item-id"))
   );
   await page.locator(`[data-item-id="${secondId}"].is-history .queue-menu-button`).click();
@@ -1158,13 +1158,13 @@ try {
   assert.equal(
     await page.locator("body").getAttribute("data-state"),
     "playing",
-    "A selected chunk did not enter the playing presentation immediately",
+    "A selected speechicle did not enter the playing presentation immediately",
   );
   assert.equal(await page.locator("#playback-title").textContent(), "Heart");
   assert.equal(
     await page.locator(`[data-item-id="${secondId}"].is-expanded`).count(),
     0,
-    "Playing a chunk from its action menu changed its expansion",
+    "Playing a speechicle from its action menu changed its expansion",
   );
   await waitFor(
     async () => {
@@ -1182,7 +1182,7 @@ try {
       );
       return snapshot.current?.id === secondId;
     },
-    "The History Play action did not start the chunk",
+    "The History Play action did not start the speechicle",
     30_000,
   );
   await waitFor(
@@ -1190,7 +1190,7 @@ try {
     "The selected History row did not become Current in place",
   );
   assert.deepEqual(
-    await page.locator(".queue-item").evaluateAll(
+    await page.locator(".speechicle-item").evaluateAll(
       (rows, ids) => rows
         .map((row) => row.getAttribute("data-item-id"))
         .filter((id) => ids.includes(id)),
@@ -1222,17 +1222,17 @@ try {
   const interruptedId = status().current.id;
   const [olderWaiting, jumpTarget] = status().queue.slice(-2);
   await waitFor(
-    async () => await page.locator(`[data-item-id="${jumpTarget.id}"].is-upcoming`).count() === 1,
+    async () => await page.locator(`[data-item-id="${jumpTarget.id}"].is-waiting`).count() === 1,
     "The jump target did not appear in the renderer",
   );
   const stableIds = [jumpTarget.id, olderWaiting.id, interruptedId];
-  const orderBeforeJump = await page.locator(".queue-item").evaluateAll(
+  const orderBeforeJump = await page.locator(".speechicle-item").evaluateAll(
     (rows, ids) => rows
       .map((row) => row.getAttribute("data-item-id"))
       .filter((id) => ids.includes(id)),
     stableIds,
   );
-  await page.locator(`[data-item-id="${jumpTarget.id}"] .queue-chunk`).dblclick();
+  await page.locator(`[data-item-id="${jumpTarget.id}"] .speechicle-content`).dblclick();
   assert.equal(
     await page.locator("body").getAttribute("data-state"),
     "playing",
@@ -1257,7 +1257,7 @@ try {
     "Jump-to-here did not move the interrupted and older rows into History",
   );
   assert.deepEqual(
-    await page.locator(".queue-item").evaluateAll(
+    await page.locator(".speechicle-item").evaluateAll(
       (rows, ids) => rows
         .map((row) => row.getAttribute("data-item-id"))
         .filter((id) => ids.includes(id)),
@@ -1398,7 +1398,7 @@ try {
   );
   assert.equal(
     await page.evaluate(() => document.activeElement?.id),
-    "queue-list",
+    "speechicle-list",
     "Automatic collapse did not restore keyboard focus to Speechicles",
   );
 
@@ -1461,7 +1461,11 @@ try {
 } finally {
   await electronApp?.close().catch(() => undefined);
   try {
-    runEngine("interrupt");
+    execFileSync(engine, ["interrupt"], {
+      env: environment,
+      stdio: "ignore",
+      windowsHide: true,
+    });
   } catch {
     // The fixture engine may already be gone
   }

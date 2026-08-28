@@ -1,7 +1,7 @@
 {
   "name": "super-speech-app",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Pause and manage private local Super Speech playback",
   "author": "Dmitriy Vasilyuk",
   "license": "MIT",
@@ -9,7 +9,7 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
-    "test": "node --test --experimental-strip-types src/runtime.test.ts src/queue-drag-model.test.ts",
+    "test": "node --test --experimental-strip-types electron/atomic-file.test.ts src/runtime.test.ts src/timeline-drag-model.test.ts",
     "test:drag": "npm run build && node scripts/smoke_drag.mjs",
     "test:installed": "node scripts/smoke_installed.mjs",
     "resources": "node scripts/prepare_resources.mjs",

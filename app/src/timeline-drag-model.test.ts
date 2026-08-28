@@ -3,26 +3,26 @@ import test from "node:test";
 import {
   isHistoryDropArea,
   pointerMovedBeyondThreshold,
-  queueDropBeforeId,
-  startQueueDrag,
-  transitionQueueDrag,
-  type QueueDragEvent,
-  type QueueDragState,
-} from "./queue-drag-model.ts";
-import { moveQueueItemBefore } from "./runtime.ts";
+  sectionDropBeforeId,
+  startTimelineDrag,
+  transitionTimelineDrag,
+  type TimelineDragEvent,
+  type TimelineDragState,
+} from "./timeline-drag-model.ts";
+import { moveSpeechicleItemBefore } from "./runtime.ts";
 
 const initialOrder = ["newest", "middle", "oldest"];
 
-function begin(pointerId = 1): QueueDragState {
-  const state = startQueueDrag(pointerId, "middle", initialOrder);
+function begin(pointerId = 1): TimelineDragState {
+  const state = startTimelineDrag(pointerId, "middle", initialOrder);
   assert(state);
   return state;
 }
 
 test("rejects a missing source and duplicate IDs", () => {
-  assert.equal(startQueueDrag(1, "missing", initialOrder), null);
+  assert.equal(startTimelineDrag(1, "missing", initialOrder), null);
   assert.equal(
-    startQueueDrag(1, "middle", ["middle", "middle"]),
+    startTimelineDrag(1, "middle", ["middle", "middle"]),
     null,
   );
 });
@@ -34,12 +34,12 @@ test("maps dragged-card centers to the first, middle, and last visual slots", ()
     { id: "oldest", top: 94, height: 40 },
   ];
 
-  assert.equal(queueDropBeforeId("middle", rows, -10), "newest");
-  assert.equal(queueDropBeforeId("middle", rows, 20.4), "newest");
-  assert.equal(queueDropBeforeId("middle", rows, 20.6), "oldest");
-  assert.equal(queueDropBeforeId("middle", rows, 70), "oldest");
-  assert.equal(queueDropBeforeId("middle", rows, 114), "oldest");
-  assert.equal(queueDropBeforeId("middle", rows, 200), null);
+  assert.equal(sectionDropBeforeId("middle", rows, -10), "newest");
+  assert.equal(sectionDropBeforeId("middle", rows, 20.4), "newest");
+  assert.equal(sectionDropBeforeId("middle", rows, 20.6), "oldest");
+  assert.equal(sectionDropBeforeId("middle", rows, 70), "oldest");
+  assert.equal(sectionDropBeforeId("middle", rows, 114), "oldest");
+  assert.equal(sectionDropBeforeId("middle", rows, 200), null);
 });
 
 test("pointer movement activates at the threshold, not just beyond it", () => {
@@ -58,16 +58,16 @@ test("History accepts blank space inside the list but not the same Y outside it"
 });
 
 test("derives every preview from the original order", () => {
-  const first = transitionQueueDrag(begin(), {
-    type: "preview-queue",
+  const first = transitionTimelineDrag(begin(), {
+    type: "preview-section",
     pointerId: 1,
     beforeId: "newest",
   });
   assert.deepEqual(first.visualOrder, ["middle", "newest", "oldest"]);
   assert(first.state);
 
-  const last = transitionQueueDrag(first.state, {
-    type: "preview-queue",
+  const last = transitionTimelineDrag(first.state, {
+    type: "preview-section",
     pointerId: 1,
     beforeId: null,
   });
@@ -78,12 +78,12 @@ test("derives every preview from the original order", () => {
 test("every cancellation path restores the original order without a command", () => {
   const states = [
     begin(),
-    transitionQueueDrag(begin(), {
-      type: "preview-queue",
+    transitionTimelineDrag(begin(), {
+      type: "preview-section",
       pointerId: 1,
       beforeId: "newest",
     }).state,
-    transitionQueueDrag(begin(), {
+    transitionTimelineDrag(begin(), {
       type: "preview-history",
       pointerId: 1,
     }).state,
@@ -91,13 +91,13 @@ test("every cancellation path restores the original order without a command", ()
 
   for (const state of states) {
     assert(state);
-    assert.deepEqual(transitionQueueDrag(state, { type: "cancel" }), {
+    assert.deepEqual(transitionTimelineDrag(state, { type: "cancel" }), {
       state: null,
       visualOrder: initialOrder,
       command: null,
     });
   }
-  assert.deepEqual(transitionQueueDrag(null, { type: "cancel" }), {
+  assert.deepEqual(transitionTimelineDrag(null, { type: "cancel" }), {
     state: null,
     visualOrder: null,
     command: null,
@@ -105,12 +105,12 @@ test("every cancellation path restores the original order without a command", ()
 });
 
 test("a terminal transition emits at most one engine command", () => {
-  const preview = transitionQueueDrag(begin(), {
-    type: "preview-queue",
+  const preview = transitionTimelineDrag(begin(), {
+    type: "preview-section",
     pointerId: 1,
     beforeId: "newest",
   });
-  const finished = transitionQueueDrag(preview.state, {
+  const finished = transitionTimelineDrag(preview.state, {
     type: "finish",
     pointerId: 1,
     commit: true,
@@ -118,10 +118,10 @@ test("a terminal transition emits at most one engine command", () => {
   assert.deepEqual(finished, {
     state: null,
     visualOrder: ["middle", "newest", "oldest"],
-    command: { type: "move", kind: "upcoming", id: "middle", beforeId: null },
+    command: { type: "move", kind: "waiting", id: "middle", beforeId: null },
   });
   assert.deepEqual(
-    transitionQueueDrag(finished.state, {
+    transitionTimelineDrag(finished.state, {
       type: "finish",
       pointerId: 1,
       commit: true,
@@ -131,13 +131,13 @@ test("a terminal transition emits at most one engine command", () => {
 });
 
 test("a no-op move emits no command and History emits archive", () => {
-  const unchanged = transitionQueueDrag(begin(), {
-    type: "preview-queue",
+  const unchanged = transitionTimelineDrag(begin(), {
+    type: "preview-section",
     pointerId: 1,
     beforeId: "oldest",
   });
   assert.equal(
-    transitionQueueDrag(unchanged.state, {
+    transitionTimelineDrag(unchanged.state, {
       type: "finish",
       pointerId: 1,
       commit: true,
@@ -145,12 +145,12 @@ test("a no-op move emits no command and History emits archive", () => {
     null,
   );
 
-  const history = transitionQueueDrag(begin(), {
+  const history = transitionTimelineDrag(begin(), {
     type: "preview-history",
     pointerId: 1,
   });
   assert.deepEqual(
-    transitionQueueDrag(history.state, {
+    transitionTimelineDrag(history.state, {
       type: "finish",
       pointerId: 1,
       commit: true,
@@ -159,20 +159,20 @@ test("a no-op move emits no command and History emits archive", () => {
   );
 });
 
-test("moving over History preserves the current queue preview until settlement", () => {
-  const queuePreview = transitionQueueDrag(begin(), {
-    type: "preview-queue",
+test("moving over History preserves the current section preview until settlement", () => {
+  const sectionPreview = transitionTimelineDrag(begin(), {
+    type: "preview-section",
     pointerId: 1,
     beforeId: "newest",
   });
-  const historyPreview = transitionQueueDrag(queuePreview.state, {
+  const historyPreview = transitionTimelineDrag(sectionPreview.state, {
     type: "preview-history",
     pointerId: 1,
   });
 
   assert.deepEqual(historyPreview.visualOrder, ["middle", "newest", "oldest"]);
   assert.deepEqual(
-    transitionQueueDrag(historyPreview.state, {
+    transitionTimelineDrag(historyPreview.state, {
       type: "finish",
       pointerId: 1,
       commit: true,
@@ -183,7 +183,7 @@ test("moving over History preserves the current queue preview until settlement",
       command: { type: "archive", id: "middle" },
     },
   );
-  assert.deepEqual(transitionQueueDrag(historyPreview.state, { type: "cancel" }), {
+  assert.deepEqual(transitionTimelineDrag(historyPreview.state, { type: "cancel" }), {
     state: null,
     visualOrder: initialOrder,
     command: null,
@@ -195,14 +195,14 @@ test("every source and destination round-trips through engine playback order", (
     const visualOrder = Array.from({ length: size }, (_, index) => `item-${index}`);
     for (const sourceId of visualOrder) {
       for (const beforeId of [...visualOrder, null]) {
-        const state = startQueueDrag(1, sourceId, visualOrder);
+        const state = startTimelineDrag(1, sourceId, visualOrder);
         assert(state);
-        const preview = transitionQueueDrag(state, {
-          type: "preview-queue",
+        const preview = transitionTimelineDrag(state, {
+          type: "preview-section",
           pointerId: 1,
           beforeId,
         });
-        const finished = transitionQueueDrag(preview.state, {
+        const finished = transitionTimelineDrag(preview.state, {
           type: "finish",
           pointerId: 1,
           commit: true,
@@ -213,7 +213,7 @@ test("every source and destination round-trips through engine playback order", (
           continue;
         }
         const engineOrder = [...visualOrder].reverse().map((id) => ({ id }));
-        const persistedVisualOrder = moveQueueItemBefore(
+        const persistedVisualOrder = moveSpeechicleItemBefore(
           engineOrder,
           finished.command.id,
           finished.command.beforeId,
@@ -228,14 +228,14 @@ test("History drag commands round-trip through matching visual and engine order"
   const visualOrder = ["newest", "middle", "oldest"];
   for (const sourceId of visualOrder) {
     for (const beforeId of [...visualOrder, null]) {
-      const state = startQueueDrag(1, sourceId, visualOrder, "history");
+      const state = startTimelineDrag(1, sourceId, visualOrder, "history");
       assert(state);
-      const preview = transitionQueueDrag(state, {
-        type: "preview-queue",
+      const preview = transitionTimelineDrag(state, {
+        type: "preview-section",
         pointerId: 1,
         beforeId,
       });
-      const finished = transitionQueueDrag(preview.state, {
+      const finished = transitionTimelineDrag(preview.state, {
         type: "finish",
         pointerId: 1,
         commit: true,
@@ -245,7 +245,7 @@ test("History drag commands round-trip through matching visual and engine order"
         assert.deepEqual(finished.visualOrder, visualOrder);
         continue;
       }
-      const persisted = moveQueueItemBefore(
+      const persisted = moveSpeechicleItemBefore(
         visualOrder.map((id) => ({ id })),
         finished.command.id,
         finished.command.beforeId,
@@ -256,10 +256,10 @@ test("History drag commands round-trip through matching visual and engine order"
 });
 
 test("History-origin drags cannot enter the archive drop phase", () => {
-  const state = startQueueDrag(1, "middle", initialOrder, "history");
+  const state = startTimelineDrag(1, "middle", initialOrder, "history");
   assert(state);
 
-  const transition = transitionQueueDrag(state, {
+  const transition = transitionTimelineDrag(state, {
     type: "preview-history",
     pointerId: 1,
   });
@@ -270,10 +270,10 @@ test("History-origin drags cannot enter the archive drop phase", () => {
 });
 
 test("stale pointer events cannot affect a newer session", () => {
-  const restarted = startQueueDrag(2, "oldest", initialOrder);
+  const restarted = startTimelineDrag(2, "oldest", initialOrder);
   assert(restarted);
 
-  const staleFinish = transitionQueueDrag(restarted, {
+  const staleFinish = transitionTimelineDrag(restarted, {
     type: "finish",
     pointerId: 1,
     commit: true,
@@ -282,17 +282,17 @@ test("stale pointer events cannot affect a newer session", () => {
   assert.equal(staleFinish.command, null);
 });
 
-test("long retargeting sequences preserve one copy of every queue item", () => {
-  const previews: QueueDragEvent[] = [
-    { type: "preview-queue", pointerId: 1, beforeId: "newest" },
+test("long retargeting sequences preserve one copy of every Speechicle", () => {
+  const previews: TimelineDragEvent[] = [
+    { type: "preview-section", pointerId: 1, beforeId: "newest" },
     { type: "preview-history", pointerId: 1 },
-    { type: "preview-queue", pointerId: 1, beforeId: "oldest" },
-    { type: "preview-queue", pointerId: 1, beforeId: null },
+    { type: "preview-section", pointerId: 1, beforeId: "oldest" },
+    { type: "preview-section", pointerId: 1, beforeId: null },
   ];
-  let state: QueueDragState | null = begin();
+  let state: TimelineDragState | null = begin();
 
   for (let iteration = 0; iteration < 100; iteration += 1) {
-    const transition = transitionQueueDrag(state, previews[iteration % previews.length]);
+    const transition = transitionTimelineDrag(state, previews[iteration % previews.length]);
     state = transition.state;
     assert(state);
     const order = state.phase === "armed"
@@ -304,9 +304,9 @@ test("long retargeting sequences preserve one copy of every queue item", () => {
 });
 
 test("short adversarial event sequences preserve lifecycle invariants", () => {
-  const events: QueueDragEvent[] = [
-    { type: "preview-queue", pointerId: 1, beforeId: "newest" },
-    { type: "preview-queue", pointerId: 2, beforeId: null },
+  const events: TimelineDragEvent[] = [
+    { type: "preview-section", pointerId: 1, beforeId: "newest" },
+    { type: "preview-section", pointerId: 2, beforeId: null },
     { type: "preview-history", pointerId: 1 },
     { type: "finish", pointerId: 1, commit: true },
     { type: "finish", pointerId: 2, commit: false },
@@ -314,7 +314,7 @@ test("short adversarial event sequences preserve lifecycle invariants", () => {
   ];
 
   const walk = (
-    state: QueueDragState | null,
+    state: TimelineDragState | null,
     depth: number,
     commandEmittedSinceStart: boolean,
   ): void => {
@@ -322,7 +322,7 @@ test("short adversarial event sequences preserve lifecycle invariants", () => {
       return;
     }
     for (const event of events) {
-      const transition = transitionQueueDrag(state, event);
+      const transition = transitionTimelineDrag(state, event);
       const nextCommandEmitted = commandEmittedSinceStart || transition.command !== null;
       if (transition.command) {
         assert.equal(commandEmittedSinceStart, false);
@@ -336,7 +336,7 @@ test("short adversarial event sequences preserve lifecycle invariants", () => {
         const { initialVisualOrder, sourceId } = transition.state;
         assert(initialVisualOrder.includes(sourceId));
         assert.equal(new Set(initialVisualOrder).size, initialVisualOrder.length);
-        if (transition.state.phase === "queue") {
+        if (transition.state.phase === "section") {
           assert.deepEqual(
             [...transition.state.previewVisualOrder].sort(),
             [...initialVisualOrder].sort(),
