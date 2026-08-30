@@ -358,11 +358,7 @@ body.playback-expanded footer {
 
 .ambient-ring {
   position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 184px;
-  height: 184px;
-  transform: translate(-50%, -50%);
+  inset: -36px;
   pointer-events: none;
 }
 
@@ -371,6 +367,7 @@ body.playback-expanded footer {
   inset: 0;
   border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
   border-radius: 50%;
+  transform-origin: center;
 }
 
 .ring-two {
