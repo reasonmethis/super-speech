@@ -52,7 +52,7 @@ def read_status(environment: dict[str, str]) -> dict[str, Any]:
     )
     status = json.loads(result.stdout)
     if (
-        status.get("version") != 13
+        status.get("version") != 14
         or not isinstance(status.get("timeline_revision"), int)
         or "filename" in result.stdout
     ):
@@ -100,6 +100,7 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory(prefix="super-speech-engine-smoke-") as temporary:
         runtime = Path(temporary)
+        inbox = runtime / "agent-inbox.jsonl"
         environment = {
             **os.environ,
             "SUPER_SPEECH_HOME": str(runtime),
@@ -120,6 +121,8 @@ def main() -> None:
                     "af_heart",
                     "--gap-ms",
                     "0",
+                    "--inbox",
+                    str(inbox),
                 ],
                 env=environment,
                 check=True,
@@ -129,7 +132,7 @@ def main() -> None:
             speechicle_id = speak_result.stdout.strip()
             if not speechicle_id.startswith("sp_"):
                 raise RuntimeError("frozen engine returned an invalid Speechicle ID")
-            wait_for_status(
+            spoken_status = wait_for_status(
                 environment,
                 lambda status: status.get("state") == "idle"
                 and any(
@@ -137,6 +140,13 @@ def main() -> None:
                     for item in status.get("history", [])
                 ),
             )
+            spoken_item = next(
+                item
+                for item in spoken_status["history"]
+                if item.get("id") == speechicle_id
+            )
+            if spoken_item.get("inbox") != str(inbox):
+                raise RuntimeError("frozen engine lost Speechicle inbox metadata")
             spoken_files = list((runtime / "spoken").glob("*.txt"))
             if len(spoken_files) != 1:
                 raise RuntimeError("frozen engine did not archive exactly one Speechicle")
@@ -153,7 +163,7 @@ def main() -> None:
             if (
                 replay_payload.get("outcome") != "committed"
                 or replay_payload.get("result_id") != speechicle_id
-                or replay_payload.get("snapshot", {}).get("version") != 13
+                or replay_payload.get("snapshot", {}).get("version") != 14
             ):
                 raise RuntimeError(
                     "frozen engine returned an invalid replay result"

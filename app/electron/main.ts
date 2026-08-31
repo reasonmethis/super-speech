@@ -28,6 +28,7 @@ import {
   IPC_CHANNELS,
   compatibleEngineIsRunning,
   engineProcessIsLive,
+  isSpeechicleId,
   mutationResultMatchesRequest,
   ownedEngineRestartReason,
   parseEngineStatus,
@@ -46,6 +47,7 @@ import {
   type TimelineMutationResult,
   type VersionInfo,
 } from "../src/runtime";
+import { appendAgentInboxMessage } from "./agent-inbox";
 import { writeTextAtomically } from "./atomic-file";
 import {
   MANAGED_SKILL_HASH_KIND,
@@ -97,6 +99,7 @@ let lastTrayPlaybackControlKey: string | null = null;
 let windowStateSaveTimer: NodeJS.Timeout | null = null;
 let windowStateWrite = Promise.resolve();
 let windowStateFlushStarted = false;
+let inboxMessageWrite = Promise.resolve();
 
 interface EngineLaunch {
   command: string;
@@ -370,6 +373,30 @@ async function mutateTimeline(
     throw new Error("Engine protocol error: timeline mutation did not confirm the selected ID");
   }
   return runtimeMutationResult(result);
+}
+
+function sendInboxMessage(speechicleId: unknown, text: unknown): Promise<void> {
+  if (!isSpeechicleId(speechicleId) || typeof text !== "string") {
+    return Promise.reject(new Error("Invalid agent message"));
+  }
+  const write = inboxMessageWrite.then(async () => {
+    const status = getStatus();
+    const item = [
+      ...(status.current ? [status.current] : []),
+      ...status.queue,
+      ...status.history,
+    ].find(({ id }) => id === speechicleId);
+    if (!item?.inbox) {
+      throw new Error("This Speechicle does not have an agent inbox");
+    }
+    await appendAgentInboxMessage(item.inbox, {
+      speechicleId,
+      ...(item.source === undefined ? {} : { source: item.source }),
+      text,
+    });
+  });
+  inboxMessageWrite = write.catch(() => undefined);
+  return write;
 }
 
 async function getVersions(): Promise<VersionInfo> {
@@ -995,6 +1022,9 @@ function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.setPaused, (_event, paused: boolean) => setPaused(paused));
   ipcMain.handle(IPC_CHANNELS.mutateTimeline, (_event, mutation: TimelineMutation) =>
     mutateTimeline(mutation)
+  );
+  ipcMain.handle(IPC_CHANNELS.sendInboxMessage, (_event, speechicleId, text) =>
+    sendInboxMessage(speechicleId, text)
   );
   ipcMain.handle(IPC_CHANNELS.copyText, (_event, text: string) => clipboard.writeText(text));
   ipcMain.handle(IPC_CHANNELS.openSetup, () => shell.openExternal(SETUP_URL));

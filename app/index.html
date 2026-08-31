@@ -131,6 +131,32 @@
       hidden
     ></div>
 
+    <dialog
+      id="inbox-reply-dialog"
+      class="inbox-reply-dialog"
+      aria-labelledby="inbox-reply-title"
+    >
+      <form id="inbox-reply-form">
+        <div class="inbox-reply-heading">
+          <h2 id="inbox-reply-title">Message agent</h2>
+          <button id="inbox-reply-close" type="button" aria-label="Close">&times;</button>
+        </div>
+        <textarea
+          id="inbox-reply-text"
+          maxlength="4000"
+          rows="4"
+          aria-label="Message"
+          placeholder="Write a message"
+          required
+        ></textarea>
+        <div id="inbox-reply-status" class="inbox-reply-status" role="status"></div>
+        <div class="inbox-reply-actions">
+          <button id="inbox-reply-cancel" type="button">Cancel</button>
+          <button id="inbox-reply-submit" type="submit">Send</button>
+        </div>
+      </form>
+    </dialog>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

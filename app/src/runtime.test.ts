@@ -152,8 +152,26 @@ test("an incompatible external engine cannot leave the app loading forever", () 
 });
 
 test("accepts a complete current-version status", () => {
-  assert.equal(ENGINE_STATUS_VERSION, 13);
+  assert.equal(ENGINE_STATUS_VERSION, 14);
   assert.equal(parseEngineStatus(status), status);
+});
+
+test("accepts only normalized absolute inbox paths in status rows", () => {
+  const item = {
+    id: speechicleId(1),
+    text: "Earlier",
+    voice: "af_heart",
+  };
+  const withInbox = (inbox: string) => ({
+    ...status,
+    history_count: 1,
+    history: [{ ...item, inbox }],
+  });
+
+  assert.notEqual(parseEngineStatus(withInbox("C:\\Users\\agent\\inbox.jsonl")), null);
+  assert.notEqual(parseEngineStatus(withInbox("/Users/agent/inbox.jsonl")), null);
+  assert.equal(parseEngineStatus(withInbox("relative/inbox.jsonl")), null);
+  assert.equal(parseEngineStatus(withInbox("C:\\inbox\n.jsonl")), null);
 });
 
 test("represents unreadable Current as one empty pending piece", () => {

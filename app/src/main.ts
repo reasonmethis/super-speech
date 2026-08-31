@@ -93,6 +93,14 @@ const metadataRow = requiredElement<HTMLDivElement>("metadata-row");
 const clearQueueButton = requiredElement<HTMLButtonElement>("clear-queue-button");
 const speechicleList = requiredElement<HTMLDivElement>("speechicle-list");
 const queueActionMenu = requiredElement<HTMLDivElement>("queue-action-menu");
+const inboxReplyDialog = requiredElement<HTMLDialogElement>("inbox-reply-dialog");
+const inboxReplyForm = requiredElement<HTMLFormElement>("inbox-reply-form");
+const inboxReplyTitle = requiredElement<HTMLHeadingElement>("inbox-reply-title");
+const inboxReplyText = requiredElement<HTMLTextAreaElement>("inbox-reply-text");
+const inboxReplyStatus = requiredElement<HTMLDivElement>("inbox-reply-status");
+const inboxReplySubmit = requiredElement<HTMLButtonElement>("inbox-reply-submit");
+const inboxReplyCancel = requiredElement<HTMLButtonElement>("inbox-reply-cancel");
+const inboxReplyClose = requiredElement<HTMLButtonElement>("inbox-reply-close");
 const commandStatus = requiredElement<HTMLDivElement>("command-status");
 commandStatus.removeAttribute("role");
 commandStatus.removeAttribute("aria-live");
@@ -193,6 +201,8 @@ let ringSettlingAnimations: Animation[] = [];
 let playbackExpanded = false;
 let lastFollowedPieceKey: string | null = null;
 let composerOpen = false;
+let inboxReplyItemId: string | null = null;
+let inboxReplyPending = false;
 
 const POINTER_GESTURE_THRESHOLD = 5;
 const QUEUE_REORDER_ANIMATION_MS = 140;
@@ -1111,11 +1121,12 @@ function handleHistoryReorderKey(event: KeyboardEvent, id: string): void {
 function timelineRenderKey(items: TimelineItem[], historyTotal: number): string {
   return JSON.stringify([
     historyTotal,
-    items.map(({ id, text, voice, source, kind, position }) => [
+    items.map(({ id, text, voice, source, inbox, kind, position }) => [
       id,
       text,
       voice,
       source,
+      inbox,
       kind,
       position,
     ]),
@@ -1152,6 +1163,7 @@ function reconcileTimelineNodes(items: TimelineItem[]): boolean {
         !row.classList.contains(`is-${item.kind}`) ||
         row.dataset.voice !== item.voice ||
         row.dataset.source !== (item.source ?? "") ||
+        row.dataset.inbox !== (item.inbox ?? "") ||
         row.querySelector(".queue-copy p")?.textContent !== item.text;
     })
   ) {
@@ -1224,7 +1236,12 @@ function setOpenActionMenu(itemId: string | null): void {
       () => void playTimelineItem(item),
     ));
   }
-  actions.push(createVoiceSelect(item));
+  if (item.inbox) {
+    actions.push(createMenuAction(
+      "Send message",
+      () => openInboxReply(item),
+    ));
+  }
   actions.push(createMenuAction(
     "Copy text",
     () => void desktopApi?.copyText(item.text),
@@ -1268,7 +1285,7 @@ function setOpenActionMenu(itemId: string | null): void {
   queueActionMenu.style.left = `${left}px`;
   queueActionMenu.style.top = `${top}px`;
   if (shouldFocus) {
-    queueActionMenu.querySelector<HTMLElement>("button, select")?.focus();
+    queueActionMenu.querySelector<HTMLElement>("button")?.focus();
   }
 }
 
@@ -1302,20 +1319,34 @@ function createMenuAction(
   return button;
 }
 
-function createVoiceSelect(item: TimelineItem): HTMLSelectElement {
-  const select = document.createElement("select");
-  select.className = "queue-menu-voice";
-  select.setAttribute("aria-label", `Change voice for ${itemReference(item)}`);
-  populateVoiceSelect(select, item.voice, "Change voice");
-  select.addEventListener("change", () => {
-    if (!select.value) {
-      return;
-    }
-    const voice = select.value;
-    closeActionMenu(true);
-    void playTimelineItem(item, voice);
-  });
-  return select;
+function renderInboxReplyControls(): void {
+  const hasMessage = inboxReplyText.value.trim().length > 0;
+  inboxReplyText.disabled = inboxReplyPending;
+  inboxReplySubmit.disabled = inboxReplyPending || !hasMessage;
+  inboxReplyCancel.disabled = inboxReplyPending;
+  inboxReplyClose.disabled = inboxReplyPending;
+  inboxReplySubmit.textContent = inboxReplyPending ? "Sending" : "Send";
+}
+
+function openInboxReply(item: TimelineItem): void {
+  if (!item.inbox) {
+    return;
+  }
+  inboxReplyItemId = item.id;
+  inboxReplyTitle.textContent = item.source
+    ? `Message ${item.source}`
+    : "Message agent";
+  inboxReplyText.value = "";
+  inboxReplyStatus.textContent = "";
+  renderInboxReplyControls();
+  inboxReplyDialog.showModal();
+  requestAnimationFrame(() => inboxReplyText.focus());
+}
+
+function closeInboxReply(): void {
+  if (!inboxReplyPending && inboxReplyDialog.open) {
+    inboxReplyDialog.close();
+  }
 }
 
 function updateTimelineDividers(items: TimelineItem[], historyTotal: number): void {
@@ -1437,6 +1468,7 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     row.dataset.itemId = item.id;
     row.dataset.voice = item.voice;
     row.dataset.source = item.source ?? "";
+    row.dataset.inbox = item.inbox ?? "";
     const isCurrent = item.kind === "current";
     const isWaiting = item.kind === "waiting";
     const isExpanded = item.id === expandedItemId;
@@ -1647,10 +1679,6 @@ function updateTimelineRows(items: TimelineItem[]): void {
     ".queue-menu-action",
   )) {
     action.disabled = timelineCommandInFlight;
-  }
-  const voiceSelect = queueActionMenu.querySelector<HTMLSelectElement>(".queue-menu-voice");
-  if (voiceSelect) {
-    voiceSelect.disabled = timelineCommandInFlight;
   }
 }
 
@@ -1945,6 +1973,41 @@ speechComposer.addEventListener("submit", async (event) => {
     composerOpen = false;
     composerText.value = "";
     composerActions.classList.add("is-hidden");
+  }
+});
+
+inboxReplyText.addEventListener("input", renderInboxReplyControls);
+inboxReplyCancel.addEventListener("click", closeInboxReply);
+inboxReplyClose.addEventListener("click", closeInboxReply);
+inboxReplyDialog.addEventListener("cancel", (event) => {
+  if (inboxReplyPending) {
+    event.preventDefault();
+  }
+});
+inboxReplyDialog.addEventListener("close", () => {
+  inboxReplyItemId = null;
+  inboxReplyText.value = "";
+  inboxReplyStatus.textContent = "";
+});
+inboxReplyForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const speechicleId = inboxReplyItemId;
+  const text = inboxReplyText.value.trim();
+  if (!speechicleId || !text || inboxReplyPending || !desktopApi) {
+    return;
+  }
+  inboxReplyPending = true;
+  inboxReplyStatus.textContent = "";
+  renderInboxReplyControls();
+  try {
+    await desktopApi.sendInboxMessage(speechicleId, text);
+    commandStatus.textContent = "Message sent";
+    inboxReplyDialog.close();
+  } catch {
+    inboxReplyStatus.textContent = "Could not send. Try again.";
+  } finally {
+    inboxReplyPending = false;
+    renderInboxReplyControls();
   }
 });
 

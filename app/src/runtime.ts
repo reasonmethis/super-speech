@@ -6,12 +6,13 @@ export type RuntimeState =
   | "setup_required"
   | "stopped";
 
-export const ENGINE_STATUS_VERSION = 13 as const;
+export const ENGINE_STATUS_VERSION = 14 as const;
 
 const SPEECHICLE_ID = /^sp_[0-9a-f]{32}$/;
 const MUTATION_REQUEST_ID = /^[0-9a-f]{24}$/;
 const KOKORO_VOICE_ID = /^[ab][fm]_[a-z0-9_]+$/;
 const SOURCE_LABEL_MAX = 80;
+const INBOX_PATH_MAX = 4_096;
 
 export function isSpeechicleId(value: unknown): value is string {
   return typeof value === "string" && SPEECHICLE_ID.test(value);
@@ -71,6 +72,7 @@ export interface SpeechicleItem {
   text: string;
   voice: string;
   source?: string;
+  inbox?: string;
 }
 
 export interface CurrentItem extends SpeechicleItem {
@@ -267,7 +269,8 @@ function isSpeechicleItem(value: unknown): value is SpeechicleItem {
     !("filename" in item) &&
     typeof item.text === "string" &&
     typeof item.voice === "string" &&
-    (item.source === undefined || isSourceLabel(item.source))
+    (item.source === undefined || isSourceLabel(item.source)) &&
+    (item.inbox === undefined || isInboxPath(item.inbox))
   );
 }
 
@@ -404,6 +407,7 @@ function timelineItem(
     text: item.text,
     voice: item.voice,
     ...(item.source === undefined ? {} : { source: item.source }),
+    ...(item.inbox === undefined ? {} : { inbox: item.inbox }),
     kind,
     position,
   };
@@ -491,6 +495,22 @@ function isSourceLabel(value: unknown): value is string {
   const length = [...value].length;
   return length > 0 &&
     length <= SOURCE_LABEL_MAX &&
+    value.trim() === value &&
+    ![...value].some((character) => {
+      const code = character.codePointAt(0) ?? 0;
+      return code < 32 || code === 127;
+    });
+}
+
+function isInboxPath(value: unknown): value is string {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const absolute = value.startsWith("/") ||
+    /^[a-z]:[\\/]/i.test(value) ||
+    /^\\\\[^\\/]+[\\/][^\\/]+/.test(value);
+  return absolute &&
+    value.length <= INBOX_PATH_MAX &&
     value.trim() === value &&
     ![...value].some((character) => {
       const code = character.codePointAt(0) ?? 0;
@@ -724,6 +744,7 @@ export interface DesktopApi {
   mutateTimeline(
     mutation: TimelineMutation,
   ): Promise<TimelineMutationResult<RuntimeStatus>>;
+  sendInboxMessage(speechicleId: string, text: string): Promise<void>;
   copyText(text: string): Promise<void>;
   openSetup(): Promise<void>;
   minimize(): Promise<void>;
@@ -744,6 +765,7 @@ export const IPC_CHANNELS = {
   getVersions: "runtime:get-versions",
   setPaused: "runtime:set-paused",
   mutateTimeline: "runtime:mutate-timeline",
+  sendInboxMessage: "runtime:send-inbox-message",
   copyText: "runtime:copy-text",
   openSetup: "app:open-setup",
   minimize: "window:minimize",

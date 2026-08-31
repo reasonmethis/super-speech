@@ -22,6 +22,7 @@ const electronExecutable = path.join(
 const root = mkdtempSync(path.join(tmpdir(), "super-speech-drag-"));
 const runtime = path.join(root, "runtime");
 const profile = path.join(root, "profile");
+const inbox = path.join(root, "agent-inbox.jsonl");
 const environment = {
   ...process.env,
   SUPER_SPEECH_ENGINE_PATH: engine,
@@ -64,7 +65,7 @@ function status() {
     assert.match(row.id, /^sp_[0-9a-f]{32}$/, "Status leaked an invalid Speechicle ID");
     assert(!Object.hasOwn(row, "filename"), "Status leaked an internal filename");
   }
-  assert.equal(snapshot.version, 13, "Pointer smoke requires the current status schema");
+  assert.equal(snapshot.version, 14, "Pointer smoke requires the current status schema");
   assert(Number.isInteger(snapshot.timeline_revision));
   assert(snapshot.timeline_revision >= 0);
   return snapshot;
@@ -271,9 +272,16 @@ try {
     "Drag test one has enough words to keep silent playback active while the interface checks that playing and paused layouts stay perfectly aligned.",
     "--source",
     "Codex: Drag smoke",
+    "--inbox",
+    inbox,
   );
-  runEngine("speak", "Drag test two also has enough words to keep the silent replay observable during the double click interaction test.");
-  runEngine("speak", "Drag test three");
+  runEngine(
+    "speak",
+    "Drag test two also has enough words to keep the silent replay observable during the double click interaction test.",
+    "--inbox",
+    inbox,
+  );
+  runEngine("speak", "Drag test three", "--inbox", inbox);
   await waitFor(
     () => status().current && status().queue_count === 2,
     "The silent drag fixture did not reach the queue state",
@@ -950,7 +958,9 @@ try {
     0,
     "Timeline rows must not render separate disclosure buttons",
   );
-  const menuRow = remainingRows.first();
+  const menuRow = page.locator(
+    '.speechicle-item.is-waiting[data-inbox]:not([data-inbox=""])',
+  ).first();
   const menuRowId = await menuRow.getAttribute("data-item-id");
   const menuRowBounds = await menuRow.boundingBox();
   const dragHandleBounds = await menuRow.locator(".timeline-drag-handle").boundingBox();
@@ -1035,12 +1045,7 @@ try {
   );
   assert.deepEqual(
     await visibleActions.locator(".queue-menu-action").allTextContents(),
-    ["Play", "Copy text", "Delete"],
-  );
-  assert(
-    (await visibleActions.locator(".queue-menu-voice").getAttribute("aria-label"))
-      ?.startsWith("Change voice for waiting speech"),
-    "Waiting speech must offer a voice selector",
+    ["Play", "Send message", "Copy text", "Delete"],
   );
   assert.equal(
     await visibleActions.locator(".queue-menu-action").first().evaluate(
@@ -1064,6 +1069,49 @@ try {
       path: path.join(screenshot.dir, `${screenshot.name}-menu${screenshot.ext}`),
     });
   }
+  await visibleActions.getByRole("button", { name: "Send message" }).click();
+  const replyDialog = page.locator("#inbox-reply-dialog");
+  assert(await replyDialog.isVisible(), "Send message did not open the reply dialog");
+  assert.equal(await visibleActions.count(), 0, "The row menu stayed open behind the reply dialog");
+  assert.equal(await page.locator("#inbox-reply-title").textContent(), "Message agent");
+  if (process.env.SUPER_SPEECH_SCREENSHOT) {
+    const screenshot = path.parse(process.env.SUPER_SPEECH_SCREENSHOT);
+    await page.screenshot({
+      path: path.join(screenshot.dir, `${screenshot.name}-reply${screenshot.ext}`),
+    });
+  }
+  const replyText = "Please check the silent reply path.";
+  await page.locator("#inbox-reply-text").fill(replyText);
+  await page.locator("#inbox-reply-submit").click();
+  await waitFor(
+    async () => !(await replyDialog.isVisible()),
+    "The reply dialog did not close after a successful send",
+  );
+  const inboxMessages = readFileSync(inbox, "utf8")
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(inboxMessages.length, 1);
+  assert.deepEqual(
+    {
+      version: inboxMessages[0].version,
+      kind: inboxMessages[0].kind,
+      speechicle_id: inboxMessages[0].speechicle_id,
+      source: inboxMessages[0].source,
+      text: inboxMessages[0].text,
+    },
+    {
+      version: 1,
+      kind: "user_message",
+      speechicle_id: menuRowId,
+      source: undefined,
+      text: replyText,
+    },
+    "The app did not append the expected agent message",
+  );
+  assert.match(inboxMessages[0].id, /^[0-9a-f-]{36}$/);
+  assert.equal(new Date(inboxMessages[0].sent_at).toISOString(), inboxMessages[0].sent_at);
+  await menuButton.click();
   await electronApp.evaluate(({ clipboard }) => {
     globalThis.__superSpeechSmokeClipboard = null;
     clipboard.writeText = (text) => {
@@ -1092,13 +1140,8 @@ try {
   );
   assert.deepEqual(
     await visibleActions.locator(".queue-menu-action").allTextContents(),
-    ["Play", "Copy text", "Delete"],
+    ["Play", "Send message", "Copy text", "Delete"],
     "History must use the same Play label and expose Delete",
-  );
-  assert.equal(
-    await visibleActions.locator(".queue-menu-voice option").first().textContent(),
-    "Change voice",
-    "History must offer the same voice selector",
   );
   await page.locator("#speech-heading").click();
   if (process.env.SUPER_SPEECH_SCREENSHOT) {
@@ -1432,8 +1475,8 @@ try {
   );
   assert.equal(
     await page.locator("#queue-action-menu .queue-menu-voice").count(),
-    1,
-    "Current speech must offer Change voice",
+    0,
+    "The row menu must not duplicate inline voice selection",
   );
   await page.locator("#speech-heading").click();
   const currentVoiceSelect = page.locator(

@@ -7,6 +7,8 @@ const api: DesktopApi = {
   setPaused: (paused) => ipcRenderer.invoke(IPC_CHANNELS.setPaused, paused),
   mutateTimeline: (mutation) =>
     ipcRenderer.invoke(IPC_CHANNELS.mutateTimeline, mutation),
+  sendInboxMessage: (speechicleId, text) =>
+    ipcRenderer.invoke(IPC_CHANNELS.sendInboxMessage, speechicleId, text),
   copyText: (text) => ipcRenderer.invoke(IPC_CHANNELS.copyText, text),
   openSetup: () => ipcRenderer.invoke(IPC_CHANNELS.openSetup),
   minimize: () => ipcRenderer.invoke(IPC_CHANNELS.minimize),
