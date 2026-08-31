@@ -565,7 +565,7 @@ body[data-state="loading"] .playback-copy {
 .speech-composer {
   display: flex;
   width: min(100%, 460px);
-  margin: 12px auto 0;
+  margin: 20px auto 0;
   flex-direction: column;
   gap: 8px;
   user-select: text;

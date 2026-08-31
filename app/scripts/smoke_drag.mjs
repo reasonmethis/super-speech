@@ -1414,7 +1414,7 @@ try {
   const composer = page.locator("#composer-text");
   assert(await composer.isVisible(), "Clicking idle copy must open the editor");
   assert.equal(await composer.evaluate((element) => element === document.activeElement), true);
-  assert.equal(await composer.getAttribute("placeholder"), "Type something to speak");
+  assert.equal(await composer.getAttribute("placeholder"), null);
   const compactComposerBounds = await composer.boundingBox();
   assert(
     compactComposerBounds && compactComposerBounds.height <= 32,
