@@ -1404,12 +1404,14 @@ try {
     async () => await page.locator("body").getAttribute("data-state") === "idle",
     "The renderer did not become Ready after Clear all",
   );
-  assert.equal(await page.locator("#playback-copy").getAttribute("role"), "button");
+  assert.equal(await page.locator("#playback-copy").getAttribute("role"), null);
+  assert.equal(await page.locator("#playback-copy").getAttribute("aria-label"), null);
+  assert.equal(await page.locator("#playback-copy").getAttribute("aria-describedby"), null);
+  assert.equal(await page.locator("#current-text").getAttribute("role"), "button");
   assert.equal(
-    await page.locator("#playback-copy").getAttribute("aria-label"),
+    await page.locator("#current-text").getAttribute("aria-label"),
     "Type a Speechicle",
   );
-  assert.equal(await page.locator("#playback-copy").getAttribute("aria-describedby"), null);
   assert(
     await page.locator("#current-text").textContent().then((text) =>
       text?.includes("click to type something")
@@ -1441,9 +1443,14 @@ try {
   }
 
   const composerText = "A manual Speechicle created from pasted text.";
-  await page.locator("#playback-copy").click();
+  await page.locator("#playback-title").click();
+  assert(
+    !await page.locator("#speech-composer").isVisible(),
+    "Clicking the idle title must not open the editor",
+  );
+  await page.locator("#current-text").click();
   const composer = page.locator("#composer-text");
-  assert(await composer.isVisible(), "Clicking idle copy must open the editor");
+  assert(await composer.isVisible(), "Clicking the idle explanation must open the editor");
   await waitFor(
     async () => await composer.evaluate((element) => element === document.activeElement),
     "Opening the composer did not focus its text field",
@@ -1463,10 +1470,10 @@ try {
   }
   await composer.pressSequentially(composerText);
   assert.equal(await composer.inputValue(), composerText);
-  await page.locator("#speech-heading").click();
+  await page.locator("#playback-title").click();
   assert(
     !await page.locator("#speech-composer").isVisible(),
-    "Clicking outside the composer must restore the idle copy",
+    "Clicking the idle title must close the editor without reopening it",
   );
   assert(await page.locator("#current-text").isVisible());
   assert(
@@ -1475,7 +1482,7 @@ try {
     ),
     "Closing the composer must restore the idle instructions",
   );
-  await page.locator("#playback-copy").click();
+  await page.locator("#current-text").click();
   assert.equal(await composer.inputValue(), composerText, "Closing must preserve the draft");
   await waitFor(
     async () => await composer.evaluate((element) => element === document.activeElement),

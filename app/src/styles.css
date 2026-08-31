@@ -529,12 +529,12 @@ body[data-state="loading"] .playback-icon,
   cursor: pointer;
 }
 
-.playback-copy.is-composable {
+.current-text.is-composable {
   cursor: text;
 }
 
 .playback-copy.is-expandable:focus-visible,
-.playback-copy.is-composable:focus-visible {
+.current-text.is-composable:focus-visible {
   outline: 2px solid var(--accent-bright);
   outline-offset: 5px;
 }

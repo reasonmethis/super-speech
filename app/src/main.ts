@@ -531,9 +531,9 @@ function render(status: RuntimeStatus): void {
     : null;
   const canExpand = followedCurrent !== null;
   playbackCopy.dataset.expandable = String(canExpand);
-  playbackCopy.dataset.composable = String(canOpenComposer);
   playbackCopy.classList.toggle("is-expandable", canExpand);
-  playbackCopy.classList.toggle("is-composable", canOpenComposer);
+  currentText.dataset.composable = String(canOpenComposer);
+  currentText.classList.toggle("is-composable", canOpenComposer);
   if (!canExpand && playbackExpanded) {
     const restoreFocus = playbackCopy.contains(document.activeElement);
     setPlaybackExpanded(false);
@@ -541,27 +541,30 @@ function render(status: RuntimeStatus): void {
       speechicleList.focus({ preventScroll: true });
     }
   }
-  if (canExpand || canOpenComposer) {
+  if (canExpand) {
     playbackCopy.tabIndex = 0;
     playbackCopy.setAttribute("role", "button");
-    if (canExpand) {
-      playbackCopy.setAttribute("aria-expanded", String(playbackExpanded));
-      playbackCopy.setAttribute("aria-describedby", "playback-title current-text");
-      playbackCopy.setAttribute(
-        "aria-label",
-        playbackExpanded ? "Collapse current speech text" : "Expand current speech text",
-      );
-    } else {
-      playbackCopy.removeAttribute("aria-expanded");
-      playbackCopy.removeAttribute("aria-describedby");
-      playbackCopy.setAttribute("aria-label", "Type a Speechicle");
-    }
+    playbackCopy.setAttribute("aria-expanded", String(playbackExpanded));
+    playbackCopy.setAttribute("aria-describedby", "playback-title current-text");
+    playbackCopy.setAttribute(
+      "aria-label",
+      playbackExpanded ? "Collapse current speech text" : "Expand current speech text",
+    );
   } else {
     playbackCopy.removeAttribute("tabindex");
     playbackCopy.removeAttribute("role");
     playbackCopy.removeAttribute("aria-expanded");
     playbackCopy.removeAttribute("aria-describedby");
     playbackCopy.removeAttribute("aria-label");
+  }
+  if (canOpenComposer) {
+    currentText.tabIndex = 0;
+    currentText.setAttribute("role", "button");
+    currentText.setAttribute("aria-label", "Type a Speechicle");
+  } else {
+    currentText.removeAttribute("tabindex");
+    currentText.removeAttribute("role");
+    currentText.removeAttribute("aria-label");
   }
   renderCurrentSpeechText(copy.body ?? "", followedCurrent);
 
@@ -1910,7 +1913,7 @@ function closeComposer(restoreFocus: boolean): void {
   composerOpen = false;
   render(currentStatus);
   if (restoreFocus) {
-    playbackCopy.focus({ preventScroll: true });
+    currentText.focus({ preventScroll: true });
   }
 }
 
@@ -1949,7 +1952,10 @@ playbackCopy.addEventListener("click", () => {
   if (playbackCopy.dataset.expandable === "true") {
     setPlaybackExpanded(!playbackExpanded);
     render(currentStatus);
-  } else if (playbackCopy.dataset.composable === "true") {
+  }
+});
+currentText.addEventListener("click", () => {
+  if (currentText.dataset.composable === "true") {
     composerOpen = true;
     render(currentStatus);
     requestAnimationFrame(() => composerText.focus());
@@ -1959,6 +1965,12 @@ playbackCopy.addEventListener("keydown", (event) => {
   if (event.target === playbackCopy && (event.key === "Enter" || event.key === " ")) {
     event.preventDefault();
     playbackCopy.click();
+  }
+});
+currentText.addEventListener("keydown", (event) => {
+  if (event.target === currentText && (event.key === "Enter" || event.key === " ")) {
+    event.preventDefault();
+    currentText.click();
   }
 });
 
@@ -2066,7 +2078,7 @@ document.addEventListener("pointerdown", (event) => {
   if (
     composerOpen &&
     event.target instanceof Element &&
-    !event.target.closest("#playback-copy")
+    !event.target.closest("#speech-composer")
   ) {
     closeComposer(false);
   }
