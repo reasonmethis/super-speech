@@ -6,6 +6,7 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  screen,
   shell,
   Tray,
 } from "electron";
@@ -55,6 +56,13 @@ import {
   trayPlaybackControl,
   trayPlaybackControlKey,
 } from "./tray-menu";
+import {
+  MINIMUM_WINDOW_SIZE,
+  readSavedWindowState,
+  restoredWindowBounds,
+  writeSavedWindowState,
+  type SavedWindowState,
+} from "./window-state";
 
 const HEARTBEAT_FRESHNESS_MS = 15_000;
 const ENGINE_STABLE_AFTER_MS = 30_000;
@@ -66,6 +74,8 @@ const ENGINE_FAILURES_BEFORE_ERROR = 3;
 const MODEL_MIN_BYTES = 300_000_000;
 const VOICES_MIN_BYTES = 20_000_000;
 const SETUP_URL = "https://github.com/reasonmethis/super-speech#desktop-app";
+const WINDOW_STATE_FILENAME = "window-state.json";
+const WINDOW_STATE_SAVE_DELAY_MS = 250;
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const rendererDir = path.join(moduleDir, "..", "dist");
 const smokeTest = process.argv.includes("--smoke-test");
@@ -84,6 +94,9 @@ let engineRestartTimer: NodeJS.Timeout | null = null;
 let quitting = false;
 let lastEngineStatus: EngineStatus | null = null;
 let lastTrayPlaybackControlKey: string | null = null;
+let windowStateSaveTimer: NodeJS.Timeout | null = null;
+let windowStateWrite = Promise.resolve();
+let windowStateFlushStarted = false;
 
 interface EngineLaunch {
   command: string;
@@ -782,6 +795,47 @@ function noticesPath(): string {
     : path.join(app.getAppPath(), "..", "THIRD_PARTY_NOTICES.md");
 }
 
+function windowStatePath(): string {
+  return path.join(app.getPath("userData"), WINDOW_STATE_FILENAME);
+}
+
+function captureWindowState(window: BrowserWindow): SavedWindowState {
+  return {
+    bounds: window.getNormalBounds(),
+    maximized: window.isMaximized(),
+  };
+}
+
+function persistWindowState(window: BrowserWindow): Promise<void> {
+  const state = captureWindowState(window);
+  windowStateWrite = windowStateWrite
+    .then(() => writeSavedWindowState(windowStatePath(), state))
+    .catch((error) => {
+      console.error("Could not save window position", error);
+    });
+  return windowStateWrite;
+}
+
+function scheduleWindowStateSave(window: BrowserWindow): void {
+  if (windowStateSaveTimer) {
+    clearTimeout(windowStateSaveTimer);
+  }
+  windowStateSaveTimer = setTimeout(() => {
+    windowStateSaveTimer = null;
+    if (!window.isDestroyed()) {
+      void persistWindowState(window);
+    }
+  }, WINDOW_STATE_SAVE_DELAY_MS);
+}
+
+function flushWindowState(window: BrowserWindow): Promise<void> {
+  if (windowStateSaveTimer) {
+    clearTimeout(windowStateSaveTimer);
+    windowStateSaveTimer = null;
+  }
+  return persistWindowState(window);
+}
+
 function showWindow(): void {
   if (!mainWindow || mainWindow.isDestroyed()) {
     createWindow();
@@ -795,12 +849,20 @@ function showWindow(): void {
 }
 
 function createWindow(): void {
+  const primaryDisplay = screen.getPrimaryDisplay();
+  const displayWorkAreas = [
+    primaryDisplay.workArea,
+    ...screen.getAllDisplays()
+      .filter(({ id }) => id !== primaryDisplay.id)
+      .map(({ workArea }) => workArea),
+  ];
+  const savedWindowState = readSavedWindowState(windowStatePath());
+  const initialBounds = restoredWindowBounds(savedWindowState, displayWorkAreas);
   mainWindow = new BrowserWindow({
     title: "Super Speech",
-    width: 420,
-    height: 680,
-    minWidth: 380,
-    minHeight: 620,
+    ...initialBounds,
+    minWidth: Math.min(MINIMUM_WINDOW_SIZE.width, initialBounds.width),
+    minHeight: Math.min(MINIMUM_WINDOW_SIZE.height, initialBounds.height),
     resizable: true,
     maximizable: true,
     fullscreenable: false,
@@ -819,7 +881,6 @@ function createWindow(): void {
       backgroundThrottling: false,
     },
   });
-
   mainWindow.on("close", (event) => {
     if (!quitting) {
       event.preventDefault();
@@ -829,13 +890,34 @@ function createWindow(): void {
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
+  mainWindow.on("move", () => {
+    if (mainWindow) {
+      scheduleWindowStateSave(mainWindow);
+    }
+  });
+  mainWindow.on("resize", () => {
+    if (mainWindow) {
+      scheduleWindowStateSave(mainWindow);
+    }
+  });
   mainWindow.on("maximize", () => {
     mainWindow?.webContents.send(IPC_CHANNELS.maximizedChanged, true);
+    if (mainWindow) {
+      scheduleWindowStateSave(mainWindow);
+    }
   });
   mainWindow.on("unmaximize", () => {
     mainWindow?.webContents.send(IPC_CHANNELS.maximizedChanged, false);
+    if (mainWindow) {
+      scheduleWindowStateSave(mainWindow);
+    }
   });
   mainWindow.once("ready-to-show", () => {
+    // Reapply saved bounds after Windows creates the frameless native window
+    mainWindow?.setBounds(initialBounds);
+    if (savedWindowState?.maximized) {
+      mainWindow?.maximize();
+    }
     if (!startHidden) {
       mainWindow?.show();
     }
@@ -944,10 +1026,15 @@ if (!hasSingleInstanceLock) {
       showWindow();
     }
   });
-  app.on("before-quit", () => {
+  app.on("before-quit", (event) => {
     quitting = true;
     stopEngineHealthMonitor();
     stopOwnedEngine();
+    if (!windowStateFlushStarted && mainWindow && !mainWindow.isDestroyed()) {
+      event.preventDefault();
+      windowStateFlushStarted = true;
+      void flushWindowState(mainWindow).finally(() => app.quit());
+    }
   });
   app.on("activate", showWindow);
   app.on("window-all-closed", () => {

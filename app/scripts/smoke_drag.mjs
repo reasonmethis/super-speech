@@ -82,6 +82,15 @@ function processExists(processId) {
   }
 }
 
+function launchApp() {
+  return electron.launch({
+    executablePath: electronExecutable,
+    args: [appDirectory, "--hidden", `--user-data-dir=${profile}`],
+    cwd: appDirectory,
+    env: environment,
+  });
+}
+
 async function waitFor(predicate, message, timeout = 15_000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
@@ -285,13 +294,8 @@ try {
   );
   enginePid = status().engine_pid;
 
-  electronApp = await electron.launch({
-    executablePath: electronExecutable,
-    args: [appDirectory, "--hidden", `--user-data-dir=${profile}`],
-    cwd: appDirectory,
-    env: environment,
-  });
-  const page = await electronApp.firstWindow();
+  electronApp = await launchApp();
+  let page = await electronApp.firstWindow();
   await waitFor(
     async () => await page.locator("body").getAttribute("data-state") === "paused",
     "The renderer did not settle into the paused fixture",
@@ -474,6 +478,17 @@ try {
     true,
     "The maximize button must maximize the window",
   );
+  const savedWindowStatePath = path.join(profile, "window-state.json");
+  await waitFor(
+    () => {
+      try {
+        return JSON.parse(readFileSync(savedWindowStatePath, "utf8")).maximized === true;
+      } catch {
+        return false;
+      }
+    },
+    "Maximizing the window did not persist its state",
+  );
   await maximizeButton.click();
   await waitFor(
     async () => await maximizeButton.getAttribute("aria-label") === "Maximize",
@@ -485,6 +500,66 @@ try {
     ),
     false,
     "The maximize button must restore the window",
+  );
+  await waitFor(
+    () => {
+      try {
+        const saved = JSON.parse(readFileSync(savedWindowStatePath, "utf8"));
+        return saved.maximized === false &&
+          Number.isInteger(saved.bounds?.x) &&
+          Number.isInteger(saved.bounds?.y) &&
+          Number.isInteger(saved.bounds?.width) &&
+          Number.isInteger(saved.bounds?.height);
+      } catch {
+        return false;
+      }
+    },
+    "Restoring the window did not persist its normal bounds",
+  );
+  const restartBounds = await electronApp.evaluate(({ BrowserWindow, screen }) => {
+    const workArea = screen.getPrimaryDisplay().workArea;
+    const width = Math.min(560, workArea.width);
+    const height = Math.min(760, workArea.height);
+    const bounds = {
+      x: workArea.x + Math.round((workArea.width - width) / 3),
+      y: workArea.y + Math.round((workArea.height - height) / 3),
+      width,
+      height,
+    };
+    const window = BrowserWindow.getAllWindows()[0];
+    window?.setBounds(bounds);
+    return window?.getBounds();
+  });
+  assert(restartBounds, "The window must exist before testing saved bounds");
+  await waitFor(
+    () => {
+      try {
+        return JSON.stringify(JSON.parse(readFileSync(savedWindowStatePath, "utf8")).bounds) ===
+          JSON.stringify(restartBounds);
+      } catch {
+        return false;
+      }
+    },
+    "Moving and resizing the window did not persist its bounds",
+  );
+  await electronApp.close();
+  electronApp = null;
+  electronApp = await launchApp();
+  page = await electronApp.firstWindow();
+  await waitFor(
+    async () => await page.locator("body").getAttribute("data-state") === "paused",
+    "The renderer did not recover after the window-state restart",
+  );
+  await waitFor(
+    async () => {
+      const restoredBounds = await electronApp.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()[0]?.getBounds()
+      );
+      return restoredBounds && ["x", "y", "width", "height"].every((key) =>
+        Math.abs(restoredBounds[key] - restartBounds[key]) <= 1
+      );
+    },
+    "The app did not restore its saved bounds after restart",
   );
   await page.locator(".speechicle-item.is-waiting").first().waitFor();
   await waitFor(
