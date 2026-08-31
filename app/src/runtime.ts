@@ -468,9 +468,12 @@ function isKokoroVoiceId(value: unknown): value is string {
 }
 
 function isSourceLabel(value: unknown): value is string {
-  return typeof value === "string" &&
-    value.length > 0 &&
-    value.length <= SOURCE_LABEL_MAX &&
+  if (typeof value !== "string") {
+    return false;
+  }
+  const length = [...value].length;
+  return length > 0 &&
+    length <= SOURCE_LABEL_MAX &&
     value.trim() === value &&
     ![...value].some((character) => {
       const code = character.codePointAt(0) ?? 0;
@@ -499,12 +502,15 @@ export function parseTimelineMutation(value: unknown): TimelineMutation | null {
     return hasOnlyFields(mutation, ["type"]) ? { type: "clear" } : null;
   }
   if (mutation.type === "enqueue") {
+    const source = typeof mutation.source === "string"
+      ? mutation.source.trim()
+      : mutation.source;
     if (
       !hasOnlyFields(mutation, ["type", "text", "voice", "source"]) ||
       typeof mutation.text !== "string" ||
       !mutation.text.trim() ||
       !isKokoroVoiceId(mutation.voice) ||
-      (mutation.source !== undefined && !isSourceLabel(mutation.source))
+      (source !== undefined && !isSourceLabel(source))
     ) {
       return null;
     }
@@ -512,7 +518,7 @@ export function parseTimelineMutation(value: unknown): TimelineMutation | null {
       type: "enqueue",
       text: mutation.text.trim(),
       voice: mutation.voice,
-      ...(mutation.source === undefined ? {} : { source: mutation.source }),
+      ...(source === undefined ? {} : { source }),
     };
   }
   if (!isSpeechicleId(mutation.id)) {

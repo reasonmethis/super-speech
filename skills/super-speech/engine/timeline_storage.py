@@ -655,6 +655,7 @@ class TimelineStorage:
         source: str | None = None,
     ) -> Path:
         """Create one Queue file without enumerating the stored timeline."""
+        source = normalize_source_label(source)
         with self.mutation():
             self._recover_current_plan()
             namespace, sequence = self._read_sequence_counter()

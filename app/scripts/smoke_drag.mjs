@@ -234,7 +234,12 @@ async function playbackExpansionSnapshot(page) {
 }
 
 try {
-  runEngine("speak", "Drag test one has enough words to keep silent playback active while the interface checks that playing and paused layouts stay perfectly aligned.");
+  runEngine(
+    "speak",
+    "Drag test one has enough words to keep silent playback active while the interface checks that playing and paused layouts stay perfectly aligned.",
+    "--source",
+    "Codex: Drag smoke",
+  );
   runEngine("speak", "Drag test two also has enough words to keep the silent replay observable during the double click interaction test.");
   runEngine("speak", "Drag test three");
   await waitFor(
@@ -281,6 +286,11 @@ try {
     "playback-title current-text",
   );
   await page.locator(".speechicle-item.is-current").waitFor();
+  assert.equal(await page.locator("#source-label").textContent(), "Codex: Drag smoke");
+  assert.equal(
+    await page.locator(".speechicle-item.is-current .speechicle-source").textContent(),
+    "Codex: Drag smoke",
+  );
   assert(
     await page.locator(".speechicle-item.is-current").evaluate((row) => {
       const rowBounds = row.getBoundingClientRect();
@@ -902,9 +912,10 @@ try {
     await menuButton.locator("span").evaluate((dot) => getComputedStyle(dot).width),
     "2.5px",
   );
+  assert.equal(await menuRow.locator(".speechicle-voice").inputValue(), "af_heart");
   assert.equal(
-    await menuRow.locator(".queue-meta").textContent(),
-    "Heart",
+    await menuRow.locator(".speechicle-status:not(.is-hidden)").count(),
+    0,
     "Waiting rows must not repeat the double-click instruction",
   );
   if (process.env.SUPER_SPEECH_SCREENSHOT) {
@@ -1284,7 +1295,10 @@ try {
     1,
     "Current speech must offer Change voice",
   );
-  const currentVoiceSelect = page.locator("#queue-action-menu .queue-menu-voice");
+  await page.locator("#speech-heading").click();
+  const currentVoiceSelect = page.locator(
+    `[data-item-id="${currentBeforeVoiceChange.id}"] .speechicle-voice`,
+  );
   await currentVoiceSelect.selectOption("bm_fable");
   assert.equal(
     await page.locator("body").getAttribute("data-state"),
@@ -1345,6 +1359,37 @@ try {
       path: path.join(screenshot.dir, `${screenshot.name}-idle${screenshot.ext}`),
     });
   }
+
+  const composerText = "A manual Speechicle created from pasted text.";
+  await page.locator("#composer-text").fill(composerText);
+  assert(
+    await page.locator("#composer-actions").isVisible(),
+    "Typing must reveal the manual speech controls",
+  );
+  await page.locator("#composer-voice").selectOption("bm_george");
+  await page.locator("#composer-submit").click();
+  await waitFor(
+    () => status().current?.text === composerText && status().current?.source === "Manual",
+    "The composer did not add the manual Speechicle",
+    30_000,
+  );
+  await waitFor(
+    async () =>
+      await page.locator("#playback-title").textContent() === "George" &&
+      await page.locator("#source-label").textContent() === "Manual",
+    "The renderer did not show the manual voice and source",
+  );
+  assert.equal(
+    await page.locator(".speechicle-item.is-current .speechicle-voice").inputValue(),
+    "bm_george",
+  );
+  runEngine("pause");
+  await waitFor(() => status().state === "paused", "Manual speech did not pause");
+  mutateTimeline({ type: "clear" });
+  await waitFor(
+    () => status().current === null && status().queue_count === 0,
+    "The manual composer fixture did not clear",
+  );
 
   runEngine(
     "speak",

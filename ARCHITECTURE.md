@@ -65,6 +65,11 @@ Each runtime has three speech directories:
 - `spoken/` owns History membership
 - `failed/` holds speech that could not be prepared
 
+Optional source labels are stored in `sources/` as small JSON files keyed by
+public Speechicle ID. A label therefore follows the same Speechicle across
+voice changes and moves between Queue and History. Missing or damaged label
+metadata never prevents playback.
+
 A Queue filename looks like:
 
 ```text
@@ -126,7 +131,7 @@ Each snapshot contains:
 - The total History count, which may be larger than the visible list
 - Engine process ID, lifecycle state, and publication time
 - A timeline revision that increases when visible identity, order, voice, or
-  History count changes
+  source label or History count changes
 - The current piece number and its Unicode text offsets
 
 For historical protocol compatibility, JSON `current` contains Current while
@@ -149,9 +154,9 @@ paused across an engine restart. Skip, Stop, and Interrupt name the engine
 process they belong to, so an old destructive command cannot affect a
 replacement process.
 
-Play, move, archive, delete, voice change, and clear use one kind of saved change
-file. Requests are stored on disk and handled one at a time in creation order.
-Each result says:
+Enqueue from the desktop, Play, move, archive, delete, voice change, and clear
+use one kind of saved change file. Requests are stored on disk and handled one
+at a time in creation order. Each result says:
 
 - `committed` when the change finished
 - `rejected` when nothing changed and the engine can explain why

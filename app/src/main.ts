@@ -34,6 +34,7 @@ const demoStatus: RuntimeStatus = {
     id: "sp_00000000000000000000000000000014",
     text: "The first desktop version is taking shape. You can pause it without losing your place.",
     voice: "af_heart",
+    source: "Codex demo",
     piece: 1,
     piece_count: 2,
     piece_start: 0,
@@ -46,6 +47,7 @@ const demoStatus: RuntimeStatus = {
       id: "sp_00000000000000000000000000000015",
       text: "Click this speech item to expand it, or double-click to play it now.",
       voice: "bm_fable",
+      source: "Claude demo",
     },
     {
       id: "sp_00000000000000000000000000000016",
@@ -76,8 +78,15 @@ const playbackCard = requiredElement<HTMLElement>("playback-card");
 const playbackCopy = requiredElement<HTMLDivElement>("playback-copy");
 const playbackTitle = requiredElement<HTMLHeadingElement>("playback-title");
 const currentText = requiredElement<HTMLParagraphElement>("current-text");
+const speechComposer = requiredElement<HTMLFormElement>("speech-composer");
+const composerText = requiredElement<HTMLTextAreaElement>("composer-text");
+const composerActions = requiredElement<HTMLDivElement>("composer-actions");
+const composerVoice = requiredElement<HTMLSelectElement>("composer-voice");
+const composerSubmit = requiredElement<HTMLButtonElement>("composer-submit");
 const voicePill = requiredElement<HTMLSpanElement>("voice-pill");
 const voiceLabel = requiredElement<HTMLSpanElement>("voice-label");
+const sourcePill = requiredElement<HTMLSpanElement>("source-pill");
+const sourceLabel = requiredElement<HTMLSpanElement>("source-label");
 const metadataRow = requiredElement<HTMLDivElement>("metadata-row");
 const clearQueueButton = requiredElement<HTMLButtonElement>("clear-queue-button");
 const speechicleList = requiredElement<HTMLDivElement>("speechicle-list");
@@ -117,6 +126,7 @@ for (const button of themeButtons) {
 }
 
 type PlayMutation = Extract<TimelineMutation, { type: "play" }>;
+type EnqueueMutation = Extract<TimelineMutation, { type: "enqueue" }>;
 type RowMutation = Extract<
   TimelineMutation,
   { type: "move" | "archive" | "delete" }
@@ -130,6 +140,7 @@ type PendingTimelineMutation =
     item: TimelineItem;
     playbackState: "playing" | "paused";
   }
+  | { kind: "enqueue"; mutation: EnqueueMutation }
   | { kind: "row"; mutation: RowMutation; item: TimelineItem }
   | { kind: "clear"; mutation: ClearMutation };
 
@@ -182,6 +193,7 @@ let lastFollowedPieceKey: string | null = null;
 const POINTER_GESTURE_THRESHOLD = 5;
 const QUEUE_REORDER_ANIMATION_MS = 140;
 const CHUNK_DOUBLE_CLICK_MS = 400;
+const MANUAL_SOURCE = "Manual";
 
 function timelineMutationBlocked(): boolean {
   return commandPending || pendingTimelineMutation !== null;
@@ -211,6 +223,47 @@ const voiceLabels = new Map<string, string>(
 
 function formatVoice(voice: string): string {
   return voiceLabels.get(voice) ?? voice.replace(/^[a-z]{2}_/, "").replaceAll("_", " ");
+}
+
+function populateVoiceSelect(
+  select: HTMLSelectElement,
+  selectedVoice: string,
+  prompt?: string,
+): void {
+  select.replaceChildren();
+  if (prompt) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = prompt;
+    select.append(option);
+  }
+  const groups = new Map<string, HTMLOptGroupElement>();
+  for (const [id, label, group] of VOICE_OPTIONS) {
+    let options = groups.get(group);
+    if (!options) {
+      options = document.createElement("optgroup");
+      options.label = group;
+      groups.set(group, options);
+      select.append(options);
+    }
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = label;
+    option.selected = !prompt && id === selectedVoice;
+    option.disabled = Boolean(prompt) && id === selectedVoice;
+    options.append(option);
+  }
+}
+
+populateVoiceSelect(composerVoice, "af_heart");
+
+function renderComposerControls(): void {
+  const hasText = composerText.value.trim() !== "";
+  const blocked = timelineMutationBlocked();
+  composerActions.classList.toggle("is-hidden", !hasText);
+  composerText.disabled = blocked;
+  composerVoice.disabled = blocked;
+  composerSubmit.disabled = blocked || !hasText;
 }
 
 function timelineAction(
@@ -443,12 +496,16 @@ function render(status: RuntimeStatus): void {
   const copy = statusCopy(presentation);
   const action = playbackAction(presentation.state);
   const showPlaybackCopy = copy.title !== undefined;
+  const showComposer = presentation.state === "idle";
   setPlaybackState(presentation.state);
 
   statusDot.className = `status-dot state-${presentation.state}`;
   statusLabel.textContent = commandStatus.textContent || copy.label;
   playbackCopy.classList.toggle("is-hidden", !showPlaybackCopy);
   playbackTitle.textContent = copy.title ?? "";
+  currentText.classList.toggle("is-hidden", showComposer);
+  speechComposer.classList.toggle("is-hidden", !showComposer);
+  renderComposerControls();
   const followedCurrent = status.current?.id === presentation.item?.id
     ? status.current
     : null;
@@ -504,8 +561,11 @@ function render(status: RuntimeStatus): void {
   if (current) {
     voiceLabel.textContent = formatVoice(current.voice);
     voicePill.classList.remove("is-hidden");
+    sourceLabel.textContent = current.source ?? "";
+    sourcePill.classList.toggle("is-hidden", !current.source);
   } else {
     voicePill.classList.add("is-hidden");
+    sourcePill.classList.add("is-hidden");
   }
 
   const visibleItems = visibleTimelineItems(status);
@@ -1017,7 +1077,14 @@ function handleHistoryReorderKey(event: KeyboardEvent, id: string): void {
 function timelineRenderKey(items: TimelineItem[], historyTotal: number): string {
   return JSON.stringify([
     historyTotal,
-    items.map(({ id, text, voice, kind, position }) => [id, text, voice, kind, position]),
+    items.map(({ id, text, voice, source, kind, position }) => [
+      id,
+      text,
+      voice,
+      source,
+      kind,
+      position,
+    ]),
   ]);
 }
 
@@ -1050,6 +1117,7 @@ function reconcileTimelineNodes(items: TimelineItem[]): boolean {
       return !row ||
         !row.classList.contains(`is-${item.kind}`) ||
         row.dataset.voice !== item.voice ||
+        row.dataset.source !== (item.source ?? "") ||
         row.querySelector(".queue-copy p")?.textContent !== item.text;
     })
   ) {
@@ -1204,25 +1272,7 @@ function createVoiceSelect(item: TimelineItem): HTMLSelectElement {
   const select = document.createElement("select");
   select.className = "queue-menu-voice";
   select.setAttribute("aria-label", `Change voice for ${itemReference(item)}`);
-  const prompt = document.createElement("option");
-  prompt.value = "";
-  prompt.textContent = "Change voice";
-  select.append(prompt);
-  const groups = new Map<string, HTMLOptGroupElement>();
-  for (const [id, label, group] of VOICE_OPTIONS) {
-    let options = groups.get(group);
-    if (!options) {
-      options = document.createElement("optgroup");
-      options.label = group;
-      groups.set(group, options);
-      select.append(options);
-    }
-    const option = document.createElement("option");
-    option.value = id;
-    option.textContent = label;
-    option.disabled = id === item.voice;
-    options.append(option);
-  }
+  populateVoiceSelect(select, item.voice, "Change voice");
   select.addEventListener("change", () => {
     if (!select.value) {
       return;
@@ -1327,6 +1377,7 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
   const focusedControlClass = [
     "timeline-drag-handle",
     "speechicle-content",
+    "speechicle-voice",
     "queue-menu-button",
   ].find((className) => document.activeElement?.classList.contains(className));
   speechicleList.replaceChildren();
@@ -1351,6 +1402,7 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     row.className = "speechicle-item";
     row.dataset.itemId = item.id;
     row.dataset.voice = item.voice;
+    row.dataset.source = item.source ?? "";
     const isCurrent = item.kind === "current";
     const isWaiting = item.kind === "waiting";
     const isExpanded = item.id === expandedItemId;
@@ -1383,6 +1435,9 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
       rowControls.push(dragHandle);
     }
 
+    const body = document.createElement("div");
+    body.className = "speechicle-body";
+
     const speechicle = document.createElement("button");
     speechicle.className = "speechicle-content";
     speechicle.type = "button";
@@ -1391,10 +1446,28 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     copy.className = "queue-copy";
     const text = document.createElement("p");
     text.textContent = item.text;
-    const meta = document.createElement("span");
-    meta.className = "queue-meta";
-    copy.append(text, meta);
+    copy.append(text);
     speechicle.append(copy);
+
+    const meta = document.createElement("div");
+    meta.className = "queue-meta";
+    const inlineVoice = document.createElement("select");
+    inlineVoice.className = "speechicle-voice";
+    inlineVoice.setAttribute("aria-label", `Voice for ${reference}`);
+    populateVoiceSelect(inlineVoice, item.voice);
+    inlineVoice.addEventListener("change", () => {
+      if (inlineVoice.value !== item.voice) {
+        void playTimelineItem(item, inlineVoice.value);
+      }
+    });
+    const source = document.createElement("span");
+    source.className = "speechicle-source";
+    source.textContent = item.source ?? "";
+    source.classList.toggle("is-hidden", !item.source);
+    const action = document.createElement("span");
+    action.className = "speechicle-status";
+    meta.append(inlineVoice, source, action);
+    body.append(speechicle, meta);
 
     const accessibleText = document.createElement("div");
     accessibleText.id = `speech-full-${item.id}`;
@@ -1437,7 +1510,7 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
       setOpenActionMenu(openMenuItemId === item.id ? null : item.id);
     });
     actions.append(menuButton);
-    rowControls.push(speechicle, actions, accessibleText);
+    rowControls.push(body, actions, accessibleText);
     row.classList.toggle("is-expanded", isExpanded);
     row.append(...rowControls);
     speechicleList.append(row);
@@ -1454,7 +1527,7 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
   if (focusedItemId) {
     const row = speechicleList.querySelector<HTMLElement>(`[data-item-id="${focusedItemId}"]`);
     const preferred = focusedControlClass
-      ? row?.querySelector<HTMLButtonElement>(`.${focusedControlClass}`)
+      ? row?.querySelector<HTMLButtonElement | HTMLSelectElement>(`.${focusedControlClass}`)
       : row?.querySelector<HTMLButtonElement>(".speechicle-content");
     const fallback = row?.querySelector<HTMLButtonElement>(".queue-menu-button");
     (preferred?.disabled ? fallback : preferred)?.focus({ preventScroll: true });
@@ -1472,7 +1545,8 @@ function updateTimelineRows(items: TimelineItem[]): void {
       displayedWaitingRows.length - index,
     ]),
   );
-  const pendingId = pendingTimelineMutation && pendingTimelineMutation.kind !== "clear"
+  const pendingId = pendingTimelineMutation?.kind === "play" ||
+      pendingTimelineMutation?.kind === "row"
     ? pendingTimelineMutation.item.id
     : null;
   const timelineCommandInFlight = commandPending || pendingTimelineMutation !== null;
@@ -1518,12 +1592,15 @@ function updateTimelineRows(items: TimelineItem[]): void {
       "aria-label",
       `Full text for ${reference}`,
     );
-    const meta = row.querySelector<HTMLElement>(".queue-meta");
-    if (meta) {
-      const action = timelineAction(item, pending, failed);
-      meta.textContent = action
-        ? `${formatVoice(item.voice)}  /  ${action}`
-        : formatVoice(item.voice);
+    const inlineVoice = row.querySelector<HTMLSelectElement>(".speechicle-voice");
+    if (inlineVoice) {
+      inlineVoice.disabled = timelineCommandInFlight;
+      inlineVoice.setAttribute("aria-label", `Voice for ${reference}`);
+    }
+    const action = row.querySelector<HTMLElement>(".speechicle-status");
+    if (action) {
+      action.textContent = timelineAction(item, pending, failed);
+      action.classList.toggle("is-hidden", action.textContent === "");
     }
   }
   const playbackMenuAction = queueActionMenu.querySelector<HTMLButtonElement>(
@@ -1667,23 +1744,26 @@ async function deleteHistoryItem(id: string): Promise<void> {
 async function runTimelineMutation(
   pending: PendingTimelineMutation,
   failureMessage: string,
-): Promise<void> {
+): Promise<boolean> {
   if (timelineMutationBlocked()) {
-    return;
+    return false;
   }
   const { mutation } = pending;
-  const failureId = pending.kind === "clear" ? null : pending.item.id;
+  const failureId = pending.kind === "play" || pending.kind === "row"
+    ? pending.item.id
+    : null;
   const restoreTimelineFocus = pending.kind === "clear" &&
     document.activeElement === clearQueueButton;
   pendingTimelineMutation = pending;
   failedTimelineMutation = null;
   commandStatus.textContent = "";
   render(currentStatus);
+  let committed = false;
   try {
     if (!desktopApi) {
       console.info("Demo timeline mutation requested", mutation);
       await new Promise((resolve) => window.setTimeout(resolve, 250));
-      return;
+      return true;
     }
     const result = await desktopApi.mutateTimeline(mutation);
     currentStatus = adoptTimelineSnapshot(currentStatus, result.snapshot);
@@ -1694,6 +1774,8 @@ async function runTimelineMutation(
     } else if (result.outcome === "unconfirmed") {
       commandStatus.textContent = "Command result was unconfirmed. Speech state was refreshed.";
       console.error("Timeline mutation result was unconfirmed", result.error);
+    } else {
+      committed = true;
     }
   } catch (error) {
     console.error("Could not update the speech timeline", error);
@@ -1712,6 +1794,7 @@ async function runTimelineMutation(
       speechicleList.focus({ preventScroll: true });
     }
   }
+  return committed;
 }
 
 async function refreshStatus(): Promise<void> {
@@ -1790,6 +1873,34 @@ async function runPlaybackAction(): Promise<void> {
 }
 
 playbackButton.addEventListener("click", () => void runPlaybackAction());
+
+composerText.addEventListener("input", () => {
+  renderComposerControls();
+});
+
+speechComposer.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const text = composerText.value.trim();
+  if (!text || timelineMutationBlocked()) {
+    return;
+  }
+  const committed = await runTimelineMutation(
+    {
+      kind: "enqueue",
+      mutation: {
+        type: "enqueue",
+        text,
+        voice: composerVoice.value,
+        source: MANUAL_SOURCE,
+      },
+    },
+    "Could not add speech. Try again.",
+  );
+  if (committed) {
+    composerText.value = "";
+    composerActions.classList.add("is-hidden");
+  }
+});
 
 playbackCopy.addEventListener("click", () => {
   if (playbackCopy.dataset.expandable === "true") {

@@ -554,6 +554,16 @@ test("validates every timeline mutation variant", () => {
     assert.deepEqual(parseTimelineMutation(mutation), mutation);
   }
 
+  assert.deepEqual(
+    parseTimelineMutation({
+      type: "enqueue",
+      text: "Speech",
+      voice: "af_heart",
+      source: "  Manual  ",
+    }),
+    { type: "enqueue", text: "Speech", voice: "af_heart", source: "Manual" },
+  );
+
   assert.equal(parseTimelineMutation({ type: "play", id: "old-name" }), null);
   assert.equal(
     parseTimelineMutation({

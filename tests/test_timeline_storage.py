@@ -89,6 +89,13 @@ def test_source_label_follows_one_id_through_voice_history_and_delete(
     assert storage.source_label(speechicle_id) is None
 
 
+def test_reserve_rejects_invalid_source_metadata(tmp_path: Path) -> None:
+    storage = prepared_storage(tmp_path)
+
+    with pytest.raises(ValueError, match="invalid source label"):
+        storage.reserve("af_heart", None, "Hello", "first line\nsecond line")
+
+
 def test_counter_gap_after_failed_file_publish_is_never_reused(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

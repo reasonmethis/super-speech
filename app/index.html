@@ -67,12 +67,31 @@
         >
           <h2 id="playback-title">Getting ready</h2>
           <p id="current-text" class="current-text">Reading the local speech engine...</p>
+          <form id="speech-composer" class="speech-composer is-hidden">
+            <textarea
+              id="composer-text"
+              rows="2"
+              aria-label="Speech text"
+              placeholder="Type or paste something to speak..."
+            ></textarea>
+            <div id="composer-actions" class="composer-actions is-hidden">
+              <label class="composer-voice">
+                <span>Voice</span>
+                <select id="composer-voice" aria-label="Voice for new speech"></select>
+              </label>
+              <button id="composer-submit" type="submit">Add to Speechicles</button>
+            </div>
+          </form>
         </div>
 
         <div id="metadata-row" class="metadata-row">
           <span id="voice-pill" class="metadata-pill is-hidden">
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5a2 2 0 0 0-2 2v3a2 2 0 0 0 4 0v-3a2 2 0 0 0-2-2Z"/><path d="M3.8 7.2a4.2 4.2 0 0 0 8.4 0M8 11.4v2.1M5.8 13.5h4.4"/></svg>
             <span id="voice-label"></span>
+          </span>
+          <span id="source-pill" class="metadata-pill is-hidden">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="5" r="2"/><circle cx="11" cy="11" r="2"/><path d="m6.5 6.5 3 3"/></svg>
+            <span id="source-label"></span>
           </span>
         </div>
       </section>

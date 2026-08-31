@@ -14,9 +14,10 @@ Finished, skipped, cleared, or manually archived Speechicles appear in History.
 ### Desktop app
 
 Choose the desktop app for a tray icon, pause and resume controls, a visible
-timeline, replay, reordering, voice changes, and Light or Dark appearance. The
-installer contains the app, speech engine, model, voices, and agent skill. It
-does not need a separate Python or Node.js installation.
+timeline, replay, reordering, voice changes, typed or pasted speech, and Light
+or Dark appearance. The installer contains the app, speech engine, model,
+voices, and agent skill. It does not need a separate Python or Node.js
+installation.
 
 The Windows x64 installer is tested locally from this repository. A public
 download has not been published yet. The Electron app is designed to support
@@ -48,14 +49,21 @@ same Queue and playback implementation.
 
 - Pause stops at the current audio sample; Resume continues from that sample
 - Click a Speechicle to expand its text, or double-click it to play it
+- Click the voice beneath any Speechicle to play the same text with another
+  installed voice
 - Drag Waiting and History rows to reorder them
 - Use a row's three-dot menu for the actions that apply there. Current has
   Pause or Resume while active and Play when stopped; Waiting and History have
   Play. All rows have Copy text and Change voice. Delete moves Waiting into
   History and permanently removes History
 - Clear all stops Current and moves active speech into History
+- When Super Speech is idle, type or paste text into the main card, choose a
+  voice, and add it as a Speechicle
 - Click the main text area to follow the current piece in a larger view
 - Use Settings to switch between Light and Dark appearance
+
+Agents can attach a short source label to spoken replies. The app shows that
+label beside the voice so simultaneous agent tasks remain distinguishable.
 
 ## How it works
 
