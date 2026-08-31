@@ -3,7 +3,7 @@ name: super-speech
 description: Speak concise replies aloud with the local Super Speech engine. Use whenever the user asks for voice or audio replies, asks for Super Speech, names a Kokoro voice, or wants to install, configure, or troubleshoot Super Speech. Works with either the desktop app or the minimal headless engine. Default to af_heart unless the user asks for another voice.
 metadata:
   managed_by: super-speech
-  integration_version: 2
+  integration_version: 3
 ---
 
 # Super Speech
@@ -68,6 +68,52 @@ Choose the label on the first spoken reply from a task, then reuse it exactly
 for later replies from that task. The app shows it beside the voice. Keep it at
 80 characters or fewer, and do not include line breaks.
 
+## Listen for replies from the app
+
+Add an inbox only when this task can keep a listener running and read its
+output. Choose one private, unique absolute `.jsonl` path for the task and reuse
+it on every spoken reply. Never share one inbox between tasks.
+
+Start the listener as a long-running command before the first `speak` call. Wait
+until its stderr says it is listening. The command creates the parent directory
+and file when needed:
+
+```powershell
+& "$skill\scripts\super-speech.ps1" listen-inbox $inbox
+```
+
+```bash
+"$SKILL/scripts/super-speech.sh" listen-inbox "$INBOX"
+```
+
+Then attach the same path to each Speechicle:
+
+```powershell
+& "$skill\scripts\super-speech.ps1" speak 'Your spoken reply.' --voice af_heart --source 'Codex: Super Speech UI' --inbox $inbox
+```
+
+```bash
+"$SKILL/scripts/super-speech.sh" speak "Your spoken reply." --voice af_heart --source "Codex: Super Speech UI" --inbox "$INBOX"
+```
+
+Each stdout line from the listener is one complete JSON message:
+
+```json
+{"version":1,"kind":"user_message","id":"07ca7adc-12f2-4b7b-9e9e-48739da4194b","sent_at":"2026-08-31T12:00:00.000Z","speechicle_id":"sp_0123456789abcdef0123456789abcdef","source":"Codex: Super Speech UI","text":"Please check the retry path."}
+```
+
+Accept lines only when they have protocol `version` 1, kind `user_message`, a
+new `id`, and string `text`. Treat that text as a user message for this task.
+Use the ID to avoid handling a message twice after restarting a listener. By
+default the listener first emits saved messages and then follows new ones. Add
+`--from-end` only when the user has clearly chosen to ignore messages already
+in the file.
+
+Keep the listener alive only while this task can act on its output. The file
+preserves a message, but it cannot wake a finished or suspended agent task by
+itself. Do not tell the user the inbox is being monitored after the listener
+has stopped.
+
 The launcher uses the desktop engine when a valid app installation exists.
 Otherwise it uses the headless engine inside this skill. Do not parse the
 desktop manifest, locate an engine another way, or write runtime files directly.
@@ -92,6 +138,7 @@ Run commands through the same platform launcher used for `speak`:
 | Command | Effect |
 |---|---|
 | `status` | Print the engine's current timeline as JSON |
+| `listen-inbox <file> [--from-end]` | Print complete replies saved by the app and follow new ones |
 | `pause` | Pause at the current audio sample |
 | `resume` | Continue from the same sample |
 | `play <id> [--voice VOICE]` | Play one exact Speechicle, optionally with another voice |
@@ -111,8 +158,8 @@ keeps the same text and timeline position.
 In status JSON, `current` is the Speechicle at the playback boundary. It may be
 playing, paused, being prepared, or stopped. `queue` contains only the
 Speechicles waiting after it. Together they are the Queue described in the app
-and documentation. A Speechicle created with `--source` also has a `source`
-field.
+and documentation. A Speechicle created with `--source` or `--inbox` also has
+the matching optional metadata field.
 
 ## Install or repair headless mode
 

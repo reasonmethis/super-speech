@@ -15,8 +15,9 @@ Finished, skipped, cleared, or manually archived Speechicles appear in History.
 
 Choose the desktop app for a tray icon, pause and resume controls, a visible
 timeline, replay, reordering, voice changes, typed or pasted speech, and Light
-or Dark appearance. The installer contains the app, speech engine, model,
-voices, and agent skill. It does not need a separate Python or Node.js
+or Dark appearance. Agents can also opt into an inbox so the user can send a
+reply from a Speechicle's menu. The installer contains the app, speech engine,
+model, voices, and agent skill. It does not need a separate Python or Node.js
 installation.
 
 The Windows x64 installer is tested locally from this repository. A public
@@ -54,8 +55,9 @@ same Queue and playback implementation.
 - Drag Waiting and History rows to reorder them
 - Use a row's three-dot menu for the actions that apply there. Current has
   Pause or Resume while active and Play when stopped; Waiting and History have
-  Play. All rows have Copy text and Change voice. Delete moves Waiting into
-  History and permanently removes History
+  Play. All rows have Copy text. Delete moves Waiting into History and
+  permanently removes History. A row also has Send message when its agent is
+  listening on an inbox
 - Clear all stops Current and moves active speech into History
 - When Super Speech is idle, type or paste text into the main card, choose a
   voice, and add it as a Speechicle
@@ -63,7 +65,9 @@ same Queue and playback implementation.
 - Use Settings to switch appearance or reveal extra voices hidden by default
 
 Agents can attach a short source label to spoken replies. The app shows that
-label beside the voice so simultaneous agent tasks remain distinguishable.
+label beside the voice so simultaneous agent tasks remain distinguishable. An
+agent can also attach a private inbox file. The app then lets the user send a
+durable reply back to that task without exposing the file path in the window.
 
 ## How it works
 

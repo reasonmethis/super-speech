@@ -59,16 +59,17 @@ items are future work, ordered by priority.
 - [x] Define queue-selection behavior in tests before changing the file protocol
 - [x] Return an engine-owned acknowledgement for selection and replay
 - [x] Add a silent full-loop test for archived replay and queue preservation
+- [x] Let inbox-enabled agents receive a reply from a Speechicle's menu
 - Add black-box coverage for skip with buffered pieces, clear during playback,
   stop during gaps, failed synthesis, and persistent pause
 
 ## P1: source app and richer queue metadata
 
-- Extend the queue protocol with a versioned metadata record instead of adding
-  more meaning to the filename
+- [x] Extend the queue protocol with a versioned metadata record instead of
+  adding more meaning to the filename
 - Record the source app, source task, queued timestamp, voice, requested gap,
   and original text for every chunk
-- Add optional source metadata flags to `super-speech-engine speak`
+- [x] Add optional source metadata flags to `super-speech-engine speak`
 - Show a recognizable source-app icon only when the source is known
 - Decide how much source history remains local and add a clear privacy control
 

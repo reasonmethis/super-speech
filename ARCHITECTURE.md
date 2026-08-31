@@ -65,10 +65,12 @@ Each runtime has three speech directories:
 - `spoken/` owns History membership
 - `failed/` holds speech that could not be prepared
 
-Optional source labels are stored in `sources/` as small JSON files keyed by
-public Speechicle ID. A label therefore follows the same Speechicle across
-voice changes and moves between Queue and History. Missing or damaged label
-metadata never prevents playback.
+Optional source labels and agent inbox paths are stored in `sources/` as small
+versioned JSON files keyed by public Speechicle ID. The directory keeps its
+legacy name, but version 2 records both fields. Metadata therefore follows the
+same Speechicle across voice changes and moves between Queue and History.
+Version 1 source-only files remain readable. Missing or damaged metadata never
+prevents playback.
 
 A Queue filename looks like:
 
@@ -131,7 +133,7 @@ Each snapshot contains:
 - The total History count, which may be larger than the visible list
 - Engine process ID, lifecycle state, and publication time
 - A timeline revision that increases when visible identity, order, voice, or
-  source label or History count changes
+  source label, inbox availability, or History count changes
 - The current piece number and its Unicode text offsets
 
 For historical protocol compatibility, JSON `current` contains Current while
@@ -166,6 +168,28 @@ at a time in creation order. Each result says:
 An unconfirmed result stops further timeline changes until startup recovery
 finishes the saved plan. The app adopts the engine's result snapshot instead of
 guessing from local UI state.
+
+## Agent inbox messages
+
+An agent may pass one absolute file path with `speak --inbox`. The path becomes
+optional metadata for that Speechicle. It is not part of Queue order or
+playback state.
+
+For an inbox-enabled row, the renderer can ask Electron main to send a message
+using only the public Speechicle ID and text. Electron main reads checked engine
+status again, finds the matching inbox itself, and appends one JSON object plus
+a newline. The renderer never chooses a destination path. Appends are
+serialized, flushed before success is reported, and do not change the timeline
+revision.
+
+Every message has protocol version 1, kind `user_message`, a unique message ID,
+UTC time, the Speechicle ID, optional source label, and user text. The engine's
+`listen-inbox` command creates the file, emits complete saved lines, and then
+follows complete new lines. JSON Lines keeps message boundaries clear and lets
+an agent deduplicate after restarting its listener.
+
+The inbox is durable delivery, not an agent wake-up service. The receiving task
+must keep a listener running or inspect saved messages when it resumes.
 
 See [skills/super-speech/SKILL.md](skills/super-speech/SKILL.md) for the exact
 agent commands.
@@ -224,8 +248,12 @@ checked status and sends commands through Electron main.
   filename upgrades
 - `skills/super-speech/engine/mutation_protocol.py` checks timeline mutation
   requests and results
+- `skills/super-speech/engine/inbox_listener.py` follows complete agent inbox
+  messages
 - `app/electron/main.ts` owns the window, tray, engine supervision, installer
   integration, and calls from the renderer
+- `app/electron/agent-inbox.ts` validates and appends user messages without
+  accepting a path from the renderer
 - `app/electron/atomic-file.ts` safely replaces the desktop install manifest
 - `app/electron/managed-skill.ts` preserves or updates app-managed agent skills
 - `app/electron/tray-menu.ts` maps engine state to the tray playback action
