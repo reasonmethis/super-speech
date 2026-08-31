@@ -241,6 +241,16 @@ def test_public_status_contains_no_storage_filenames(tmp_path: Path) -> None:
     ("payload", "variant_name"),
     [
         (
+            {
+                "request_id": "f" * 24,
+                "type": "enqueue",
+                "text": "New speech",
+                "voice": "af_heart",
+                "source": "Codex task",
+            },
+            "EnqueueMutation",
+        ),
+        (
             {"request_id": "a" * 24, "type": "play", "id": f"sp_{'1' * 32}"},
             "PlayMutation",
         ),
@@ -305,6 +315,19 @@ def test_mutation_variants_only_expose_their_valid_fields() -> None:
         [],
         {"request_id": "short", "type": "clear"},
         {"request_id": "a" * 24, "type": "unknown"},
+        {
+            "request_id": "a" * 24,
+            "type": "enqueue",
+            "text": "Speech",
+            "voice": "af_heart",
+            "source": "line\nbreak",
+        },
+        {
+            "request_id": "a" * 24,
+            "type": "enqueue",
+            "text": "   ",
+            "voice": "af_heart",
+        },
         {"request_id": "a" * 24, "type": "play", "id": "../history"},
         {
             "request_id": "a" * 24,

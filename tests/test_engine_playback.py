@@ -2009,12 +2009,17 @@ def test_speak_waits_for_engine_acceptance_after_queueing_new_work(
     engine = load_engine("super_speech_engine_speak_continue")
     configure_runtime(engine, tmp_path)
     starts: list[str] = []
+    queued: list[tuple[str, str, int | None, str | None]] = []
     monkeypatch.setattr(engine, "start_engine", lambda: starts.append("start"))
-    monkeypatch.setattr(
-        engine,
-        "enqueue_text",
-        lambda _text, _voice, _gap: engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt",
-    )
+
+    def enqueue(text: str, voice: str, gap: int | None, source: str | None) -> Path:
+        queued.append((text, voice, gap, source))
+        return (
+            engine.QUEUE
+            / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+        )
+
+    monkeypatch.setattr(engine, "enqueue_text", enqueue)
     monkeypatch.setattr(
         engine, "public_id_for_path", lambda _path: f"sp_{'1' * 32}"
     )
@@ -2024,8 +2029,11 @@ def test_speak_waits_for_engine_acceptance_after_queueing_new_work(
         lambda: starts.append("accept") or True,
     )
 
-    assert engine.cli(["speak", "New work"]) == 0
+    assert engine.cli(
+        ["speak", "New work", "--source", "Codex UI task"]
+    ) == 0
     assert starts == ["start", "accept"]
+    assert queued == [("New work", "af_heart", None, "Codex UI task")]
     assert engine.CONTINUE.exists()
 
 

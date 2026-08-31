@@ -34,6 +34,24 @@ from speechicle_identity import (
     write_catalog,
 )
 
+SOURCE_LABEL_MAX = 80
+
+
+def normalize_source_label(value: object) -> str | None:
+    """Return one safe display label or reject invalid caller input."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("invalid source label")
+    source = value.strip()
+    if (
+        not source
+        or len(source) > SOURCE_LABEL_MAX
+        or any(ord(character) < 32 or ord(character) == 127 for character in source)
+    ):
+        raise ValueError("invalid source label")
+    return source
+
 
 class MutationOutcomeUnconfirmed(RuntimeError):
     """The engine cannot prove what a command changed."""
@@ -118,6 +136,10 @@ class TimelinePaths:
     @property
     def failed(self) -> Path:
         return self.root / "failed"
+
+    @property
+    def sources(self) -> Path:
+        return self.root / "sources"
 
     @property
     def queue_order(self) -> Path:
@@ -287,6 +309,46 @@ class TimelineStorage:
     @classmethod
     def public_id(cls, path: Path) -> str:
         return cls.canonical_filename(path).public_id
+
+    def source_label(self, public_id: str) -> str | None:
+        """Read optional source metadata without making playback depend on it."""
+        if not is_public_id(public_id):
+            raise ValueError("invalid Speechicle ID")
+        try:
+            payload = json.loads(
+                (self.paths.sources / f"{public_id}.json").read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict) or set(payload) != {"version", "source"}:
+            return None
+        if payload.get("version") != 1:
+            return None
+        try:
+            return normalize_source_label(payload.get("source"))
+        except ValueError:
+            return None
+
+    def _write_source_label(self, public_id: str, source: str) -> None:
+        payload = json.dumps(
+            {"version": 1, "source": source},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        target = self.paths.sources / f"{public_id}.json"
+        temporary = target.with_name(
+            f".{target.name}.{os.getpid()}.{time.time_ns()}.tmp"
+        )
+        try:
+            temporary.write_bytes(payload)
+            replace_path_with_confirmation(
+                temporary,
+                target,
+                "source label publication",
+                expected_bytes=payload,
+            )
+        finally:
+            temporary.unlink(missing_ok=True)
 
     @classmethod
     def sequence(cls, path: Path) -> int | None:
@@ -585,7 +647,13 @@ class TimelineStorage:
         if normalized_next != next_sequence:
             self._write_sequence_counter(namespace, normalized_next)
 
-    def reserve(self, voice: str, gap_ms: int | None, text: str) -> Path:
+    def reserve(
+        self,
+        voice: str,
+        gap_ms: int | None,
+        text: str,
+        source: str | None = None,
+    ) -> Path:
         """Create one Queue file without enumerating the stored timeline."""
         with self.mutation():
             self._recover_current_plan()
@@ -595,6 +663,8 @@ class TimelineStorage:
             # Save the number first so a failed Queue write cannot reuse an ID
             self._write_sequence_counter(namespace, sequence + 1)
             public_id = self._derived_public_id(namespace, sequence)
+            if source is not None:
+                self._write_source_label(public_id, source)
             path = self.paths.queue / SpeechicleFilename(
                 sequence, public_id, voice, gap_ms
             ).render()
@@ -633,13 +703,15 @@ class TimelineStorage:
                     except OSError:
                         read_failed = True
                         text = str(previous.get(speechicle_id, {}).get("text", ""))
-                    items.append(
-                        {
-                            "id": speechicle_id,
-                            "text": text,
-                            "voice": self.canonical_filename(path).voice,
-                        }
-                    )
+                    item: dict[str, object] = {
+                        "id": speechicle_id,
+                        "text": text,
+                        "voice": self.canonical_filename(path).voice,
+                    }
+                    source = self.source_label(speechicle_id)
+                    if source is not None:
+                        item["source"] = source
+                    items.append(item)
                 self._history_count = len(history_files)
                 self._history_items = items
                 self._history_dirty = read_failed
@@ -1206,6 +1278,10 @@ class TimelineStorage:
             if history_item is None:
                 return None
             history_item.unlink()
+            try:
+                (self.paths.sources / f"{public_id}.json").unlink(missing_ok=True)
+            except OSError:
+                pass
             self.invalidate_history()
             return history_item
 
@@ -1835,6 +1911,7 @@ class TimelineStorage:
         self.paths.queue.mkdir(parents=True, exist_ok=True)
         self.paths.history.mkdir(parents=True, exist_ok=True)
         self.paths.failed.mkdir(parents=True, exist_ok=True)
+        self.paths.sources.mkdir(parents=True, exist_ok=True)
         with self.mutation(timeout=None):
             recovered = self._recover_any_intent()
             if recovered == "embed_public_ids":

@@ -541,6 +541,7 @@ test("validates every timeline mutation variant", () => {
   const id = speechicleId(8);
   const beforeId = speechicleId(9);
   const mutations = [
+    { type: "enqueue", text: "Pasted article", voice: "af_heart", source: "Manual" },
     { type: "play", id },
     { type: "play", id, voice: "bm_fable" },
     { type: "move", section: "waiting", id, beforeId },
@@ -554,6 +555,19 @@ test("validates every timeline mutation variant", () => {
   }
 
   assert.equal(parseTimelineMutation({ type: "play", id: "old-name" }), null);
+  assert.equal(
+    parseTimelineMutation({
+      type: "enqueue",
+      text: "Speech",
+      voice: "af_heart",
+      source: "line\nbreak",
+    }),
+    null,
+  );
+  assert.equal(
+    parseTimelineMutation({ type: "enqueue", text: " ", voice: "af_heart" }),
+    null,
+  );
   assert.equal(parseTimelineMutation({ type: "play", id, voice: "" }), null);
   assert.equal(parseTimelineMutation({ type: "play", id, voice: "Heart" }), null);
   assert.equal(parseTimelineMutation({ type: "clear", id }), null);
@@ -686,6 +700,9 @@ test("a committed Play result must identify the selected Speechicle", () => {
     mutationResultMatchesRequest({ type: "clear" }, missingResultId),
     true,
   );
+  const enqueue = { type: "enqueue", text: "Speech", voice: "af_heart" } as const;
+  assert.equal(mutationResultMatchesRequest(enqueue, committed), true);
+  assert.equal(mutationResultMatchesRequest(enqueue, missingResultId), false);
 });
 
 test("adopts timeline snapshots by revision and then publication time", () => {

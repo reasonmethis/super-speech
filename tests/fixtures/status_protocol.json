@@ -22,6 +22,7 @@
         "id": "sp_00000000000000000000000000000001",
         "text": "Hello world",
         "voice": "af_heart",
+        "source": "Codex: Protocol test",
         "piece": 1,
         "piece_count": 2,
         "piece_start": 0,
@@ -209,6 +210,25 @@
           "filename": "001-af_heart-say.txt",
           "text": "Private identity",
           "voice": "af_heart"
+        }
+      ]
+    },
+    {
+      "version": 13,
+      "timeline_revision": 0,
+      "state": "stopped",
+      "updated_at": 1,
+      "engine_pid": null,
+      "current": null,
+      "queue_count": 0,
+      "queue": [],
+      "history_count": 1,
+      "history": [
+        {
+          "id": "sp_00000000000000000000000000000003",
+          "text": "Invalid source",
+          "voice": "af_heart",
+          "source": "One line\nTwo lines"
         }
       ]
     }

@@ -11,6 +11,7 @@ export const ENGINE_STATUS_VERSION = 13 as const;
 const SPEECHICLE_ID = /^sp_[0-9a-f]{32}$/;
 const MUTATION_REQUEST_ID = /^[0-9a-f]{24}$/;
 const KOKORO_VOICE_ID = /^[ab][fm]_[a-z0-9_]+$/;
+const SOURCE_LABEL_MAX = 80;
 
 export function isSpeechicleId(value: unknown): value is string {
   return typeof value === "string" && SPEECHICLE_ID.test(value);
@@ -52,6 +53,7 @@ export interface SpeechicleItem {
   id: string;
   text: string;
   voice: string;
+  source?: string;
 }
 
 export interface CurrentItem extends SpeechicleItem {
@@ -247,7 +249,8 @@ function isSpeechicleItem(value: unknown): value is SpeechicleItem {
     isSpeechicleId(item.id) &&
     !("filename" in item) &&
     typeof item.text === "string" &&
-    typeof item.voice === "string"
+    typeof item.voice === "string" &&
+    (item.source === undefined || isSourceLabel(item.source))
   );
 }
 
@@ -383,6 +386,7 @@ function timelineItem(
     id: item.id,
     text: item.text,
     voice: item.voice,
+    ...(item.source === undefined ? {} : { source: item.source }),
     kind,
     position,
   };
@@ -429,6 +433,7 @@ export interface VersionInfo {
 }
 
 export type TimelineMutation =
+  | { type: "enqueue"; text: string; voice: string; source?: string }
   | { type: "play"; id: string; voice?: string }
   | {
     type: "move";
@@ -462,6 +467,17 @@ function isKokoroVoiceId(value: unknown): value is string {
   return typeof value === "string" && KOKORO_VOICE_ID.test(value);
 }
 
+function isSourceLabel(value: unknown): value is string {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= SOURCE_LABEL_MAX &&
+    value.trim() === value &&
+    ![...value].some((character) => {
+      const code = character.codePointAt(0) ?? 0;
+      return code < 32 || code === 127;
+    });
+}
+
 function isMutationRequestId(value: unknown): value is string {
   return typeof value === "string" && MUTATION_REQUEST_ID.test(value);
 }
@@ -481,6 +497,23 @@ export function parseTimelineMutation(value: unknown): TimelineMutation | null {
   const mutation = value as Record<string, unknown>;
   if (mutation.type === "clear") {
     return hasOnlyFields(mutation, ["type"]) ? { type: "clear" } : null;
+  }
+  if (mutation.type === "enqueue") {
+    if (
+      !hasOnlyFields(mutation, ["type", "text", "voice", "source"]) ||
+      typeof mutation.text !== "string" ||
+      !mutation.text.trim() ||
+      !isKokoroVoiceId(mutation.voice) ||
+      (mutation.source !== undefined && !isSourceLabel(mutation.source))
+    ) {
+      return null;
+    }
+    return {
+      type: "enqueue",
+      text: mutation.text.trim(),
+      voice: mutation.voice,
+      ...(mutation.source === undefined ? {} : { source: mutation.source }),
+    };
   }
   if (!isSpeechicleId(mutation.id)) {
     return null;
@@ -579,9 +612,13 @@ export function mutationResultMatchesRequest(
   mutation: TimelineMutation,
   result: TimelineMutationResult,
 ): boolean {
-  return result.outcome !== "committed" ||
-    mutation.type !== "play" ||
-    result.resultId === mutation.id;
+  if (result.outcome !== "committed") {
+    return true;
+  }
+  if (mutation.type === "enqueue") {
+    return result.resultId !== undefined;
+  }
+  return mutation.type !== "play" || result.resultId === mutation.id;
 }
 
 export function adoptTimelineSnapshot(

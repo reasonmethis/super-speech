@@ -1325,6 +1325,34 @@ def test_every_mutation_outcome_contains_an_authoritative_snapshot(
     assert unconfirmed["snapshot"]["state"] == "stopped"
 
 
+def test_enqueue_mutation_publishes_source_and_stable_result_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_enqueue_mutation")
+    configure_runtime(engine, tmp_path)
+    prepare_timeline(engine)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    engine.AVAILABLE_VOICES = {"af_heart"}
+    state = engine.State()
+
+    request_id = request_mutation(
+        engine,
+        "enqueue",
+        text="A pasted article",
+        voice="af_heart",
+        source="Manual",
+    )
+
+    assert engine.process_mutation_requests(queue.Queue(), state) == "queue_changed"
+    result = committed_result(engine, request_id)
+    current = result["snapshot"]["current"]
+    assert result["result_id"] == current["id"]
+    assert current["text"] == "A pasted article"
+    assert current["voice"] == "af_heart"
+    assert current["source"] == "Manual"
+
+
 def test_timeline_revision_changes_only_with_the_timeline_and_survives_restart(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

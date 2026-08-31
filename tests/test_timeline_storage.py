@@ -65,6 +65,30 @@ def test_reserve_uses_only_the_counter_after_preparation(
     assert SpeechicleFilename.parse(queued.name).sequence == 1
 
 
+def test_source_label_follows_one_id_through_voice_history_and_delete(
+    tmp_path: Path,
+) -> None:
+    storage = prepared_storage(tmp_path)
+    queued = storage.reserve("af_heart", None, "Hello", "Codex UI task")
+    speechicle_id = storage.public_id(queued)
+
+    changed = storage.replace_queue_voice(queued, "bm_fable")
+    assert storage.source_label(speechicle_id) == "Codex UI task"
+
+    assert storage.archive_many([changed])
+    assert storage.history_snapshot(50)[1] == [
+        {
+            "id": speechicle_id,
+            "text": "Hello",
+            "voice": "bm_fable",
+            "source": "Codex UI task",
+        }
+    ]
+
+    assert storage.delete_history(speechicle_id) is not None
+    assert storage.source_label(speechicle_id) is None
+
+
 def test_counter_gap_after_failed_file_publish_is_never_reused(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

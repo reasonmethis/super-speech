@@ -51,6 +51,7 @@ def configure_runtime(
     if create_directories:
         engine.QUEUE.mkdir(exist_ok=True)
         engine.SPOKEN.mkdir(exist_ok=True)
+        engine.timeline.paths.sources.mkdir(exist_ok=True)
 
 
 def set_current(

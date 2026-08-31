@@ -24,8 +24,8 @@ private process protocol:
   SKIP       - stop Current and its remaining pieces, archive it,
                continue with next
   CONTINUE   - cancel a graceful stop because new speech was queued
-  MUTATION.*.json - play, move, archive, delete, or clear the timeline in one
-                    durable FIFO stream
+  MUTATION.*.json - enqueue, play, move, archive, delete, or clear the timeline
+                    in one durable FIFO stream
   WARMUP     - synthesize a throwaway phrase to pay the first-inference cost
 
 Env:
@@ -58,6 +58,7 @@ from mutation_protocol import (
     ArchiveMutation,
     ClearMutation,
     DeleteMutation,
+    EnqueueMutation,
     MoveMutation,
     MutationRequest,
     PlayMutation,
@@ -74,6 +75,7 @@ from timeline_storage import (
     MutationOutcomeUnconfirmed,
     TimelinePaths,
     TimelineStorage,
+    normalize_source_label,
     replace_path_with_confirmation,
 )
 
@@ -138,7 +140,7 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
-ENGINE_VERSION = "0.5.0"
+ENGINE_VERSION = "0.6.0"
 STATUS_VERSION = 13
 STARTUP_TIMEOUT = 120.0
 
@@ -434,11 +436,29 @@ def public_id_for_path(path: Path) -> str:
     return timeline.public_id(path)
 
 
+def _speechicle_status_item(path: Path, text: str) -> dict[str, object]:
+    speechicle_id = public_id_for_path(path)
+    item: dict[str, object] = {
+        "id": speechicle_id,
+        "text": text,
+        "voice": voice_from_name(path.name),
+    }
+    source = timeline.source_label(speechicle_id)
+    if source is not None:
+        item["source"] = source
+    return item
+
+
 def queue_files_in_order() -> list[Path]:
     return timeline.queue_files()
 
 
-def enqueue_text(text: str, voice: str, gap_ms: int | None = None) -> Path:
+def enqueue_text(
+    text: str,
+    voice: str,
+    gap_ms: int | None = None,
+    source: str | None = None,
+) -> Path:
     """Atomically append one Speechicle to Queue."""
     text = text.strip()
     if not text:
@@ -447,7 +467,7 @@ def enqueue_text(text: str, voice: str, gap_ms: int | None = None) -> Path:
         raise ValueError(f"invalid Kokoro voice: {voice}")
     if gap_ms is not None and not 0 <= gap_ms <= 1500:
         raise ValueError("gap must be between 0 and 1500 milliseconds")
-    return timeline.reserve(voice, gap_ms, text)
+    return timeline.reserve(voice, gap_ms, text, normalize_source_label(source))
 
 
 def history_snapshot() -> tuple[int, list[dict[str, object]]]:
@@ -1093,13 +1113,22 @@ def wait_for_json_payload(target: Path, deadline: float) -> dict[str, object] | 
     return None
 
 
+def _source_label_is_valid(value: object) -> bool:
+    try:
+        return normalize_source_label(value) == value
+    except ValueError:
+        return False
+
+
 def _status_item_is_valid(value: object) -> bool:
+    source = value.get("source") if isinstance(value, dict) else None
     return (
         isinstance(value, dict)
         and is_public_id(value.get("id"))
         and "filename" not in value
         and isinstance(value.get("text"), str)
         and isinstance(value.get("voice"), str)
+        and _source_label_is_valid(source)
     )
 
 
@@ -1335,16 +1364,15 @@ def _current_status_item(
 ) -> dict[str, object]:
     """Build Current status fields shared by live and stopped snapshots."""
     active_piece = projection.active_piece
-    return {
-        "id": public_id_for_path(path),
-        "text": projection.text,
-        "voice": projection.voice,
+    item = _speechicle_status_item(path, projection.text)
+    item.update({
         "piece": active_piece.piece if active_piece is not None else 0,
         "piece_count": projection.piece_count,
         "piece_start": active_piece.start if active_piece is not None else None,
         "piece_end": active_piece.end if active_piece is not None else None,
         "elapsed_seconds": elapsed_seconds,
-    }
+    })
+    return item
 
 
 class State:
@@ -1569,20 +1597,32 @@ def timeline_fingerprint(
     history_count: int,
     history_items: list[dict[str, object]],
 ) -> str:
-    """Hash the ordered row IDs, voices, and History count shown to the user."""
+    """Hash the ordered row metadata and History count shown to the user."""
     ordered_rows = {
         "current": (
-            {"id": current.get("id"), "voice": current.get("voice")}
+            {
+                "id": current.get("id"),
+                "voice": current.get("voice"),
+                "source": current.get("source"),
+            }
             if current is not None
             else None
         ),
         "queue": [
-            {"id": item.get("id"), "voice": item.get("voice")}
+            {
+                "id": item.get("id"),
+                "voice": item.get("voice"),
+                "source": item.get("source"),
+            }
             for item in queue_items
         ],
         "history_count": history_count,
         "history": [
-            {"id": item.get("id"), "voice": item.get("voice")}
+            {
+                "id": item.get("id"),
+                "voice": item.get("voice"),
+                "source": item.get("source"),
+            }
             for item in history_items
         ],
     }
@@ -1711,13 +1751,7 @@ def publish_status(
             text = path.read_text(encoding="utf-8").strip()
         except OSError:
             text = ""
-        queue_items.append(
-            {
-                "id": public_id_for_path(path),
-                "text": text,
-                "voice": voice_from_name(path.name),
-            }
-        )
+        queue_items.append(_speechicle_status_item(path, text))
 
     current = None
     if current_path is not None:
@@ -1861,6 +1895,17 @@ def apply_play_mutation(
     """Select one ID while excluding worker claims from the transaction."""
     with st.lock:
         return _apply_play_mutation_locked(buf, st, request)
+
+
+def apply_enqueue_mutation(request: EnqueueMutation) -> Path:
+    """Append text through the same Queue path used by the public CLI."""
+    if AVAILABLE_VOICES and request.voice not in AVAILABLE_VOICES:
+        raise ValueError(f"unknown Kokoro voice: {request.voice}")
+    return enqueue_text(
+        request.text,
+        request.voice,
+        source=request.source,
+    )
 
 
 def _apply_play_mutation_locked(
@@ -2120,11 +2165,18 @@ def process_mutation_requests(
             continue
 
         mutation_subject = (
-            request.request_id if isinstance(request, ClearMutation) else request.id
+            request.request_id
+            if isinstance(request, (ClearMutation, EnqueueMutation))
+            else request.id
         )
         result_id: str | None = None
         try:
-            if isinstance(request, PlayMutation):
+            if isinstance(request, EnqueueMutation):
+                queued = apply_enqueue_mutation(request)
+                result_id = public_id_for_path(queued)
+                if effect is None:
+                    effect = "queue_changed"
+            elif isinstance(request, PlayMutation):
                 play_effect = apply_play_mutation(buf, st, request)
                 effect = play_effect or effect
                 invalidate_held_chunk = invalidate_held_chunk or play_effect == "select"
@@ -2895,13 +2947,7 @@ def _stopped_status_payload() -> dict[str, object]:
             text = path.read_text(encoding="utf-8").strip()
         except OSError:
             text = ""
-        queue_items.append(
-            {
-                "id": public_id_for_path(path),
-                "text": text,
-                "voice": voice_from_name(path.name),
-            }
-        )
+        queue_items.append(_speechicle_status_item(path, text))
     current = None
     if queue_items:
         boundary = queue_items.pop(0)
@@ -2979,6 +3025,7 @@ def cli(argv: list[str] | None = None) -> int:
     speak.add_argument("text", help="text to speak")
     speak.add_argument("--voice", default="af_heart", help="Kokoro voice ID")
     speak.add_argument("--gap-ms", type=int, help="pre-speech gap from 0 to 1500 ms")
+    speak.add_argument("--source", help="short agent or session label")
     setup = commands.add_parser("setup", help="download verified Kokoro models")
     setup.add_argument("--model-dir", type=Path, default=MODEL_DIR)
     commands.add_parser("status", help="print the current runtime status")
@@ -3024,7 +3071,12 @@ def cli(argv: list[str] | None = None) -> int:
             serve()
         elif args.command == "speak":
             start_engine()
-            queued = enqueue_text(args.text, args.voice, args.gap_ms)
+            queued = enqueue_text(
+                args.text,
+                args.voice,
+                args.gap_ms,
+                args.source,
+            )
             publish_ordered_marker(CONTINUE)
             if not wait_for_queue_acceptance():
                 sys.stderr.write(

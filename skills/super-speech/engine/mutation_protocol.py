@@ -7,10 +7,38 @@ from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
 from speechicle_identity import is_public_id
+from timeline_storage import normalize_source_label
 
 REQUEST_ID_PATTERN = re.compile(r"[a-f0-9]{24}")
 VOICE_PATTERN = re.compile(r"[ab][fm]_[a-z0-9_]+")
-MUTATION_TYPES = frozenset({"play", "move", "archive", "delete", "clear"})
+MUTATION_TYPES = frozenset(
+    {"enqueue", "play", "move", "archive", "delete", "clear"}
+)
+
+
+@dataclass(frozen=True)
+class EnqueueMutation:
+    """Append one new Speechicle with optional source metadata."""
+
+    request_id: str
+    text: str
+    voice: str
+    source: str | None
+    command_sequence: int | None = None
+    type: Literal["enqueue"] = field(default="enqueue", init=False)
+
+    def to_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "request_id": self.request_id,
+            "type": self.type,
+            "text": self.text,
+            "voice": self.voice,
+        }
+        if self.source is not None:
+            payload["source"] = self.source
+        if self.command_sequence is not None:
+            payload["command_sequence"] = self.command_sequence
+        return payload
 
 
 @dataclass(frozen=True)
@@ -119,7 +147,12 @@ class ClearMutation:
 
 
 MutationRequest: TypeAlias = (
-    PlayMutation | MoveMutation | ArchiveMutation | DeleteMutation | ClearMutation
+    EnqueueMutation
+    | PlayMutation
+    | MoveMutation
+    | ArchiveMutation
+    | DeleteMutation
+    | ClearMutation
 )
 
 
@@ -161,6 +194,31 @@ def parse_durable_mutation(payload: object) -> MutationRequest:
     request_id = validate_request_id(payload.get("request_id"))
     command_sequence = _validate_command_sequence(payload.get("command_sequence"))
 
+    if mutation_type == "enqueue":
+        _reject_extra_fields(
+            payload,
+            {
+                "request_id",
+                "type",
+                "text",
+                "voice",
+                "source",
+                "command_sequence",
+            },
+        )
+        text = payload.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("speech text cannot be empty")
+        voice = _validate_voice(payload.get("voice"))
+        if voice is None:
+            raise ValueError("Kokoro voice is required")
+        return EnqueueMutation(
+            request_id=request_id,
+            text=text.strip(),
+            voice=voice,
+            source=normalize_source_label(payload.get("source")),
+            command_sequence=command_sequence,
+        )
     if mutation_type == "play":
         _reject_extra_fields(
             payload,

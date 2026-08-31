@@ -58,6 +58,16 @@ On macOS, set `SKILL` to the absolute directory containing this `SKILL.md`:
 "$SKILL/scripts/super-speech.sh" speak "Your spoken reply." --voice af_heart
 ```
 
+When several agent tasks share one engine, add a short source label:
+
+```powershell
+& "$skill\scripts\super-speech.ps1" speak 'Your spoken reply.' --voice af_heart --source 'Codex: Super Speech UI'
+```
+
+Choose the label on the first spoken reply from a task, then reuse it exactly
+for later replies from that task. The app shows it beside the voice. Keep it at
+80 characters or fewer, and do not include line breaks.
+
 The launcher uses the desktop engine when a valid app installation exists.
 Otherwise it uses the headless engine inside this skill. Do not parse the
 desktop manifest, locate an engine another way, or write runtime files directly.
@@ -101,7 +111,8 @@ keeps the same text and timeline position.
 In status JSON, `current` is the Speechicle at the playback boundary. It may be
 playing, paused, being prepared, or stopped. `queue` contains only the
 Speechicles waiting after it. Together they are the Queue described in the app
-and documentation.
+and documentation. A Speechicle created with `--source` also has a `source`
+field.
 
 ## Install or repair headless mode
 
