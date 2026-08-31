@@ -432,14 +432,13 @@ body[data-state="playing"] .ring-two {
 
 body[data-state="idle"] .playback-button,
 body[data-state="loading"] .playback-button {
-  border-color: transparent;
-  background: transparent;
+  border-color: #e8e5ed;
+  background: #fff;
   box-shadow: none;
 }
 
 body[data-theme="light"][data-state="idle"] .playback-button,
 body[data-theme="light"][data-state="loading"] .playback-button {
-  border-color: rgba(36, 38, 51, 0.11);
   box-shadow: none;
 }
 

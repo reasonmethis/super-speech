@@ -393,7 +393,14 @@ function playbackIconMarkup(state: PlaybackPresentation["state"]): string {
   if (state === "stopped") {
     return '<svg viewBox="0 0 32 32"><path d="M16 8v9m0 6v1"/></svg>';
   }
-  return '<img class="idle-icon" src="./icon.svg" alt="">';
+  return `
+    <svg class="idle-icon" viewBox="0 0 512 512">
+      <rect x="103" y="212" width="44" height="88" rx="22" fill="#009A91"/>
+      <rect x="176" y="180" width="44" height="151" rx="22" fill="#F57033"/>
+      <rect x="249" y="148" width="44" height="215" rx="22" fill="#CD377D"/>
+      <rect x="322" y="117" width="44" height="278" rx="22" fill="#4153BE"/>
+    </svg>
+  `;
 }
 
 function setPlaybackState(state: PlaybackPresentation["state"]): void {

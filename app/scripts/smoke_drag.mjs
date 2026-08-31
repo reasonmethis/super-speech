@@ -1328,6 +1328,23 @@ try {
   assert.equal(await page.locator("#playback-copy").getAttribute("role"), null);
   assert.equal(await page.locator("#playback-copy").getAttribute("aria-label"), null);
   assert.equal(await page.locator("#playback-copy").getAttribute("aria-describedby"), null);
+  const idlePlayback = await playbackSnapshot(page);
+  assert.deepEqual(center(idlePlayback.button), center(idlePlayback.ring));
+  assert.equal(await page.locator("#playback-icon svg.idle-icon > rect").count(), 4);
+  assert.equal(await page.locator("#playback-icon circle").count(), 0);
+  assert.equal(
+    await page.locator("#playback-button").evaluate((button) =>
+      getComputedStyle(button).backgroundColor
+    ),
+    "rgb(255, 255, 255)",
+    "The idle button must own its white disk so it shares the rings' center",
+  );
+  if (process.env.SUPER_SPEECH_SCREENSHOT) {
+    const screenshot = path.parse(process.env.SUPER_SPEECH_SCREENSHOT);
+    await page.screenshot({
+      path: path.join(screenshot.dir, `${screenshot.name}-idle${screenshot.ext}`),
+    });
+  }
 
   runEngine(
     "speak",
