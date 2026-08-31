@@ -135,7 +135,6 @@ body[data-theme="light"] .playback-button {
   background: var(--accent);
   box-shadow: none;
   filter: none;
-  transition: transform 160ms ease;
 }
 
 body[data-theme="light"] .playback-button::after {
@@ -402,7 +401,7 @@ body[data-state="playing"] .ring-two {
     0 15px 40px color-mix(in srgb, var(--accent-deep) 42%, transparent),
     inset 0 1px 0 rgba(255, 255, 255, 0.3);
   cursor: pointer;
-  transition: transform 160ms ease, filter 160ms ease, box-shadow 220ms ease;
+  transition: filter 160ms ease, box-shadow 220ms ease;
 }
 
 .playback-button::after {
@@ -415,11 +414,10 @@ body[data-state="playing"] .ring-two {
 
 .playback-button:not(:disabled):hover {
   filter: brightness(1.08);
-  transform: scale(1.025);
 }
 
 .playback-button:not(:disabled):active {
-  transform: scale(0.97);
+  filter: brightness(0.94);
 }
 
 .playback-button:focus-visible {
@@ -497,7 +495,12 @@ body[data-state="loading"] .playback-icon,
   cursor: pointer;
 }
 
-.playback-copy.is-expandable:focus-visible {
+.playback-copy.is-composable {
+  cursor: text;
+}
+
+.playback-copy.is-expandable:focus-visible,
+.playback-copy.is-composable:focus-visible {
   outline: 2px solid var(--accent-bright);
   outline-offset: 5px;
 }
@@ -571,13 +574,14 @@ body[data-state="loading"] .playback-copy {
   width: 100%;
   min-height: 58px;
   max-height: 112px;
-  padding: 9px 11px;
+  padding: 5px 4px 7px;
   resize: vertical;
-  border: 1px solid var(--line);
-  border-radius: 9px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
   outline: 0;
   color: var(--text);
-  background: var(--control-bg);
+  background: transparent;
   font: inherit;
   font-size: 12px;
   line-height: 1.45;
@@ -589,7 +593,6 @@ body[data-state="loading"] .playback-copy {
 
 .speech-composer textarea:focus {
   border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
 .composer-actions {
@@ -1038,10 +1041,11 @@ body[data-state="loading"] .playback-copy {
 }
 
 .speechicle-voice {
+  field-sizing: content;
   width: auto;
   max-width: 110px;
   height: 18px;
-  padding: 0 16px 0 2px;
+  padding: 0 4px 0 2px;
   border: 0;
   border-radius: 5px;
   outline: 0;
@@ -1049,6 +1053,7 @@ body[data-state="loading"] .playback-copy {
   background: transparent;
   font: inherit;
   font-size: 9.5px;
+  appearance: none;
   cursor: pointer;
 }
 

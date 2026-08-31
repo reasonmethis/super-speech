@@ -189,6 +189,7 @@ let revealedCurrentItemId: string | null = null;
 let ringSettlingAnimations: Animation[] = [];
 let playbackExpanded = false;
 let lastFollowedPieceKey: string | null = null;
+let composerOpen = false;
 
 const POINTER_GESTURE_THRESHOLD = 5;
 const QUEUE_REORDER_ANIMATION_MS = 140;
@@ -367,7 +368,7 @@ function statusCopy(presentation: PlaybackPresentation): {
   return {
     label: "Ready",
     title: "Ready when you are",
-    body: "Your next voice reply will appear here as soon as it starts.",
+    body: "Your next voice reply will appear here, or click to type something.",
   };
 }
 
@@ -496,7 +497,12 @@ function render(status: RuntimeStatus): void {
   const copy = statusCopy(presentation);
   const action = playbackAction(presentation.state);
   const showPlaybackCopy = copy.title !== undefined;
-  const showComposer = presentation.state === "idle";
+  const canCompose = presentation.state === "idle";
+  if (!canCompose) {
+    composerOpen = false;
+  }
+  const showComposer = canCompose && composerOpen;
+  const canOpenComposer = canCompose && !composerOpen;
   setPlaybackState(presentation.state);
 
   statusDot.className = `status-dot state-${presentation.state}`;
@@ -511,7 +517,9 @@ function render(status: RuntimeStatus): void {
     : null;
   const canExpand = followedCurrent !== null;
   playbackCopy.dataset.expandable = String(canExpand);
+  playbackCopy.dataset.composable = String(canOpenComposer);
   playbackCopy.classList.toggle("is-expandable", canExpand);
+  playbackCopy.classList.toggle("is-composable", canOpenComposer);
   if (!canExpand && playbackExpanded) {
     const restoreFocus = playbackCopy.contains(document.activeElement);
     setPlaybackExpanded(false);
@@ -519,15 +527,21 @@ function render(status: RuntimeStatus): void {
       speechicleList.focus({ preventScroll: true });
     }
   }
-  if (canExpand) {
+  if (canExpand || canOpenComposer) {
     playbackCopy.tabIndex = 0;
     playbackCopy.setAttribute("role", "button");
-    playbackCopy.setAttribute("aria-expanded", String(playbackExpanded));
-    playbackCopy.setAttribute("aria-describedby", "playback-title current-text");
-    playbackCopy.setAttribute(
-      "aria-label",
-      playbackExpanded ? "Collapse current speech text" : "Expand current speech text",
-    );
+    if (canExpand) {
+      playbackCopy.setAttribute("aria-expanded", String(playbackExpanded));
+      playbackCopy.setAttribute("aria-describedby", "playback-title current-text");
+      playbackCopy.setAttribute(
+        "aria-label",
+        playbackExpanded ? "Collapse current speech text" : "Expand current speech text",
+      );
+    } else {
+      playbackCopy.removeAttribute("aria-expanded");
+      playbackCopy.removeAttribute("aria-describedby");
+      playbackCopy.setAttribute("aria-label", "Type a Speechicle");
+    }
   } else {
     playbackCopy.removeAttribute("tabindex");
     playbackCopy.removeAttribute("role");
@@ -1897,6 +1911,7 @@ speechComposer.addEventListener("submit", async (event) => {
     "Could not add speech. Try again.",
   );
   if (committed) {
+    composerOpen = false;
     composerText.value = "";
     composerActions.classList.add("is-hidden");
   }
@@ -1906,10 +1921,14 @@ playbackCopy.addEventListener("click", () => {
   if (playbackCopy.dataset.expandable === "true") {
     setPlaybackExpanded(!playbackExpanded);
     render(currentStatus);
+  } else if (playbackCopy.dataset.composable === "true") {
+    composerOpen = true;
+    render(currentStatus);
+    requestAnimationFrame(() => composerText.focus());
   }
 });
 playbackCopy.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" || event.key === " ") {
+  if (event.target === playbackCopy && (event.key === "Enter" || event.key === " ")) {
     event.preventDefault();
     playbackCopy.click();
   }

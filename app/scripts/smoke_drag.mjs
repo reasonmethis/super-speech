@@ -113,6 +113,28 @@ async function beginDrag(page, handle, deltaY = -65) {
   );
 }
 
+async function clickPlaybackButtonNearEdge(page) {
+  const button = page.locator("#playback-button");
+  const bounds = await button.boundingBox();
+  assert(bounds, "The playback button must be visible");
+  const point = {
+    x: bounds.x + bounds.width - 3,
+    y: bounds.y + bounds.height / 2,
+  };
+  await page.mouse.move(point.x, point.y);
+  const hovered = await button.boundingBox();
+  await page.mouse.down();
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+  const pressed = await button.boundingBox();
+  assert(hovered && pressed);
+  assert.deepEqual(
+    pressed,
+    hovered,
+    "Pressing the playback button must not move its hit target away from the pointer",
+  );
+  await page.mouse.up();
+}
+
 async function assertDragClean(page) {
   assert.equal(await page.locator(".timeline-drag-ghost").count(), 0);
   assert.equal(await page.locator(".is-drag-source").count(), 0);
@@ -496,7 +518,7 @@ try {
   assert(pausedPlayback.title && pausedPlayback.text && pausedPlayback.voice);
   assert.equal(pausedPlayback.accent, "#4153be");
   assert(pausedPlayback.icon.width >= 47, "The paused symbol must fill more of the main button");
-  await page.evaluate(() => window.superSpeech.setPaused(false));
+  await clickPlaybackButtonNearEdge(page);
   await waitFor(
     () => status().state === "playing",
     "The silent fixture did not resume",
@@ -523,7 +545,7 @@ try {
   });
   assert.deepEqual(center(playingPlayback.button), center(playingPlayback.ring));
   assert.deepEqual(center(pausedPlayback.button), center(pausedPlayback.ring));
-  await page.evaluate(() => window.superSpeech.setPaused(true));
+  await clickPlaybackButtonNearEdge(page);
   await waitFor(
     () => status().state === "paused",
     "The silent fixture did not pause again",
@@ -880,6 +902,23 @@ try {
   await waitFor(
     async () => await menuRow.evaluate((row) => !row.classList.contains("is-expanded")),
     "The row did not collapse after its alignment check",
+  );
+  const inlineVoice = menuRow.locator(".speechicle-voice");
+  await inlineVoice.hover();
+  const inlineVoiceStyle = await inlineVoice.evaluate((select) => {
+    const style = getComputedStyle(select);
+    return {
+      appearance: style.appearance,
+      background: style.backgroundColor,
+      cursor: style.cursor,
+    };
+  });
+  assert.equal(inlineVoiceStyle.appearance, "none", "Inline voices must not show a select arrow");
+  assert.equal(inlineVoiceStyle.cursor, "pointer");
+  assert.notEqual(
+    inlineVoiceStyle.background,
+    "rgba(0, 0, 0, 0)",
+    "Inline voices must show hover feedback",
   );
   await menuButton.click();
   const visibleActions = page.locator("#queue-action-menu:not([hidden])");
@@ -1339,9 +1378,19 @@ try {
     async () => await page.locator("body").getAttribute("data-state") === "idle",
     "The renderer did not become Ready after Clear all",
   );
-  assert.equal(await page.locator("#playback-copy").getAttribute("role"), null);
-  assert.equal(await page.locator("#playback-copy").getAttribute("aria-label"), null);
+  assert.equal(await page.locator("#playback-copy").getAttribute("role"), "button");
+  assert.equal(
+    await page.locator("#playback-copy").getAttribute("aria-label"),
+    "Type a Speechicle",
+  );
   assert.equal(await page.locator("#playback-copy").getAttribute("aria-describedby"), null);
+  assert(
+    await page.locator("#current-text").textContent().then((text) =>
+      text?.includes("click to type something")
+    ),
+    "Idle copy must offer typing without showing the editor",
+  );
+  assert(!await page.locator("#speech-composer").isVisible());
   const idlePlayback = await playbackSnapshot(page);
   assert.deepEqual(center(idlePlayback.button), center(idlePlayback.ring));
   assert.equal(await page.locator("#playback-icon svg.idle-icon > rect").count(), 4);
@@ -1361,11 +1410,35 @@ try {
   }
 
   const composerText = "A manual Speechicle created from pasted text.";
-  await page.locator("#composer-text").fill(composerText);
+  await page.locator("#playback-copy").click();
+  const composer = page.locator("#composer-text");
+  assert(await composer.isVisible(), "Clicking idle copy must open the editor");
+  assert.equal(await composer.evaluate((element) => element === document.activeElement), true);
+  await composer.pressSequentially(composerText);
+  assert.equal(await composer.inputValue(), composerText);
+  const composerStyle = await composer.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      background: style.backgroundColor,
+      borderTop: parseFloat(style.borderTopWidth),
+      borderBottom: parseFloat(style.borderBottomWidth),
+    };
+  });
+  assert.equal(composerStyle.background, "rgba(0, 0, 0, 0)");
+  assert.equal(composerStyle.borderTop, 0);
+  assert(composerStyle.borderBottom > 0, "The manual editor must keep its bottom rule");
   assert(
     await page.locator("#composer-actions").isVisible(),
     "Typing must reveal the manual speech controls",
   );
+  assert.equal(await page.locator("#playback-icon svg.idle-icon > rect").count(), 4);
+  if (process.env.SUPER_SPEECH_SCREENSHOT) {
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+    const screenshot = path.parse(process.env.SUPER_SPEECH_SCREENSHOT);
+    await page.screenshot({
+      path: path.join(screenshot.dir, `${screenshot.name}-composer${screenshot.ext}`),
+    });
+  }
   await page.locator("#composer-voice").selectOption("bm_george");
   await page.locator("#composer-submit").click();
   await waitFor(
