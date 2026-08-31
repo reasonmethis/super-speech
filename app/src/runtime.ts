@@ -49,6 +49,23 @@ export const VOICE_OPTIONS = [
   ["bm_lewis", "Lewis", "UK male"],
 ] as const;
 
+export const ARCHIVED_VOICE_IDS: ReadonlySet<string> = new Set([
+  "af_nicole",
+  "am_adam",
+  "am_eric",
+  "am_fenrir",
+  "am_puck",
+]);
+
+export function selectableVoiceOptions(
+  allowExtraVoices: boolean,
+  selectedVoice?: string,
+) {
+  return VOICE_OPTIONS.filter(([id]) =>
+    allowExtraVoices || !ARCHIVED_VOICE_IDS.has(id) || id === selectedVoice
+  );
+}
+
 export interface SpeechicleItem {
   id: string;
   text: string;

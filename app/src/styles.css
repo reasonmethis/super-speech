@@ -255,6 +255,33 @@ button {
   text-transform: uppercase;
 }
 
+.settings-section-title {
+  margin-top: 12px;
+}
+
+.settings-checkbox {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 7px;
+  border-radius: 7px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.settings-checkbox:hover {
+  background: var(--control-hover);
+}
+
+.settings-checkbox input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--carnival-indigo);
+  cursor: pointer;
+}
+
 .theme-options {
   display: grid;
   grid-template-columns: 1fr 1fr;

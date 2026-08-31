@@ -1,5 +1,6 @@
 import "./styles.css";
 import {
+  ARCHIVED_VOICE_IDS,
   ENGINE_STATUS_VERSION,
   INITIAL_STATUS,
   VOICE_OPTIONS,
@@ -7,6 +8,7 @@ import {
   currentPieceSegments,
   moveSpeechicleItemBefore,
   playbackPresentation,
+  selectableVoiceOptions,
   timelineItems,
   type PlaybackPresentation,
   type RuntimeStatus,
@@ -101,6 +103,7 @@ const playbackBackground = [
 ];
 const desktopApi = window.superSpeech;
 const themeButtons = [...document.querySelectorAll<HTMLButtonElement>("[data-theme-choice]")];
+const extraVoicesToggle = requiredElement<HTMLInputElement>("extra-voices-toggle");
 
 type Theme = "dark" | "light";
 
@@ -221,6 +224,8 @@ function requiredElement<T extends HTMLElement>(id: string): T {
 const voiceLabels = new Map<string, string>(
   VOICE_OPTIONS.map(([id, label]) => [id, label]),
 );
+let allowExtraVoices = localStorage.getItem("super-speech-extra-voices") === "true";
+extraVoicesToggle.checked = allowExtraVoices;
 
 function formatVoice(voice: string): string {
   return voiceLabels.get(voice) ?? voice.replace(/^[a-z]{2}_/, "").replaceAll("_", " ");
@@ -239,7 +244,7 @@ function populateVoiceSelect(
     select.append(option);
   }
   const groups = new Map<string, HTMLOptGroupElement>();
-  for (const [id, label, group] of VOICE_OPTIONS) {
+  for (const [id, label, group] of selectableVoiceOptions(allowExtraVoices, selectedVoice)) {
     let options = groups.get(group);
     if (!options) {
       options = document.createElement("optgroup");
@@ -257,6 +262,15 @@ function populateVoiceSelect(
 }
 
 populateVoiceSelect(composerVoice, "af_heart");
+extraVoicesToggle.addEventListener("change", () => {
+  allowExtraVoices = extraVoicesToggle.checked;
+  localStorage.setItem("super-speech-extra-voices", String(allowExtraVoices));
+  const selectedVoice = !allowExtraVoices && ARCHIVED_VOICE_IDS.has(composerVoice.value)
+    ? "af_heart"
+    : composerVoice.value || "af_heart";
+  populateVoiceSelect(composerVoice, selectedVoice);
+  render(currentStatus);
+});
 
 function renderComposerControls(): void {
   const hasText = composerText.value.trim() !== "";

@@ -81,7 +81,7 @@ visible text.
 Use `af_heart` unless the user asks for another voice. Useful alternatives:
 
 - US female: `af_aoede`, `af_bella`, `af_kore`, `af_nova`
-- US male: `am_echo`, `am_fenrir`, `am_puck`
+- US male: `am_echo`
 - UK female: `bf_emma`, `bf_lily`
 - UK male: `bm_fable`, `bm_george`
 

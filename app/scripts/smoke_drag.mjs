@@ -31,6 +31,7 @@ const environment = {
   SUPER_SPEECH_SPLIT_CHARS: "250",
   SUPER_SPEECH_SKIP_SKILL_INSTALL: "1",
 };
+const archivedVoiceIds = ["af_nicole", "am_adam", "am_eric", "am_fenrir", "am_puck"];
 
 const windowIcon = readFileSync(path.join(appDirectory, "dist", "icon.svg"), "utf8");
 assert(!windowIcon.includes("<filter"), "The in-app icon must not contain clipped shadows");
@@ -275,6 +276,7 @@ try {
       return current?.piece_start !== null && current?.piece_end !== null;
     },
     "The engine did not publish the current internal speech piece",
+    30_000,
   );
   runEngine("pause");
   await waitFor(
@@ -374,6 +376,30 @@ try {
     await settingsPanel.evaluate((panel) => panel.matches(":popover-open")),
     "The Settings button did not open its panel",
   );
+  const extraVoicesToggle = settingsPanel.getByRole("checkbox", {
+    name: "Allow extra voices",
+  });
+  const composerVoiceOptions = page.locator("#composer-voice option");
+  const visibleArchivedVoices = async () =>
+    await composerVoiceOptions.evaluateAll(
+      (options, archived) =>
+        options.map((option) => option.value).filter((value) => archived.includes(value)),
+      archivedVoiceIds,
+    );
+  assert.equal(await extraVoicesToggle.isChecked(), false);
+  assert.deepEqual(await visibleArchivedVoices(), []);
+  await extraVoicesToggle.check();
+  assert.equal(
+    await page.evaluate(() => localStorage.getItem("super-speech-extra-voices")),
+    "true",
+  );
+  assert.deepEqual(await visibleArchivedVoices(), archivedVoiceIds);
+  await extraVoicesToggle.uncheck();
+  assert.equal(
+    await page.evaluate(() => localStorage.getItem("super-speech-extra-voices")),
+    "false",
+  );
+  assert.deepEqual(await visibleArchivedVoices(), []);
   await settingsPanel.getByRole("button", { name: "Light" }).click();
   assert.equal(await page.locator("body").getAttribute("data-theme"), "light");
   assert.equal(
@@ -1418,7 +1444,10 @@ try {
   await page.locator("#playback-copy").click();
   const composer = page.locator("#composer-text");
   assert(await composer.isVisible(), "Clicking idle copy must open the editor");
-  assert.equal(await composer.evaluate((element) => element === document.activeElement), true);
+  await waitFor(
+    async () => await composer.evaluate((element) => element === document.activeElement),
+    "Opening the composer did not focus its text field",
+  );
   assert.equal(await composer.getAttribute("placeholder"), null);
   const compactComposerBounds = await composer.boundingBox();
   assert(
@@ -1448,7 +1477,10 @@ try {
   );
   await page.locator("#playback-copy").click();
   assert.equal(await composer.inputValue(), composerText, "Closing must preserve the draft");
-  assert.equal(await composer.evaluate((element) => element === document.activeElement), true);
+  await waitFor(
+    async () => await composer.evaluate((element) => element === document.activeElement),
+    "Reopening the composer did not restore text focus",
+  );
   const composerStyle = await composer.evaluate((element) => {
     const style = getComputedStyle(element);
     return {

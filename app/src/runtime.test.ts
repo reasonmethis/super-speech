@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
+  ARCHIVED_VOICE_IDS,
   ENGINE_STATUS_VERSION,
+  VOICE_OPTIONS,
   adoptTimelineSnapshot,
   compatibleEngineIsRunning,
   currentPieceSegments,
@@ -18,6 +20,7 @@ import {
   parseTimelineMutationResult,
   runtimeStatusForMutationSnapshot,
   runtimeStateForSnapshot,
+  selectableVoiceOptions,
   statusAfterTransientRead,
   statusForEngineProcess,
   statusAfterPauseCommand,
@@ -42,6 +45,22 @@ const status: EngineStatus = {
   history_count: 0,
   history: [],
 };
+
+test("archives only registered voices", () => {
+  assert.deepEqual(
+    [...ARCHIVED_VOICE_IDS],
+    ["af_nicole", "am_adam", "am_eric", "am_fenrir", "am_puck"],
+  );
+  const registered = new Set<string>(VOICE_OPTIONS.map(([id]) => id));
+  assert.equal([...ARCHIVED_VOICE_IDS].every((id) => registered.has(id)), true);
+  const defaultIds = selectableVoiceOptions(false).map(([id]) => id);
+  assert.equal(defaultIds.some((id) => ARCHIVED_VOICE_IDS.has(id)), false);
+  assert.equal(selectableVoiceOptions(true).length, VOICE_OPTIONS.length);
+  assert.equal(
+    selectableVoiceOptions(false, "af_nicole").some(([id]) => id === "af_nicole"),
+    true,
+  );
+});
 
 test("matches the shared engine status protocol corpus", () => {
   const corpus = JSON.parse(
