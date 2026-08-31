@@ -1414,8 +1414,36 @@ try {
   const composer = page.locator("#composer-text");
   assert(await composer.isVisible(), "Clicking idle copy must open the editor");
   assert.equal(await composer.evaluate((element) => element === document.activeElement), true);
+  assert.equal(await composer.getAttribute("placeholder"), "Type something to speak");
+  const compactComposerBounds = await composer.boundingBox();
+  assert(
+    compactComposerBounds && compactComposerBounds.height <= 32,
+    "The composer underline must sit directly below one line of text",
+  );
+  if (process.env.SUPER_SPEECH_SCREENSHOT) {
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+    const screenshot = path.parse(process.env.SUPER_SPEECH_SCREENSHOT);
+    await page.screenshot({
+      path: path.join(screenshot.dir, `${screenshot.name}-composer-empty${screenshot.ext}`),
+    });
+  }
   await composer.pressSequentially(composerText);
   assert.equal(await composer.inputValue(), composerText);
+  await page.locator("#speech-heading").click();
+  assert(
+    !await page.locator("#speech-composer").isVisible(),
+    "Clicking outside the composer must restore the idle copy",
+  );
+  assert(await page.locator("#current-text").isVisible());
+  assert(
+    await page.locator("#current-text").textContent().then((text) =>
+      text?.includes("click to type something")
+    ),
+    "Closing the composer must restore the idle instructions",
+  );
+  await page.locator("#playback-copy").click();
+  assert.equal(await composer.inputValue(), composerText, "Closing must preserve the draft");
+  assert.equal(await composer.evaluate((element) => element === document.activeElement), true);
   const composerStyle = await composer.evaluate((element) => {
     const style = getComputedStyle(element);
     return {
@@ -1433,7 +1461,7 @@ try {
   );
   assert.equal(await page.locator("#playback-icon svg.idle-icon > rect").count(), 4);
   if (process.env.SUPER_SPEECH_SCREENSHOT) {
-    await page.evaluate(() => new Promise(requestAnimationFrame));
+    await new Promise((resolve) => setTimeout(resolve, 200));
     const screenshot = path.parse(process.env.SUPER_SPEECH_SCREENSHOT);
     await page.screenshot({
       path: path.join(screenshot.dir, `${screenshot.name}-composer${screenshot.ext}`),

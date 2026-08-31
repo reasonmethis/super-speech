@@ -135,6 +135,7 @@ body[data-theme="light"] .playback-button {
   background: var(--accent);
   box-shadow: none;
   filter: none;
+  transition: filter 160ms ease;
 }
 
 body[data-theme="light"] .playback-button::after {
@@ -572,9 +573,9 @@ body[data-state="loading"] .playback-copy {
 
 .speech-composer textarea {
   width: 100%;
-  min-height: 58px;
+  min-height: 29px;
   max-height: 112px;
-  padding: 5px 4px 7px;
+  padding: 2px 4px 4px;
   resize: vertical;
   border: 0;
   border-bottom: 1px solid var(--line);

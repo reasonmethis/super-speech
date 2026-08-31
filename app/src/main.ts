@@ -568,7 +568,10 @@ function render(status: RuntimeStatus): void {
     String(commandPending || pendingTimelineMutation !== null ||
       presentation.state === "loading"),
   );
-  playbackIcon.innerHTML = playbackIconMarkup(presentation.state);
+  if (playbackIcon.dataset.state !== presentation.state) {
+    playbackIcon.dataset.state = presentation.state;
+    playbackIcon.innerHTML = playbackIconMarkup(presentation.state);
+  }
 
   const current = presentation.item;
   metadataRow.classList.toggle("is-hidden", !current);
@@ -1886,6 +1889,17 @@ async function runPlaybackAction(): Promise<void> {
   }
 }
 
+function closeComposer(restoreFocus: boolean): void {
+  if (!composerOpen) {
+    return;
+  }
+  composerOpen = false;
+  render(currentStatus);
+  if (restoreFocus) {
+    playbackCopy.focus({ preventScroll: true });
+  }
+}
+
 playbackButton.addEventListener("click", () => void runPlaybackAction());
 
 composerText.addEventListener("input", () => {
@@ -2026,6 +2040,7 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     cancelTimelinePointerDrag();
     closeActionMenu(true);
+    closeComposer(true);
     if (playbackExpanded) {
       setPlaybackExpanded(false);
       playbackCopy.focus({ preventScroll: true });
@@ -2034,6 +2049,13 @@ window.addEventListener("keydown", (event) => {
   }
 });
 document.addEventListener("pointerdown", (event) => {
+  if (
+    composerOpen &&
+    event.target instanceof Element &&
+    !event.target.closest("#playback-copy")
+  ) {
+    closeComposer(false);
+  }
   if (
     openMenuItemId &&
     event.target instanceof Element &&
@@ -2047,6 +2069,7 @@ window.addEventListener("blur", () => {
   cancelSpeechiclePointerGesture();
   cancelPendingSpeechicleExpansion();
   setOpenActionMenu(null);
+  closeComposer(false);
 });
 
 render(currentStatus);
