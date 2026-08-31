@@ -1042,9 +1042,16 @@ body[data-state="loading"] .playback-copy {
   color: var(--text-muted);
   background: transparent;
   font: inherit;
-  font-size: 19px;
-  line-height: 1;
   cursor: pointer;
+}
+
+.inbox-reply-heading svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 1.4;
 }
 
 .inbox-reply-heading button:hover,

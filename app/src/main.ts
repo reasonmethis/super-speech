@@ -1,5 +1,6 @@
 import "./styles.css";
 import {
+  AGENT_MESSAGE_TEXT_MAX,
   ARCHIVED_VOICE_IDS,
   ENGINE_STATUS_VERSION,
   INITIAL_STATUS,
@@ -101,6 +102,7 @@ const inboxReplyStatus = requiredElement<HTMLDivElement>("inbox-reply-status");
 const inboxReplySubmit = requiredElement<HTMLButtonElement>("inbox-reply-submit");
 const inboxReplyCancel = requiredElement<HTMLButtonElement>("inbox-reply-cancel");
 const inboxReplyClose = requiredElement<HTMLButtonElement>("inbox-reply-close");
+inboxReplyText.maxLength = AGENT_MESSAGE_TEXT_MAX;
 const commandStatus = requiredElement<HTMLDivElement>("command-status");
 commandStatus.removeAttribute("role");
 commandStatus.removeAttribute("aria-live");
@@ -2001,7 +2003,6 @@ inboxReplyForm.addEventListener("submit", async (event) => {
   renderInboxReplyControls();
   try {
     await desktopApi.sendInboxMessage(speechicleId, text);
-    commandStatus.textContent = "Message sent";
     inboxReplyDialog.close();
   } catch {
     inboxReplyStatus.textContent = "Could not send. Try again.";

@@ -7,6 +7,7 @@ export type RuntimeState =
   | "stopped";
 
 export const ENGINE_STATUS_VERSION = 14 as const;
+export const AGENT_MESSAGE_TEXT_MAX = 4_000;
 
 const SPEECHICLE_ID = /^sp_[0-9a-f]{32}$/;
 const MUTATION_REQUEST_ID = /^[0-9a-f]{24}$/;

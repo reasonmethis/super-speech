@@ -4,10 +4,10 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
-  AGENT_MESSAGE_TEXT_MAX,
   appendAgentInboxMessage,
   type AgentInboxMessage,
 } from "./agent-inbox.ts";
+import { AGENT_MESSAGE_TEXT_MAX } from "../src/runtime.ts";
 
 const SPEECHICLE_ID = `sp_${"1".repeat(32)}`;
 

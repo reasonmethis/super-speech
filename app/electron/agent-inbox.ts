@@ -1,9 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { open } from "node:fs/promises";
 import path from "node:path";
-import { isSpeechicleId } from "../src/runtime.ts";
+import { AGENT_MESSAGE_TEXT_MAX, isSpeechicleId } from "../src/runtime.ts";
 
-export const AGENT_MESSAGE_TEXT_MAX = 4_000;
 const INBOX_PATH_MAX = 4_096;
 
 export interface AgentInboxMessage {
