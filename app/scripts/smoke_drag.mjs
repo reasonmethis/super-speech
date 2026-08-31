@@ -1391,6 +1391,11 @@ try {
     "Idle copy must offer typing without showing the editor",
   );
   assert(!await page.locator("#speech-composer").isVisible());
+  assert.equal(
+    await page.locator("#status-dot").evaluate((dot) => getComputedStyle(dot).backgroundColor),
+    "rgb(0, 154, 145)",
+    "Ready must use the teal from the brand mark",
+  );
   const idlePlayback = await playbackSnapshot(page);
   assert.deepEqual(center(idlePlayback.button), center(idlePlayback.ring));
   assert.equal(await page.locator("#playback-icon svg.idle-icon > rect").count(), 4);

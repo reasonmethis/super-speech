@@ -333,10 +333,16 @@ body.playback-expanded footer {
   box-shadow: 0 0 0 3px rgba(119, 115, 134, 0.12);
 }
 
-.status-dot.state-playing,
-.status-dot.state-idle {
+.status-dot.state-playing {
   background: #55d69e;
   box-shadow: 0 0 0 3px rgba(85, 214, 158, 0.12), 0 0 13px rgba(85, 214, 158, 0.46);
+}
+
+.status-dot.state-idle {
+  background: var(--carnival-teal);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--carnival-teal) 18%, transparent),
+    0 0 13px color-mix(in srgb, var(--carnival-teal) 55%, transparent);
 }
 
 .status-dot.state-paused {
