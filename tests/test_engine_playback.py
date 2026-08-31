@@ -2149,6 +2149,88 @@ def test_clear_during_a_gap_does_not_play_the_archived_chunk(
     assert (engine.SPOKEN / next_chunk.name).read_text(encoding="utf-8") == "Next"
 
 
+def test_clear_silences_playback_before_archiving_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_clear_silences_first")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    engine.SIGNAL_TICK = 0.001
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    current.write_text("Current", encoding="utf-8")
+    state = engine.State()
+    set_current(engine, state, current)
+    stream_started = threading.Event()
+    clear_started = threading.Event()
+    release_clear = threading.Event()
+    playbacks = []
+    outcomes: list[str] = []
+
+    class FakeOutputStream:
+        def __init__(self, *, callback, **_kwargs) -> None:
+            self.playback = callback.__self__
+            self.active = False
+            playbacks.append(self.playback)
+
+        def start(self) -> None:
+            self.active = True
+            stream_started.set()
+
+        def abort(self) -> None:
+            self.active = False
+
+        def close(self) -> None:
+            self.active = False
+
+    original_clear = engine.do_clear
+
+    def slow_clear(buffer, current_state) -> bool:
+        clear_started.set()
+        release_clear.wait()
+        return original_clear(buffer, current_state)
+
+    monkeypatch.setattr(engine, "do_clear", slow_clear)
+    sounddevice = SimpleNamespace(
+        CallbackStop=CallbackStop,
+        OutputStream=FakeOutputStream,
+    )
+
+    def run_playback() -> None:
+        outcomes.append(
+            engine.play_one(
+                sounddevice,
+                np,
+                current,
+                np.ones(10_000, dtype=np.float32),
+                1_000,
+                "chunk",
+                queue.Queue(),
+                state,
+            )
+        )
+
+    playback_thread = threading.Thread(target=run_playback)
+    playback_thread.start()
+    try:
+        assert stream_started.wait(1)
+        request_id = request_mutation(engine, "clear")
+        assert clear_started.wait(1)
+        playback = playbacks[0]
+        position = playback.position
+        output = np.empty((4, 1), dtype=np.float32)
+        playback.callback(output, 4, None, None)
+        np.testing.assert_array_equal(output[:, 0], [0, 0, 0, 0])
+        assert playback.position == position
+    finally:
+        release_clear.set()
+        playback_thread.join(2)
+
+    assert not playback_thread.is_alive()
+    assert outcomes == ["clear"]
+    committed_result(engine, request_id)
+
+
 def test_clear_cannot_race_a_worker_refilling_a_full_buffer(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_clear_full_buffer")
     configure_runtime(engine, tmp_path)

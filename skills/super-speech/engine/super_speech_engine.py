@@ -143,7 +143,7 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
-ENGINE_VERSION = "0.7.0"
+ENGINE_VERSION = "0.7.1"
 STATUS_VERSION = 14
 STARTUP_TIMEOUT = 120.0
 
@@ -877,35 +877,53 @@ def mutation_result_path(request_id: str) -> Path:
     return BASE / f"MUTATION_RESULT.{request_id}.json"
 
 
+def _publish_mutation_unlocked(request: MutationRequest) -> None:
+    sequence = _allocate_command_sequence_unlocked()
+    request_path = MUTATION.with_name(
+        f"{MUTATION.stem}.s{sequence:020d}.{request.request_id}.json"
+    )
+    temp_path = request_path.with_name(
+        f"{request_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    payload = request.to_payload()
+    payload["command_sequence"] = sequence
+    try:
+        temp_path.write_text(
+            json.dumps(payload, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        _replace_command_json_unlocked(
+            temp_path,
+            request_path,
+            payload,
+            "could not publish timeline mutation",
+        )
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 def request_mutation(request: MutationRequest) -> str:
-    """Publish one validated mutation to the engine's durable FIFO stream."""
+    """Publish one mutation, silencing playback first when clearing the queue."""
     if not engine_is_running():
         raise RuntimeError("engine is not running")
 
     BASE.mkdir(parents=True, exist_ok=True)
     with playback_command_lock():
-        sequence = _allocate_command_sequence_unlocked()
-        request_path = MUTATION.with_name(
-            f"{MUTATION.stem}.s{sequence:020d}.{request.request_id}.json"
-        )
-        temp_path = request_path.with_name(
-            f"{request_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-        )
-        payload = request.to_payload()
-        payload["command_sequence"] = sequence
+        clear_pause_sequence = None
+        if (
+            isinstance(request, ClearMutation)
+            and _ordered_marker_sequence_unlocked(PAUSE) is None
+        ):
+            clear_pause_sequence = _publish_ordered_marker_unlocked(PAUSE)
         try:
-            temp_path.write_text(
-                json.dumps(payload, separators=(",", ":")),
-                encoding="utf-8",
-            )
-            _replace_command_json_unlocked(
-                temp_path,
-                request_path,
-                payload,
-                "could not publish timeline mutation",
-            )
-        finally:
-            temp_path.unlink(missing_ok=True)
+            _publish_mutation_unlocked(request)
+        except Exception:
+            if (
+                clear_pause_sequence is not None
+                and _ordered_marker_sequence_unlocked(PAUSE) == clear_pause_sequence
+            ):
+                PAUSE.unlink(missing_ok=True)
+            raise
     return request.request_id
 
 

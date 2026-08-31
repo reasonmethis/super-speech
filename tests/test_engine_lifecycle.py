@@ -1819,6 +1819,63 @@ def test_missing_counter_recovers_pending_commands_before_allocating(
     assert marker["command_sequence"] == 4
 
 
+def test_clear_pauses_audio_before_publishing_its_durable_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_immediate_clear")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    current.write_text("Current", encoding="utf-8")
+    state = engine.State()
+    set_current(engine, state, current)
+
+    request_id = request_mutation(engine, "clear")
+
+    marker = json.loads(engine.PAUSE.read_text(encoding="utf-8"))
+    request_path = next(engine.BASE.glob(f"MUTATION.*.{request_id}.json"))
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    assert marker == {"command_sequence": 1}
+    assert request["command_sequence"] == 2
+
+    assert engine.process_mutation_requests(queue.Queue(), state) == "clear"
+    committed_result(engine, request_id)
+    assert not engine.PAUSE.exists()
+
+
+@pytest.mark.parametrize("already_paused", [False, True])
+def test_failed_clear_publication_preserves_the_previous_pause_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    already_paused: bool,
+) -> None:
+    engine = load_engine("super_speech_engine_failed_clear_publication")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    if already_paused:
+        engine.publish_ordered_marker(engine.PAUSE)
+    original_replace = engine._replace_command_json_unlocked
+
+    def fail_mutation_publish(
+        temporary: Path,
+        target: Path,
+        payload: dict[str, object],
+        error_message: str,
+    ) -> None:
+        if target.name.startswith("MUTATION."):
+            raise RuntimeError("could not publish timeline mutation")
+        original_replace(temporary, target, payload, error_message)
+
+    monkeypatch.setattr(engine, "_replace_command_json_unlocked", fail_mutation_publish)
+
+    with pytest.raises(RuntimeError, match="could not publish timeline mutation"):
+        request_mutation(engine, "clear")
+
+    assert engine.PAUSE.exists() is already_paused
+    assert not list(engine.BASE.glob("MUTATION.*.json"))
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -1922,7 +1979,7 @@ def test_concurrent_mutation_publishers_receive_unique_ordered_sequences(
         for path in engine.BASE.glob("MUTATION.*.json")
     ]
     assert sorted(payload["command_sequence"] for payload in payloads) == list(
-        range(1, 9)
+        range(2, 10)
     )
 
 
@@ -1957,12 +2014,12 @@ def test_mutation_publication_handles_transient_windows_replace_errors(
     assert len(requests) == 1
     payload = json.loads(requests[0].read_text(encoding="utf-8"))
     assert payload["request_id"] == request_id
-    assert payload["command_sequence"] == 1
+    assert payload["command_sequence"] == 2
 
     marker_sequence = engine.publish_ordered_marker(engine.PAUSE)
     marker = json.loads(engine.PAUSE.read_text(encoding="utf-8"))
-    assert marker_sequence == 2
-    assert marker == {"command_sequence": 2}
+    assert marker_sequence == 3
+    assert marker == {"command_sequence": 3}
 
 
 def test_scoped_control_cannot_affect_a_successor_engine(tmp_path: Path) -> None:
