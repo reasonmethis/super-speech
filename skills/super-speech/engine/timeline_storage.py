@@ -15,7 +15,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal, Protocol, TypeGuard
 
 from file_lock import InterprocessFileLock
@@ -35,6 +35,7 @@ from speechicle_identity import (
 )
 
 SOURCE_LABEL_MAX = 80
+INBOX_PATH_MAX = 4096
 
 
 def normalize_source_label(value: object) -> str | None:
@@ -51,6 +52,39 @@ def normalize_source_label(value: object) -> str | None:
     ):
         raise ValueError("invalid source label")
     return source
+
+
+def normalize_inbox_path(value: object) -> str | None:
+    """Resolve one optional agent inbox path or reject invalid caller input."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("invalid inbox path")
+    inbox = value.strip()
+    if (
+        not inbox
+        or len(inbox) > INBOX_PATH_MAX
+        or any(ord(character) < 32 or ord(character) == 127 for character in inbox)
+    ):
+        raise ValueError("invalid inbox path")
+    try:
+        return str(Path(inbox).expanduser().resolve())
+    except (OSError, RuntimeError, ValueError) as error:
+        raise ValueError("invalid inbox path") from error
+
+
+def stored_inbox_path_is_valid(value: object) -> bool:
+    """Accept a normalized absolute inbox path from either supported platform."""
+    if value is None:
+        return True
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > INBOX_PATH_MAX
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        return False
+    return PureWindowsPath(value).is_absolute() or PurePosixPath(value).is_absolute()
 
 
 class MutationOutcomeUnconfirmed(RuntimeError):
@@ -164,6 +198,14 @@ class TimelinePaths:
     @property
     def sequence_counter(self) -> Path:
         return self.root / "next-sequence.json"
+
+
+@dataclass(frozen=True, slots=True)
+class SpeechicleMetadata:
+    """Optional data that follows one Speechicle through timeline moves."""
+
+    source: str | None = None
+    inbox: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,8 +352,8 @@ class TimelineStorage:
     def public_id(cls, path: Path) -> str:
         return cls.canonical_filename(path).public_id
 
-    def source_label(self, public_id: str) -> str | None:
-        """Read optional source metadata without making playback depend on it."""
+    def metadata(self, public_id: str) -> SpeechicleMetadata:
+        """Read optional metadata without making playback depend on it."""
         if not is_public_id(public_id):
             raise ValueError("invalid Speechicle ID")
         try:
@@ -319,19 +361,44 @@ class TimelineStorage:
                 (self.paths.sources / f"{public_id}.json").read_text(encoding="utf-8")
             )
         except (OSError, json.JSONDecodeError):
-            return None
-        if not isinstance(payload, dict) or set(payload) != {"version", "source"}:
-            return None
-        if payload.get("version") != 1:
-            return None
+            return SpeechicleMetadata()
+        if not isinstance(payload, dict):
+            return SpeechicleMetadata()
         try:
-            return normalize_source_label(payload.get("source"))
+            if payload.get("version") == 1 and set(payload) == {"version", "source"}:
+                return SpeechicleMetadata(
+                    source=normalize_source_label(payload.get("source"))
+                )
+            if payload.get("version") == 2 and set(payload) == {
+                "version",
+                "source",
+                "inbox",
+            }:
+                inbox = payload.get("inbox")
+                if not stored_inbox_path_is_valid(inbox):
+                    raise ValueError("invalid inbox path")
+                return SpeechicleMetadata(
+                    source=normalize_source_label(payload.get("source")),
+                    inbox=inbox,
+                )
         except ValueError:
-            return None
+            pass
+        return SpeechicleMetadata()
 
-    def _write_source_label(self, public_id: str, source: str) -> None:
+    def source_label(self, public_id: str) -> str | None:
+        return self.metadata(public_id).source
+
+    def inbox_path(self, public_id: str) -> str | None:
+        return self.metadata(public_id).inbox
+
+    def _write_metadata(
+        self,
+        public_id: str,
+        source: str | None,
+        inbox: str | None,
+    ) -> None:
         payload = json.dumps(
-            {"version": 1, "source": source},
+            {"version": 2, "source": source, "inbox": inbox},
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
@@ -344,7 +411,7 @@ class TimelineStorage:
             replace_path_with_confirmation(
                 temporary,
                 target,
-                "source label publication",
+                "Speechicle metadata publication",
                 expected_bytes=payload,
             )
         finally:
@@ -653,9 +720,11 @@ class TimelineStorage:
         gap_ms: int | None,
         text: str,
         source: str | None = None,
+        inbox: str | None = None,
     ) -> Path:
         """Create one Queue file without enumerating the stored timeline."""
         source = normalize_source_label(source)
+        inbox = normalize_inbox_path(inbox)
         with self.mutation():
             self._recover_current_plan()
             namespace, sequence = self._read_sequence_counter()
@@ -664,8 +733,8 @@ class TimelineStorage:
             # Save the number first so a failed Queue write cannot reuse an ID
             self._write_sequence_counter(namespace, sequence + 1)
             public_id = self._derived_public_id(namespace, sequence)
-            if source is not None:
-                self._write_source_label(public_id, source)
+            if source is not None or inbox is not None:
+                self._write_metadata(public_id, source, inbox)
             path = self.paths.queue / SpeechicleFilename(
                 sequence, public_id, voice, gap_ms
             ).render()
@@ -709,9 +778,11 @@ class TimelineStorage:
                         "text": text,
                         "voice": self.canonical_filename(path).voice,
                     }
-                    source = self.source_label(speechicle_id)
-                    if source is not None:
-                        item["source"] = source
+                    metadata = self.metadata(speechicle_id)
+                    if metadata.source is not None:
+                        item["source"] = metadata.source
+                    if metadata.inbox is not None:
+                        item["inbox"] = metadata.inbox
                     items.append(item)
                 self._history_count = len(history_files)
                 self._history_items = items

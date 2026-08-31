@@ -325,6 +325,13 @@ def test_mutation_variants_only_expose_their_valid_fields() -> None:
         {
             "request_id": "a" * 24,
             "type": "enqueue",
+            "text": "Speech",
+            "voice": "af_heart",
+            "inbox": "line\nbreak",
+        },
+        {
+            "request_id": "a" * 24,
+            "type": "enqueue",
             "text": "   ",
             "voice": "af_heart",
         },

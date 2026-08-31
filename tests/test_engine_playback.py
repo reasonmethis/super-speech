@@ -2009,11 +2009,17 @@ def test_speak_waits_for_engine_acceptance_after_queueing_new_work(
     engine = load_engine("super_speech_engine_speak_continue")
     configure_runtime(engine, tmp_path)
     starts: list[str] = []
-    queued: list[tuple[str, str, int | None, str | None]] = []
+    queued: list[tuple[str, str, int | None, str | None, str | None]] = []
     monkeypatch.setattr(engine, "start_engine", lambda: starts.append("start"))
 
-    def enqueue(text: str, voice: str, gap: int | None, source: str | None) -> Path:
-        queued.append((text, voice, gap, source))
+    def enqueue(
+        text: str,
+        voice: str,
+        gap: int | None,
+        source: str | None,
+        inbox: str | None,
+    ) -> Path:
+        queued.append((text, voice, gap, source, inbox))
         return (
             engine.QUEUE
             / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
@@ -2029,11 +2035,21 @@ def test_speak_waits_for_engine_acceptance_after_queueing_new_work(
         lambda: starts.append("accept") or True,
     )
 
+    inbox = tmp_path / "agent-inbox.jsonl"
     assert engine.cli(
-        ["speak", "New work", "--source", "Codex UI task"]
+        [
+            "speak",
+            "New work",
+            "--source",
+            "Codex UI task",
+            "--inbox",
+            str(inbox),
+        ]
     ) == 0
     assert starts == ["start", "accept"]
-    assert queued == [("New work", "af_heart", None, "Codex UI task")]
+    assert queued == [
+        ("New work", "af_heart", None, "Codex UI task", str(inbox))
+    ]
     assert engine.CONTINUE.exists()
 
 

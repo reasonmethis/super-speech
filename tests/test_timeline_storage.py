@@ -65,15 +65,23 @@ def test_reserve_uses_only_the_counter_after_preparation(
     assert SpeechicleFilename.parse(queued.name).sequence == 1
 
 
-def test_source_label_follows_one_id_through_voice_history_and_delete(
+def test_metadata_follows_one_id_through_voice_history_and_delete(
     tmp_path: Path,
 ) -> None:
     storage = prepared_storage(tmp_path)
-    queued = storage.reserve("af_heart", None, "Hello", "Codex UI task")
+    inbox = tmp_path / "agent-inbox.jsonl"
+    queued = storage.reserve(
+        "af_heart",
+        None,
+        "Hello",
+        "Codex UI task",
+        str(inbox),
+    )
     speechicle_id = storage.public_id(queued)
 
     changed = storage.replace_queue_voice(queued, "bm_fable")
     assert storage.source_label(speechicle_id) == "Codex UI task"
+    assert storage.inbox_path(speechicle_id) == str(inbox)
 
     assert storage.archive_many([changed])
     assert storage.history_snapshot(50)[1] == [
@@ -82,11 +90,26 @@ def test_source_label_follows_one_id_through_voice_history_and_delete(
             "text": "Hello",
             "voice": "bm_fable",
             "source": "Codex UI task",
+            "inbox": str(inbox),
         }
     ]
 
     assert storage.delete_history(speechicle_id) is not None
     assert storage.source_label(speechicle_id) is None
+    assert storage.inbox_path(speechicle_id) is None
+
+
+def test_version_one_source_metadata_remains_readable(tmp_path: Path) -> None:
+    storage = prepared_storage(tmp_path)
+    queued = storage.reserve("af_heart", None, "Hello")
+    speechicle_id = storage.public_id(queued)
+    (storage.paths.sources / f"{speechicle_id}.json").write_text(
+        json.dumps({"version": 1, "source": "Older agent"}),
+        encoding="utf-8",
+    )
+
+    assert storage.source_label(speechicle_id) == "Older agent"
+    assert storage.inbox_path(speechicle_id) is None
 
 
 def test_reserve_rejects_invalid_source_metadata(tmp_path: Path) -> None:
@@ -94,6 +117,9 @@ def test_reserve_rejects_invalid_source_metadata(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="invalid source label"):
         storage.reserve("af_heart", None, "Hello", "first line\nsecond line")
+
+    with pytest.raises(ValueError, match="invalid inbox path"):
+        storage.reserve("af_heart", None, "Hello", inbox="first line\nsecond line")
 
 
 def test_counter_gap_after_failed_file_publish_is_never_reused(

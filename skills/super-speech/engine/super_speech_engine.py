@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import NamedTuple, assert_never
 
 from file_lock import InterprocessFileLock
+from inbox_listener import listen_inbox
 
 from mutation_protocol import (
     ArchiveMutation,
@@ -75,8 +76,10 @@ from timeline_storage import (
     MutationOutcomeUnconfirmed,
     TimelinePaths,
     TimelineStorage,
+    normalize_inbox_path,
     normalize_source_label,
     replace_path_with_confirmation,
+    stored_inbox_path_is_valid,
 )
 
 try:
@@ -140,8 +143,8 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
-ENGINE_VERSION = "0.6.0"
-STATUS_VERSION = 13
+ENGINE_VERSION = "0.7.0"
+STATUS_VERSION = 14
 STARTUP_TIMEOUT = 120.0
 
 timeline = TimelineStorage(TIMELINE_PATHS, DEFAULT_VOICE)
@@ -443,9 +446,11 @@ def _speechicle_status_item(path: Path, text: str) -> dict[str, object]:
         "text": text,
         "voice": voice_from_name(path.name),
     }
-    source = timeline.source_label(speechicle_id)
-    if source is not None:
-        item["source"] = source
+    metadata = timeline.metadata(speechicle_id)
+    if metadata.source is not None:
+        item["source"] = metadata.source
+    if metadata.inbox is not None:
+        item["inbox"] = metadata.inbox
     return item
 
 
@@ -458,6 +463,7 @@ def enqueue_text(
     voice: str,
     gap_ms: int | None = None,
     source: str | None = None,
+    inbox: str | None = None,
 ) -> Path:
     """Atomically append one Speechicle to Queue."""
     text = text.strip()
@@ -467,7 +473,13 @@ def enqueue_text(
         raise ValueError(f"invalid Kokoro voice: {voice}")
     if gap_ms is not None and not 0 <= gap_ms <= 1500:
         raise ValueError("gap must be between 0 and 1500 milliseconds")
-    return timeline.reserve(voice, gap_ms, text, normalize_source_label(source))
+    return timeline.reserve(
+        voice,
+        gap_ms,
+        text,
+        normalize_source_label(source),
+        normalize_inbox_path(inbox),
+    )
 
 
 def history_snapshot() -> tuple[int, list[dict[str, object]]]:
@@ -1120,8 +1132,13 @@ def _source_label_is_valid(value: object) -> bool:
         return False
 
 
+def _inbox_path_is_valid(value: object) -> bool:
+    return stored_inbox_path_is_valid(value)
+
+
 def _status_item_is_valid(value: object) -> bool:
     source = value.get("source") if isinstance(value, dict) else None
+    inbox = value.get("inbox") if isinstance(value, dict) else None
     return (
         isinstance(value, dict)
         and is_public_id(value.get("id"))
@@ -1129,6 +1146,7 @@ def _status_item_is_valid(value: object) -> bool:
         and isinstance(value.get("text"), str)
         and isinstance(value.get("voice"), str)
         and _source_label_is_valid(source)
+        and _inbox_path_is_valid(inbox)
     )
 
 
@@ -1905,6 +1923,7 @@ def apply_enqueue_mutation(request: EnqueueMutation) -> Path:
         request.text,
         request.voice,
         source=request.source,
+        inbox=request.inbox,
     )
 
 
@@ -3026,6 +3045,16 @@ def cli(argv: list[str] | None = None) -> int:
     speak.add_argument("--voice", default="af_heart", help="Kokoro voice ID")
     speak.add_argument("--gap-ms", type=int, help="pre-speech gap from 0 to 1500 ms")
     speak.add_argument("--source", help="short agent or session label")
+    speak.add_argument("--inbox", help="file that receives replies from the user")
+    listen = commands.add_parser(
+        "listen-inbox", help="print messages appended to an agent inbox"
+    )
+    listen.add_argument("inbox", help="inbox file to create and follow")
+    listen.add_argument(
+        "--from-end",
+        action="store_true",
+        help="ignore messages already present when listening starts",
+    )
     setup = commands.add_parser("setup", help="download verified Kokoro models")
     setup.add_argument("--model-dir", type=Path, default=MODEL_DIR)
     commands.add_parser("status", help="print the current runtime status")
@@ -3076,6 +3105,7 @@ def cli(argv: list[str] | None = None) -> int:
                 args.voice,
                 args.gap_ms,
                 args.source,
+                args.inbox,
             )
             publish_ordered_marker(CONTINUE)
             if not wait_for_queue_acceptance():
@@ -3083,6 +3113,8 @@ def cli(argv: list[str] | None = None) -> int:
                     "speech remains queued; playback will begin when the engine is ready\n"
                 )
             print(public_id_for_path(queued))
+        elif args.command == "listen-inbox":
+            listen_inbox(args.inbox, from_end=args.from_end)
         elif args.command == "setup":
             install_models(args.model_dir)
         elif args.command == "status":

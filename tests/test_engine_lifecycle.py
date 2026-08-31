@@ -1478,8 +1478,9 @@ def test_speak_command_starts_engine_before_queueing(
         voice: str,
         gap_ms: int | None,
         source: str | None,
+        inbox: str | None,
     ) -> Path:
-        calls.append((text, voice, gap_ms, source))
+        calls.append((text, voice, gap_ms, source, inbox))
         return queued
 
     monkeypatch.setattr(engine, "enqueue_text", enqueue)
@@ -1490,7 +1491,7 @@ def test_speak_command_starts_engine_before_queueing(
     )
 
     assert engine.cli(["speak", "Hello there", "--gap-ms", "300"]) == 0
-    assert calls == ["start", ("Hello there", "af_heart", 300, None), "accept"]
+    assert calls == ["start", ("Hello there", "af_heart", 300, None, None), "accept"]
     assert capsys.readouterr().out.strip() == public_id
 
 

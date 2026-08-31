@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
 from speechicle_identity import is_public_id
-from timeline_storage import normalize_source_label
+from timeline_storage import normalize_inbox_path, normalize_source_label
 
 REQUEST_ID_PATTERN = re.compile(r"[a-f0-9]{24}")
 VOICE_PATTERN = re.compile(r"[ab][fm]_[a-z0-9_]+")
@@ -18,12 +18,13 @@ MUTATION_TYPES = frozenset(
 
 @dataclass(frozen=True)
 class EnqueueMutation:
-    """Append one new Speechicle with optional source metadata."""
+    """Append one new Speechicle with optional agent metadata."""
 
     request_id: str
     text: str
     voice: str
     source: str | None
+    inbox: str | None
     command_sequence: int | None = None
     type: Literal["enqueue"] = field(default="enqueue", init=False)
 
@@ -36,6 +37,8 @@ class EnqueueMutation:
         }
         if self.source is not None:
             payload["source"] = self.source
+        if self.inbox is not None:
+            payload["inbox"] = self.inbox
         if self.command_sequence is not None:
             payload["command_sequence"] = self.command_sequence
         return payload
@@ -203,6 +206,7 @@ def parse_durable_mutation(payload: object) -> MutationRequest:
                 "text",
                 "voice",
                 "source",
+                "inbox",
                 "command_sequence",
             },
         )
@@ -217,6 +221,7 @@ def parse_durable_mutation(payload: object) -> MutationRequest:
             text=text.strip(),
             voice=voice,
             source=normalize_source_label(payload.get("source")),
+            inbox=normalize_inbox_path(payload.get("inbox")),
             command_sequence=command_sequence,
         )
     if mutation_type == "play":

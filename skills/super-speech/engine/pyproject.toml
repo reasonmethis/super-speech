@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "super-speech"
-version = "0.5.0"
+version = "0.7.0"
 description = "Local Kokoro speech engine for desktop and headless use"
 requires-python = ">=3.11,<3.14"
 license = "MIT"
@@ -21,6 +21,7 @@ py-modules = [
     "mutation_protocol",
     "timeline_storage",
     "file_lock",
+    "inbox_listener",
 ]
 
 [tool.setuptools.dynamic]
