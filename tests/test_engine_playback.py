@@ -1234,7 +1234,7 @@ def test_selecting_a_prefetched_item_restarts_synthesis_at_piece_one(
     assert not worker.is_alive()
     assert restarted[0] == selected
     assert restarted[5] == 1
-    assert restarted[7] == "First sentence. Second sentence."
+    assert restarted[6] == "First sentence. Second sentence."
 
 
 def test_selection_interrupts_an_inter_chunk_gap(
@@ -2164,6 +2164,7 @@ def test_clear_silences_playback_before_archiving_finishes(
     release_clear = threading.Event()
     playbacks = []
     outcomes: list[str] = []
+    stream_cleanup: list[str] = []
 
     class FakeOutputStream:
         def __init__(self, *, callback, **_kwargs) -> None:
@@ -2176,9 +2177,11 @@ def test_clear_silences_playback_before_archiving_finishes(
             stream_started.set()
 
         def abort(self) -> None:
+            stream_cleanup.append("abort")
             self.active = False
 
         def close(self) -> None:
+            stream_cleanup.append("close")
             self.active = False
 
     original_clear = engine.do_clear
@@ -2228,6 +2231,7 @@ def test_clear_silences_playback_before_archiving_finishes(
 
     assert not playback_thread.is_alive()
     assert outcomes == ["clear"]
+    assert stream_cleanup == ["abort", "close"]
     committed_result(engine, request_id)
 
 

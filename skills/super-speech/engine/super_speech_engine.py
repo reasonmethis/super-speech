@@ -277,7 +277,7 @@ def start_engine() -> None:
         if engine_is_running():
             try:
                 stored_status = json.loads(STATUS.read_text(encoding="utf-8"))
-            except (OSError, ValueError, json.JSONDecodeError):
+            except (OSError, ValueError):
                 stored_status = {}
             version = stored_status.get("version")
             status_pid = stored_status.get("engine_pid")
@@ -355,7 +355,7 @@ def wait_for_engine_status(
         if running:
             try:
                 status = json.loads(STATUS.read_text(encoding="utf-8"))
-            except (OSError, ValueError, json.JSONDecodeError):
+            except (OSError, ValueError):
                 status = {}
             updated_at = status.get("updated_at")
             pid_matches = expected_pid is None or status.get("engine_pid") == expected_pid
@@ -387,7 +387,7 @@ def storage_is_ready(engine_pid: object) -> bool:
         return False
     try:
         payload = json.loads(STORAGE_READY.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return False
     return payload == {"engine_pid": engine_pid}
 
@@ -2385,10 +2385,7 @@ def claim_next_queued_chunk(st: State) -> Path | None:
 
 
 def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
-    """Producer: claim the next queued chunk, split it into sentence-aligned pieces,
-    synthesize each, and bank playback entries in buf (blocking when the buffer
-    is full - natural backpressure). Abandons a chunk's
-    remaining pieces when clear or skip unclaims it."""
+    """Synthesize claimed chunks into a bounded queue of playback pieces."""
     while not st.stop.is_set():
         if consume(WARMUP):
             warmup(kokoro)
@@ -2400,8 +2397,8 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
         nxt, generation = claim
         try:
             text = nxt.read_text(encoding="utf-8").strip()
-        except Exception as e:
-            log(f"read error {nxt.name}: {e}")
+        except (OSError, UnicodeError) as error:
+            log(f"read error {nxt.name}: {error}")
             with st.lock:
                 if st.claims.get(nxt.name) != generation:
                     continue
@@ -2425,7 +2422,7 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
             continue
         voice = voice_from_name(nxt.name)
         pieces = split_text_pieces(text, SPLIT_CHARS)
-        delivered = 0
+        delivered_any = False
         for idx, piece in enumerate(pieces):
             terminal_failure = False
             if st.stop.is_set() or not _claimed(st, nxt.name, generation):
@@ -2441,7 +2438,7 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
                     log(f"ignored stale synth error {nxt.name}[{idx}]: {e}")
                     break
                 log(f"synth error {nxt.name}[{idx}] (voice={voice}): {e}")
-                if delivered == 0:
+                if not delivered_any:
                     with st.lock:
                         if (
                             st.claims.get(nxt.name) != generation
@@ -2470,9 +2467,7 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
                 idx == 0,
                 terminal_failure or idx == len(pieces) - 1,
                 idx + 1,
-                len(pieces),
                 text,
-                voice,
                 piece.start,
                 piece.end,
                 generation,
@@ -2486,7 +2481,7 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
                     except queue.Full:
                         pass
                     else:
-                        delivered += 1
+                        delivered_any = True
                         break
                 heartbeat()
                 time.sleep(SIGNAL_TICK)
@@ -2576,24 +2571,18 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
     try:
         while not playback.done.wait(SIGNAL_TICK):
             if st.stop.is_set():
-                stream.abort()
                 return "fatal"
             paused = playback_control.pause_requested()
             playback_state_changed = playback.set_paused(paused)
             if consume_control(INTERRUPT):
-                stream.abort()
                 reject_pending_requests(
                     "engine interrupted before command was applied", st
                 )
                 return "interrupt"
             consume_continue(st)
             mutation_effect = process_mutation_requests(buf, st)
-            if mutation_effect == "select":
-                stream.abort()
-                return "select"
-            if mutation_effect == "clear":
-                stream.abort()
-                return "clear"
+            if mutation_effect in {"select", "clear"}:
+                return mutation_effect
             if playback_state_changed:
                 log(f"{'PAUSE' if paused else 'RESUME'} {path.name}")
                 publish_status(
@@ -2608,10 +2597,8 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
             if st.saw_stop:
                 reject_pending_requests("engine is stopping", st)
             if st.stop.is_set():
-                stream.abort()
                 return "fatal"
             if consume_control(SKIP):
-                stream.abort()
                 return "skip"
 
             position = playback.position
@@ -2794,9 +2781,7 @@ def run_engine_loop(
                     first,
                     last,
                     piece,
-                    _buffered_piece_count,
                     text,
-                    _voice,
                     piece_start,
                     piece_end,
                     claim_generation,
@@ -2811,13 +2796,7 @@ def run_engine_loop(
                 return
 
             # Drop pieces invalidated while the worker was handing them off
-            with st.lock:
-                stale = buffered_piece_is_stale(
-                    st,
-                    path.name,
-                    claim_generation,
-                )
-            if stale:
+            if buffered_piece_is_stale(st, path.name, claim_generation):
                 continue
 
             mutation_effect = process_mutation_requests(buf, st, path.name)
@@ -2844,9 +2823,7 @@ def run_engine_loop(
                     invalidate_claim(st, path.name)
                     log("STOP (gap); exiting")
                     return
-                if outcome == "clear":
-                    continue
-                if outcome == "queue_changed":
+                if outcome in {"clear", "queue_changed"}:
                     continue
                 if outcome == "skip":
                     finish_chunk_playback(path, "skip", True, st)
@@ -2975,7 +2952,7 @@ def send_control(signal: Path) -> None:
         raise RuntimeError("engine is not running")
     try:
         engine_pid = json.loads(STATUS.read_text(encoding="utf-8")).get("engine_pid")
-    except (OSError, ValueError, json.JSONDecodeError) as error:
+    except (OSError, ValueError) as error:
         raise RuntimeError("engine status is unavailable") from error
     if not process_exists(engine_pid):
         raise RuntimeError("engine process is not running")
@@ -3066,7 +3043,7 @@ def print_status() -> None:
         if wait_for_engine_status():
             try:
                 running_status = json.loads(STATUS.read_text(encoding="utf-8"))
-            except (OSError, ValueError, json.JSONDecodeError) as error:
+            except (OSError, ValueError) as error:
                 raise RuntimeError("engine status is unavailable") from error
             if _snapshot_is_valid(running_status):
                 print(json.dumps(running_status, ensure_ascii=False))
@@ -3178,27 +3155,33 @@ def cli(argv: list[str] | None = None) -> int:
             publish_ordered_marker(PAUSE)
         elif args.command == "resume":
             resume()
-        elif args.command == "play":
+        elif args.command in {
+            "play",
+            "move",
+            "move-history",
+            "archive",
+            "delete",
+            "clear",
+        }:
             start_engine()
-            request_id = request_mutation(
-                build_mutation_request("play", id=args.chunk_id, voice=args.voice)
-            )
-            print(json.dumps(wait_for_mutation_result(request_id), ensure_ascii=False))
-        elif args.command in {"move", "move-history", "archive", "delete"}:
-            start_engine()
-            if args.command in {"move", "move-history"}:
+            if args.command == "play":
+                request = build_mutation_request(
+                    "play", id=args.chunk_id, voice=args.voice
+                )
+            elif args.command in {"move", "move-history"}:
                 request = build_mutation_request(
                     "move",
                     section="history" if args.command == "move-history" else "waiting",
                     id=args.chunk_id,
                     before_id=args.before_id,
                 )
+            elif args.command == "clear":
+                request = build_mutation_request("clear")
             else:
                 request = build_mutation_request(args.command, id=args.chunk_id)
-            request_id = request_mutation(request)
             print(
                 json.dumps(
-                    wait_for_mutation_result(request_id),
+                    wait_for_mutation_result(request_mutation(request)),
                     ensure_ascii=False,
                 )
             )
@@ -3210,10 +3193,6 @@ def cli(argv: list[str] | None = None) -> int:
             start_engine()
             result = execute_mutation(mutation_payload)
             print(json.dumps(result, ensure_ascii=False))
-        elif args.command == "clear":
-            start_engine()
-            request_id = request_mutation(build_mutation_request("clear"))
-            print(json.dumps(wait_for_mutation_result(request_id), ensure_ascii=False))
         else:
             signal = {
                 "skip": SKIP,
