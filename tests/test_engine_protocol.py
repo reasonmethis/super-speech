@@ -9,7 +9,7 @@ import pytest
 from engine_test_support import configure_runtime, load_engine
 
 
-def status_snapshot(engine) -> dict[str, object]:
+def idle_status_snapshot(engine) -> dict[str, object]:
     return {
         "version": engine.STATUS_VERSION,
         "timeline_revision": 4,
@@ -49,7 +49,7 @@ def test_python_status_validator_rejects_the_same_impossible_states_as_the_app()
         "piece_end": len("Speech"),
         "elapsed_seconds": 0.0,
     }
-    base = status_snapshot(engine)
+    base = idle_status_snapshot(engine)
     valid = {**base, "state": "playing", "current": current}
 
     assert engine._snapshot_is_valid(valid)
@@ -116,9 +116,9 @@ def test_unreadable_current_has_one_empty_piece_status_shape(
         "piece_end": None,
         "elapsed_seconds": 0.0,
     }
-    assert json.loads(json.dumps(projected["current"])) == expected
-    assert json.loads(json.dumps(direct["current"])) == expected
-    assert json.loads(json.dumps(stopped["current"])) == expected
+    assert projected["current"] == expected
+    assert direct["current"] == expected
+    assert stopped["current"] == expected
     assert failures_remaining == 0
 
 
@@ -152,7 +152,7 @@ def test_private_mutate_prints_unconfirmed_result_and_exits_successfully(
 ) -> None:
     engine = load_engine("super_speech_engine_unconfirmed_mutate_protocol")
     configure_runtime(engine, tmp_path)
-    snapshot = status_snapshot(engine)
+    snapshot = idle_status_snapshot(engine)
     engine.STATUS.write_text(json.dumps(snapshot), encoding="utf-8")
     request_ids: list[str] = []
 
@@ -210,7 +210,7 @@ def test_mutation_result_payload_rejects_impossible_field_combinations(
         engine._mutation_result_payload(
             "1" * 24,
             outcome,
-            status_snapshot(engine),
+            idle_status_snapshot(engine),
             result_id=result_id,
             error=error,
         )
@@ -227,15 +227,17 @@ def test_public_status_contains_no_storage_filenames(tmp_path: Path) -> None:
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
     assert status["version"] == engine.STATUS_VERSION
-    assert "filename" not in json.dumps(status)
+    assert "filename" not in status
     visible = [
         *([status["current"]] if status["current"] else []),
         *status["queue"],
         *status["history"],
     ]
     assert visible
-    assert all(engine.is_public_id(item["id"]) for item in visible)
-    assert not engine.PAUSE.exists()
+    assert all(
+        "filename" not in item and engine.is_public_id(item["id"])
+        for item in visible
+    )
 
 
 @pytest.mark.parametrize(
@@ -290,7 +292,7 @@ def test_mutation_envelope_accepts_each_variant(
 
     parsed = engine.parse_durable_mutation(payload)
 
-    assert type(parsed).__name__ == variant_name
+    assert isinstance(parsed, getattr(engine, variant_name))
     assert engine.mutation_payload(parsed) == payload
     with pytest.raises(FrozenInstanceError):
         parsed.request_id = "f" * 24

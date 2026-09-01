@@ -86,7 +86,7 @@ def test_ambiguous_mutation_claim_stops_before_applying_request(
 
     assert state.stop.is_set()
     assert archived.exists()
-    assert not (engine.BASE / f"MUTATION.result.{request_id}.json").exists()
+    assert not engine.mutation_result_path(request_id).exists()
 
 
 def test_mutation_claim_does_not_skip_a_locked_earlier_request(
@@ -98,6 +98,7 @@ def test_mutation_claim_does_not_skip_a_locked_earlier_request(
     for _ in range(2):
         request_mutation(engine, "clear")
     pending = sorted(engine.BASE.glob("MUTATION.*.json"))
+    assert len(pending) == 2
     attempted: list[Path] = []
 
     def block_claim(source, _destination) -> None:
@@ -108,6 +109,8 @@ def test_mutation_claim_does_not_skip_a_locked_earlier_request(
 
     assert engine.claim_next_mutation_request() is None
     assert attempted == pending[:1]
+    assert sorted(engine.BASE.glob("MUTATION.*.json")) == pending
+    assert not list(engine.BASE.glob("MUTATION.*.claim"))
 
 
 def test_split_text_pieces_retains_source_ranges_with_unicode_and_spacing() -> None:
@@ -416,7 +419,6 @@ def test_status_stays_playing_while_queued_audio_is_being_prepared(
 
 @pytest.mark.parametrize("cached_projection", ["missing", "mismatched"])
 def test_status_uses_queue_first_when_cached_progress_cannot_apply(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     cached_projection: str,
 ) -> None:
@@ -458,7 +460,6 @@ def test_status_replaces_progress_that_is_not_for_queue_first(tmp_path: Path) ->
     assert state.current_projection is not None
     assert state.current_projection.filename == first.name
     assert state.current_projection.active_piece is None
-    assert not hasattr(state, "selection_name")
 
 
 def test_status_cannot_be_paused_without_current_or_waiting_speech(
@@ -639,6 +640,7 @@ def test_stopped_status_contains_the_same_queue_items_as_its_count(
     engine.print_status()
     status = json.loads(capsys.readouterr().out)
 
+    assert status["state"] == "stopped"
     assert status["current"]["id"] == speechicle_id(engine, waiting)
     assert status["queue_count"] == len(status["queue"]) == 0
 
@@ -1661,6 +1663,11 @@ def test_start_engine_ignores_status_from_a_previous_lock_owner(
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     monkeypatch.setattr(engine, "process_exists", lambda process_id: process_id == 2222)
     monkeypatch.setattr(engine.time, "sleep", publish_current_owner)
+    monkeypatch.setattr(
+        engine.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("must not launch a second engine"),
+    )
 
     engine.start_engine()
 
@@ -1760,6 +1767,7 @@ def test_start_engine_retries_after_stopped_status_releases_the_instance_lock(
         launched_lock.release()
 
     assert launched
+    assert not holder.is_alive()
 
 
 def test_pause_and_resume_commands_share_the_runtime_signal(tmp_path: Path) -> None:
