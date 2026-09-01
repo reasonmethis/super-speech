@@ -1940,14 +1940,11 @@ def _reset_waiting_buffer(
                 discarded += 1
         for entry in kept:
             buf.put_nowait(entry)
-        kept_names = {entry[0].name for entry in kept}
-        st.claims = {
-            name: generation
-            for name, generation in st.claims.items()
-            if name in kept_names
-        }
-        if current_generation is not None:
-            st.claims[current_name] = current_generation
+        st.claims = (
+            {current_name: current_generation}
+            if current_generation is not None
+            else {}
+        )
         return discarded
 
 
@@ -1958,7 +1955,52 @@ def apply_play_mutation(
 ) -> str | None:
     """Select one ID while excluding worker claims from the transaction."""
     with st.lock:
-        return _apply_play_mutation_locked(buf, st, request)
+        chunk_id = request.id
+        requested_voice = request.voice
+        if requested_voice is not None and (
+            AVAILABLE_VOICES and requested_voice not in AVAILABLE_VOICES
+        ):
+            raise ValueError(f"unknown Kokoro voice: {requested_voice}")
+        try:
+            selection = timeline.select(chunk_id, requested_voice)
+        except MutationOutcomeUnconfirmed:
+            raise
+        except (OSError, RuntimeError) as error:
+            raise RuntimeError(f"could not select {chunk_id}") from error
+        if not selection.restart_playback:
+            log(f"PLAY current {chunk_id}; accepted")
+            return None
+        target = selection.target
+
+        try:
+            selected_text = target.read_text(encoding="utf-8").strip()
+        except OSError:
+            selected_text = ""
+        if not target.exists():
+            raise MutationOutcomeUnconfirmed("play command result was unconfirmed")
+        discarded = _discard_buffer(buf)
+        st.claims.clear()
+        replace_current_projection(
+            st,
+            target.name,
+            selected_text,
+            skip_initial_gap=True,
+        )
+        st.saw_stop = False
+        if public_id_for_path(target) != chunk_id:
+            raise MutationOutcomeUnconfirmed("play changed the stable Speechicle ID")
+        if selection.origin != "history":
+            log(
+                f"PLAY selected {target.name}; archived {selection.moved_count} older chunk(s); "
+                f"discarded {discarded} banked piece(s)"
+            )
+        else:
+            log(
+                f"PLAY History {chunk_id} as {target.name}; "
+                f"promoted {selection.moved_count} item(s); "
+                f"discarded {discarded} banked piece(s)"
+            )
+        return "select"
 
 
 def apply_enqueue_mutation(request: EnqueueMutation) -> Path:
@@ -1971,68 +2013,6 @@ def apply_enqueue_mutation(request: EnqueueMutation) -> Path:
         source=request.source,
         inbox=request.inbox,
     )
-
-
-def _apply_play_mutation_locked(
-    buf: "queue.Queue",
-    st: State,
-    request: PlayMutation,
-) -> str | None:
-    chunk_id = request.id
-    requested_voice = request.voice
-    if requested_voice is not None and (
-        AVAILABLE_VOICES and requested_voice not in AVAILABLE_VOICES
-    ):
-        raise ValueError(f"unknown Kokoro voice: {requested_voice}")
-    try:
-        selection = timeline.select(chunk_id, requested_voice)
-    except MutationOutcomeUnconfirmed as error:
-        log(f"selection outcome is unconfirmed for {chunk_id}: {error}")
-        st.stop.set()
-        raise
-    except ValueError as error:
-        log(f"could not select {chunk_id}: {error}")
-        raise
-    except (OSError, RuntimeError) as error:
-        log(f"could not select {chunk_id}: {error}")
-        raise RuntimeError(f"could not select {chunk_id}") from error
-    if not selection.restart_playback:
-        log(f"PLAY current {chunk_id}; accepted")
-        return None
-    target = selection.target
-
-    try:
-        selected_text = target.read_text(encoding="utf-8").strip()
-    except OSError:
-        selected_text = ""
-    if not target.exists():
-        st.stop.set()
-        raise MutationOutcomeUnconfirmed("play command result was unconfirmed")
-    with st.lock:
-        discarded = _discard_buffer(buf)
-        st.claims.clear()
-        replace_current_projection(
-            st,
-            target.name,
-            selected_text,
-            skip_initial_gap=True,
-        )
-        st.saw_stop = False
-    if public_id_for_path(target) != chunk_id:
-        st.stop.set()
-        raise MutationOutcomeUnconfirmed("play changed the stable Speechicle ID")
-    if selection.origin != "history":
-        log(
-            f"PLAY selected {target.name}; archived {selection.moved_count} older chunk(s); "
-            f"discarded {discarded} banked piece(s)"
-        )
-    else:
-        log(
-            f"PLAY History {chunk_id} as {target.name}; "
-            f"promoted {selection.moved_count} item(s); "
-            f"discarded {discarded} banked piece(s)"
-        )
-    return "select"
 
 
 def do_clear(buf: "queue.Queue", st: State) -> bool:
@@ -2090,10 +2070,6 @@ def apply_history_move_mutation(request: MoveMutation) -> None:
     )
 
 
-def _waiting_mutation_source(chunk_id: str) -> tuple[list[Path], Path]:
-    return timeline.waiting_source(chunk_id)
-
-
 def _finish_waiting_mutation(
     buf: "queue.Queue",
     st: State,
@@ -2101,7 +2077,7 @@ def _finish_waiting_mutation(
 ) -> int:
     try:
         return _reset_waiting_buffer(buf, st, current_name)
-    except (OSError, RuntimeError, queue.Full) as error:
+    except (OSError, RuntimeError) as error:
         raise MutationOutcomeUnconfirmed(
             "Waiting mutation committed but its audio buffer reset was unconfirmed"
         ) from error
@@ -2113,7 +2089,7 @@ def apply_archive_mutation(
     request: ArchiveMutation,
 ) -> None:
     """Move one Waiting row to History without changing Current."""
-    ordered, source = _waiting_mutation_source(request.id)
+    ordered, source = timeline.waiting_source(request.id)
     current_name = ordered[0].name
     if not archive(source):
         raise RuntimeError(f"could not archive waiting chunk: {request.id}")
@@ -2179,7 +2155,6 @@ def process_mutation_requests(
     """Apply mutations and publish their snapshots in one total FIFO order."""
     prune_mutation_results()
     effect: str | None = None
-    invalidate_held_chunk = False
     while not st.stop.is_set():
         try:
             claimed = claim_next_mutation_request()
@@ -2238,12 +2213,10 @@ def process_mutation_requests(
             if isinstance(request, EnqueueMutation):
                 queued = apply_enqueue_mutation(request)
                 result_id = public_id_for_path(queued)
-                if effect is None:
-                    effect = "queue_changed"
+                effect = effect or "queue_changed"
             elif isinstance(request, PlayMutation):
                 play_effect = apply_play_mutation(buf, st, request)
                 effect = play_effect or effect
-                invalidate_held_chunk = invalidate_held_chunk or play_effect == "select"
                 result_id = request.id
             elif isinstance(request, ClearMutation):
                 clear_committed = False
@@ -2261,18 +2234,15 @@ def process_mutation_requests(
                         hold_active=clear_committed
                     )
                 effect = "clear"
-                invalidate_held_chunk = True
             elif isinstance(request, MoveMutation):
                 if request.section == "history":
                     apply_history_move_mutation(request)
                 else:
                     apply_waiting_move_mutation(buf, st, request)
-                    if effect is None:
-                        effect = "queue_changed"
+                    effect = effect or "queue_changed"
             elif isinstance(request, ArchiveMutation):
                 apply_archive_mutation(buf, st, request)
-                if effect is None:
-                    effect = "queue_changed"
+                effect = effect or "queue_changed"
             elif isinstance(request, DeleteMutation):
                 apply_delete_mutation(request)
             else:
@@ -2314,7 +2284,7 @@ def process_mutation_requests(
                 result_id=result_id,
             ):
                 break
-    if invalidate_held_chunk and held_chunk_name is not None:
+    if effect in {"select", "clear"} and held_chunk_name is not None:
         invalidate_claim(st, held_chunk_name)
     return effect
 
