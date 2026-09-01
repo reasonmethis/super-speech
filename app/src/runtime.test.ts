@@ -55,6 +55,23 @@ function liveRuntime(overrides: Partial<RuntimeStatus> = {}): RuntimeStatus {
   };
 }
 
+function currentItem(
+  value: number,
+  overrides: Partial<NonNullable<EngineStatus["current"]>> = {},
+): NonNullable<EngineStatus["current"]> {
+  return {
+    id: speechicleId(value),
+    text: "Current",
+    voice: "af_heart",
+    piece: 0,
+    piece_count: 1,
+    piece_start: null,
+    piece_end: null,
+    elapsed_seconds: 0,
+    ...overrides,
+  };
+}
+
 test("archives only registered voices", () => {
   assert.deepEqual(
     [...ARCHIVED_VOICE_IDS],
@@ -177,17 +194,8 @@ test("accepts only normalized absolute inbox paths in status rows", () => {
   assert.equal(parseEngineStatus(withInbox("C:\\inbox\n.jsonl")), null);
 });
 
-test("represents unreadable Current as one empty pending piece", () => {
-  const unreadable = {
-    id: speechicleId(80),
-    text: "",
-    voice: "af_heart",
-    piece: 0,
-    piece_count: 1,
-    piece_start: null,
-    piece_end: null,
-    elapsed_seconds: 0,
-  };
+test("accepts unreadable Current only as one empty piece", () => {
+  const unreadable = currentItem(80, { text: "" });
   const snapshot = { ...status, state: "playing", current: unreadable };
   assert.deepEqual(parseEngineStatus(snapshot), snapshot);
   assert.equal(
@@ -272,32 +280,14 @@ test("rejects waiting speech without a playback-boundary item", () => {
 });
 
 test("rejects playback states that contradict the boundary", () => {
-  const current = {
-    id: speechicleId(1),
-    text: "Current",
-    voice: "af_heart",
-    piece: 0,
-    piece_count: 1,
-    piece_start: null,
-    piece_end: null,
-    elapsed_seconds: 0,
-  };
+  const current = currentItem(1);
   assert.equal(parseEngineStatus({ ...status, state: "playing" }), null);
   assert.equal(parseEngineStatus({ ...status, state: "paused" }), null);
   assert.equal(parseEngineStatus({ ...status, state: "idle", current }), null);
 });
 
 test("rejects duplicate active rows", () => {
-  const current = {
-    id: speechicleId(1),
-    text: "Current",
-    voice: "af_heart",
-    piece: 0,
-    piece_count: 1,
-    piece_start: null,
-    piece_end: null,
-    elapsed_seconds: 0,
-  };
+  const current = currentItem(1);
   assert.equal(
     parseEngineStatus({
       ...status,
@@ -311,16 +301,7 @@ test("rejects duplicate active rows", () => {
 });
 
 test("rejects duplicate IDs across active speech and History", () => {
-  const current = {
-    id: speechicleId(1),
-    text: "Current",
-    voice: "af_heart",
-    piece: 0,
-    piece_count: 1,
-    piece_start: null,
-    piece_end: null,
-    elapsed_seconds: 0,
-  };
+  const current = currentItem(1);
   const waiting = {
     id: speechicleId(2),
     text: "Waiting",
@@ -343,16 +324,12 @@ test("rejects duplicate IDs across active speech and History", () => {
 });
 
 test("rejects impossible piece ranges and History totals", () => {
-  const current = {
-    id: speechicleId(1),
+  const current = currentItem(1, {
     text: "Hello world",
-    voice: "af_heart",
     piece: 1,
-    piece_count: 1,
     piece_start: 0,
     piece_end: 5,
-    elapsed_seconds: 0,
-  };
+  });
   const valid = { ...status, state: "playing", current };
   assert.notEqual(parseEngineStatus(valid), null);
   assert.equal(
@@ -374,16 +351,13 @@ test("rejects impossible piece ranges and History totals", () => {
 });
 
 test("extracts the current Unicode piece with code-point offsets", () => {
-  const item = {
-    id: speechicleId(1),
+  const item = currentItem(1, {
     text: "😀 First. Second.",
-    voice: "af_heart",
     piece: 2,
     piece_count: 2,
     piece_start: 9,
     piece_end: 16,
-    elapsed_seconds: 0,
-  };
+  });
   assert.deepEqual(currentPieceSegments(item), {
     before: "😀 First. ",
     current: "Second.",
@@ -438,16 +412,12 @@ test("pending Play and Clear override stale paused and stopped snapshots", () =>
 });
 
 test("keeps newest waiting speech above current speech and history", () => {
-  const current = {
-    id: speechicleId(2),
+  const current = currentItem(2, {
     text: "Now",
-    voice: "af_heart",
     piece: 1,
-    piece_count: 1,
     piece_start: 0,
     piece_end: 3,
-    elapsed_seconds: 0,
-  };
+  });
   const next = { ...current, id: speechicleId(3), text: "Next" };
   const newest = { ...current, id: speechicleId(4), text: "Newest" };
   const earlier = { ...current, id: speechicleId(1), text: "Earlier" };
@@ -488,16 +458,12 @@ test("keeps newest waiting speech above current speech and history", () => {
 });
 
 test("keeps row order stable when current speech enters history", () => {
-  const current = {
-    id: speechicleId(2),
+  const current = currentItem(2, {
     text: "Now",
-    voice: "af_heart",
     piece: 1,
-    piece_count: 1,
     piece_start: 0,
     piece_end: 3,
-    elapsed_seconds: 0,
-  };
+  });
   const next = { ...current, id: speechicleId(3), text: "Next" };
   const newest = { ...current, id: speechicleId(4), text: "Newest" };
   const earlier = { ...current, id: speechicleId(1), text: "Earlier" };
@@ -580,7 +546,7 @@ test("validates every timeline mutation variant", () => {
   }
 });
 
-test("normalizes committed and failed mutation results", () => {
+test("normalizes committed, rejected, and unconfirmed mutation results", () => {
   const id = speechicleId(8);
   const request1 = "1".repeat(24);
   const request2 = "2".repeat(24);

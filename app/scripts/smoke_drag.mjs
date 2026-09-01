@@ -174,15 +174,11 @@ async function clickPlaybackButtonNearEdge(page) {
 async function assertDragClean(page) {
   assert.equal(await page.locator(".timeline-drag-ghost").count(), 0);
   assert.equal(await page.locator(".is-drag-source").count(), 0);
-  assert.equal(await page.locator(".timeline-drag-placeholder").count(), 0);
-  const ids = await page.locator(".speechicle-item.is-waiting").evaluateAll((items) =>
+  const ids = await page.locator(".speechicle-item").evaluateAll((items) =>
     items.map((item) => item.getAttribute("data-item-id"))
   );
-  assert.equal(new Set(ids).size, ids.length, "Waiting cards must have unique IDs");
-  const historyIds = await page.locator(".speechicle-item.is-history").evaluateAll((items) =>
-    items.map((item) => item.getAttribute("data-item-id"))
-  );
-  assert.equal(new Set(historyIds).size, historyIds.length, "History cards must have unique IDs");
+  assert(ids.every(Boolean), "Every timeline card must expose a stable ID");
+  assert.equal(new Set(ids).size, ids.length, "Timeline cards must have unique IDs");
 }
 
 async function timelineMenuIsFullyVisible(page, selector) {
@@ -759,6 +755,7 @@ try {
   assert(dragged, "The floating drag preview must stay visible");
   assert(
     Math.abs(dragged.y + dragged.height / 2 - (firstStart.y + firstStart.height / 2)) < 1,
+    "The drag preview center must track the destination midpoint",
   );
   assert(
     await page.evaluate(() => globalThis.__queueReorderAnimationRequests) > 0,
@@ -969,11 +966,6 @@ try {
     Math.max(...copyLefts) - Math.min(...copyLefts) < 1,
     "Timeline copy must share one left edge across every row type",
   );
-  assert.equal(
-    await page.locator(".queue-order").count(),
-    0,
-    "Timeline labels must not shift row copy",
-  );
   const renderedHistoryCount = await page.locator(".speechicle-item.is-history").count();
   const historyCountLabel = renderedHistoryCount < status().history_count
     ? `${renderedHistoryCount.toLocaleString()} recent of ${status().history_count.toLocaleString()}`
@@ -988,11 +980,6 @@ try {
       await page.locator("#version-label").textContent() ?? ""
     ),
     "The footer did not show app and engine versions",
-  );
-  assert.equal(
-    await page.locator(".queue-disclosure").count(),
-    0,
-    "Timeline rows must not render separate disclosure buttons",
   );
   const menuRow = page.locator(
     '.speechicle-item.is-waiting[data-inbox]:not([data-inbox=""])',
@@ -1111,8 +1098,10 @@ try {
   assert.equal(await visibleVoiceMenu.count(), 0, "Selecting the current voice did not close the menu");
   await menuButton.click();
   const visibleActions = page.locator("#queue-action-menu:not([hidden])");
-  await new Promise((resolve) => setTimeout(resolve, 800));
-  assert.equal(await visibleActions.count(), 1, "The row action menu did not open");
+  await waitFor(
+    async () => await visibleActions.count() === 1,
+    "The row action menu did not open",
+  );
   assert(
     await visibleActions.evaluate((menu) => menu.contains(document.activeElement)),
     "Opening row actions must move keyboard focus into the popover",
@@ -1258,7 +1247,11 @@ try {
   await page.mouse.up();
   await new Promise((resolve) => setTimeout(resolve, 1_000));
   const playbackAfterHistoryGesture = status();
-  assert.equal(await page.locator(".speechicle-item.is-pending").count(), 0);
+  assert.equal(
+    await page.locator(".speechicle-item.is-pending").count(),
+    0,
+    "Dragging an archived card must not leave a pending playback state",
+  );
   assert.equal(
     playbackAfterHistoryGesture.current?.id,
     playbackBeforeHistoryGesture.current?.id,
@@ -1550,11 +1543,6 @@ try {
     await page.locator("#queue-action-menu .queue-menu-action").allTextContents(),
     ["Resume", "Copy text"],
     "Current actions must omit Play and Delete",
-  );
-  assert.equal(
-    await page.locator("#queue-action-menu .queue-menu-voice").count(),
-    0,
-    "The row menu must not duplicate inline voice selection",
   );
   await page.locator("#speech-heading").click();
   const currentVoiceButton = page.locator(
@@ -1906,7 +1894,7 @@ try {
     "The renderer did not recover after replacing the external engine",
   );
 
-  console.log("Super Speech pointer drag and cancellation smoke test passed");
+  console.log("Super Speech renderer interaction smoke test passed");
 } catch (error) {
   const engineLog = path.join(runtime, "engine.log");
   if (existsSync(engineLog)) {

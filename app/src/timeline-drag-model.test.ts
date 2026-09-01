@@ -13,8 +13,11 @@ import { moveSpeechicleItemBefore } from "./runtime.ts";
 
 const initialOrder = ["newest", "middle", "oldest"];
 
-function begin(pointerId = 1): TimelineDragState {
-  const state = startTimelineDrag(pointerId, "middle", initialOrder, "waiting");
+function begin(
+  kind: TimelineDragState["kind"] = "waiting",
+  pointerId = 1,
+): TimelineDragState {
+  const state = startTimelineDrag(pointerId, "middle", initialOrder, kind);
   assert(state);
   return state;
 }
@@ -75,7 +78,8 @@ test("derives every preview from the original order", () => {
   assert.deepEqual(first.state.initialVisualOrder, initialOrder);
 });
 
-test("every cancellation path restores the original order without a command", () => {
+test("cancel and uncommitted finish restore every phase without a command", () => {
+  const historyOrigin = begin("history");
   const states = [
     begin(),
     transitionTimelineDrag(begin(), {
@@ -87,15 +91,27 @@ test("every cancellation path restores the original order without a command", ()
       type: "preview-history",
       pointerId: 1,
     }).state,
+    historyOrigin,
+    transitionTimelineDrag(historyOrigin, {
+      type: "preview-section",
+      pointerId: 1,
+      beforeId: "newest",
+    }).state,
+  ];
+  const cancellationEvents: TimelineDragEvent[] = [
+    { type: "cancel" },
+    { type: "finish", pointerId: 1, commit: false },
   ];
 
   for (const state of states) {
     assert(state);
-    assert.deepEqual(transitionTimelineDrag(state, { type: "cancel" }), {
-      state: null,
-      visualOrder: initialOrder,
-      command: null,
-    });
+    for (const event of cancellationEvents) {
+      assert.deepEqual(transitionTimelineDrag(state, event), {
+        state: null,
+        visualOrder: initialOrder,
+        command: null,
+      });
+    }
   }
   assert.deepEqual(transitionTimelineDrag(null, { type: "cancel" }), {
     state: null,
@@ -249,17 +265,22 @@ test("History-origin drags cannot enter the archive drop phase", () => {
   assert.equal(transition.command, null);
 });
 
-test("stale pointer events cannot affect a newer session", () => {
+test("every stale pointer event is a strict no-op", () => {
   const restarted = startTimelineDrag(2, "oldest", initialOrder, "waiting");
   assert(restarted);
 
-  const staleFinish = transitionTimelineDrag(restarted, {
-    type: "finish",
-    pointerId: 1,
-    commit: true,
-  });
-  assert.equal(staleFinish.state, restarted);
-  assert.equal(staleFinish.command, null);
+  const staleEvents: TimelineDragEvent[] = [
+    { type: "preview-section", pointerId: 1, beforeId: "newest" },
+    { type: "preview-history", pointerId: 1 },
+    { type: "finish", pointerId: 1, commit: true },
+    { type: "finish", pointerId: 1, commit: false },
+  ];
+  for (const event of staleEvents) {
+    const transition = transitionTimelineDrag(restarted, event);
+    assert.equal(transition.state, restarted);
+    assert.equal(transition.visualOrder, null);
+    assert.equal(transition.command, null);
+  }
 });
 
 test("long retargeting sequences preserve one copy of every Speechicle", () => {
@@ -316,7 +337,7 @@ test("short adversarial event sequences preserve lifecycle invariants", () => {
         const { initialVisualOrder, sourceId } = transition.state;
         assert(initialVisualOrder.includes(sourceId));
         assert.equal(new Set(initialVisualOrder).size, initialVisualOrder.length);
-        if (transition.state.phase === "section") {
+        if (transition.state.phase !== "armed") {
           assert.deepEqual(
             [...transition.state.previewVisualOrder].sort(),
             [...initialVisualOrder].sort(),
@@ -324,14 +345,17 @@ test("short adversarial event sequences preserve lifecycle invariants", () => {
         }
       }
       if (transition.visualOrder) {
-        assert.equal(
-          new Set(transition.visualOrder).size,
-          transition.visualOrder.length,
+        assert(state);
+        assert.deepEqual(
+          [...transition.visualOrder].sort(),
+          [...state.initialVisualOrder].sort(),
         );
       }
       walk(transition.state, depth - 1, nextCommandEmitted);
     }
   };
 
-  walk(begin(), 5, false);
+  for (const kind of ["waiting", "history"] as const) {
+    walk(begin(kind), 5, false);
+  }
 });
