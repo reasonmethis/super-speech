@@ -17,8 +17,8 @@ from engine_test_support import (
     committed_result,
     configure_runtime,
     load_engine,
+    loading_status,
     prepare_timeline,
-    ready_status,
     rejected_result,
     request_mutation,
     set_current,
@@ -148,14 +148,12 @@ def test_current_projection_rejects_progress_outside_its_text() -> None:
         engine.CurrentProjection(
             "speech.txt",
             "Speech",
-            "af_heart",
             engine.ActivePiece(2, 0, len("Speech")),
         )
     with pytest.raises(ValueError, match="active piece exceeds Current text"):
         engine.CurrentProjection(
             "speech.txt",
             "Speech",
-            "af_heart",
             engine.ActivePiece(1, 0, len("Speech") + 1),
         )
 
@@ -433,7 +431,7 @@ def test_status_uses_queue_first_when_cached_progress_cannot_apply(
     state = engine.State()
     if cached_projection == "mismatched":
         set_current(engine, state, second, piece=1)
-    monkeypatch.setattr(engine, "activate_next_chunk", lambda _state: False)
+    state.stop.set()
 
     status = engine.publish_status("idle", state, force=True)
 
@@ -446,7 +444,7 @@ def test_status_uses_queue_first_when_cached_progress_cannot_apply(
     ]
 
 
-def test_activation_replaces_progress_that_is_not_for_queue_first(tmp_path: Path) -> None:
+def test_status_replaces_progress_that_is_not_for_queue_first(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_activation_durable_first")
     configure_runtime(engine, tmp_path)
     first = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
@@ -457,7 +455,7 @@ def test_activation_replaces_progress_that_is_not_for_queue_first(tmp_path: Path
     set_current(engine, state, second, piece=1)
     state.saw_stop = True
 
-    assert engine.activate_next_chunk(state)
+    assert engine.publish_status("idle", state, force=True) is not None
 
     assert state.current_projection is not None
     assert state.current_projection.filename == first.name
@@ -1526,7 +1524,7 @@ def test_start_engine_waits_for_fresh_status_after_startup_cleanup(
     engine.VOICES_PATH.touch()
     fake_pid = 4321
     engine.STATUS.write_text(
-        json.dumps(ready_status(engine, 1111)),
+        json.dumps(loading_status(engine, 1111)),
         encoding="utf-8",
     )
     running_checks = 0
@@ -1548,7 +1546,7 @@ def test_start_engine_waits_for_fresh_status_after_startup_cleanup(
         nonlocal sleeps
         sleeps += 1
         engine.STATUS.write_text(
-            json.dumps(ready_status(engine, fake_pid, engine.time.time() + 1)),
+            json.dumps(loading_status(engine, fake_pid, engine.time.time() + 1)),
             encoding="utf-8",
         )
         write_storage_ready(engine, fake_pid)
@@ -1568,7 +1566,7 @@ def test_start_engine_accepts_an_existing_current_engine_that_is_loading(
     engine = load_engine("super_speech_engine_existing_start_ready")
     configure_runtime(engine, tmp_path)
     engine.STATUS.write_text(
-        json.dumps(ready_status(engine, 4321)),
+        json.dumps(loading_status(engine, 4321)),
         encoding="utf-8",
     )
     write_storage_ready(engine, 4321)
@@ -1596,7 +1594,7 @@ def test_speak_waits_for_delayed_storage_preparation_and_enqueues_once(
     configure_runtime(engine, tmp_path)
     prepare_timeline(engine)
     engine.STATUS.write_text(
-        json.dumps(ready_status(engine, os.getpid(), engine.time.time())),
+        json.dumps(loading_status(engine, os.getpid(), engine.time.time())),
         encoding="utf-8",
     )
     readiness_checked = threading.Event()
@@ -1647,7 +1645,7 @@ def test_start_engine_ignores_status_from_a_previous_lock_owner(
     engine = load_engine("super_speech_engine_existing_stale_owner")
     configure_runtime(engine, tmp_path)
     engine.STATUS.write_text(
-        json.dumps(ready_status(engine, 1111, 1)),
+        json.dumps(loading_status(engine, 1111, 1)),
         encoding="utf-8",
     )
     write_storage_ready(engine, 1111)
@@ -1657,7 +1655,7 @@ def test_start_engine_ignores_status_from_a_previous_lock_owner(
         nonlocal sleeps
         sleeps += 1
         engine.STATUS.write_text(
-            json.dumps(ready_status(engine, 2222, 2)),
+            json.dumps(loading_status(engine, 2222, 2)),
             encoding="utf-8",
         )
         write_storage_ready(engine, 2222)
@@ -1709,7 +1707,7 @@ def test_start_engine_retries_after_stopped_status_releases_the_instance_lock(
     engine.STATUS.write_text(
         json.dumps(
             {
-                **ready_status(engine, 1111),
+                **loading_status(engine, 1111),
                 "version": engine.STATUS_VERSION - 1,
             }
         ),
@@ -1744,7 +1742,7 @@ def test_start_engine_retries_after_stopped_status_releases_the_instance_lock(
         launched = True
         assert launched_lock.acquire()
         engine.STATUS.write_text(
-            json.dumps(ready_status(engine, FakeProcess.pid, engine.time.time())),
+            json.dumps(loading_status(engine, FakeProcess.pid, engine.time.time())),
             encoding="utf-8",
         )
         write_storage_ready(engine, FakeProcess.pid)
@@ -2207,7 +2205,7 @@ def test_serve_publishes_loading_status_before_delayed_preparation(
 ) -> None:
     engine = load_engine("super_speech_engine_serve_status")
     configure_runtime(engine, tmp_path)
-    prior = ready_status(engine, 123, updated_at=10)
+    prior = loading_status(engine, 123, updated_at=10)
     prior["state"] = "stopped"
     prior["timeline_revision"] = 7
     prior["engine_pid"] = None

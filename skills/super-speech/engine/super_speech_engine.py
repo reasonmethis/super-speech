@@ -1454,7 +1454,6 @@ class CurrentProjection:
 
     filename: str
     text: str
-    voice: str
     piece_count: int = field(init=False)
     active_piece: ActivePiece | None = None
     skip_initial_gap: bool = False
@@ -1516,7 +1515,6 @@ def replace_current_projection(
     st: State,
     filename: str,
     text: str,
-    voice: str,
     *,
     skip_initial_gap: bool = False,
 ) -> None:
@@ -1525,7 +1523,6 @@ def replace_current_projection(
         st.current_projection = CurrentProjection(
             filename,
             text,
-            voice,
             skip_initial_gap=skip_initial_gap,
         )
 
@@ -1534,7 +1531,6 @@ def start_current_playback(
     st: State,
     filename: str,
     text: str,
-    voice: str,
 ) -> bool:
     """Refresh Current for its first buffered piece without replacing another row."""
     with st.lock:
@@ -1543,7 +1539,6 @@ def start_current_playback(
         st.current_projection = CurrentProjection(
             filename,
             text,
-            voice,
             skip_initial_gap=(
                 st.current_projection.skip_initial_gap if st.current_projection is not None else False
             ),
@@ -1678,29 +1673,8 @@ _last_status_updated_at = 0.0
 _status_failure_started: float | None = None
 
 
-def activate_next_chunk(st: State) -> bool:
-    """Give queued work one current item before publishing or synthesizing it."""
-    with st.lock:
-        if st.stop.is_set():
-            return False
-        try:
-            ordered = queue_files_in_order()
-        except RuntimeError as error:
-            log(str(error))
-            return False
-        if not ordered:
-            if st.current_projection is not None:
-                clear_current_playback(st, st.current_projection.filename)
-            return False
-        current = ordered[0]
-        if st.current_projection is not None and st.current_projection.filename == current.name:
-            return False
-        try:
-            text = current.read_text(encoding="utf-8").strip()
-        except OSError:
-            text = ""
-        replace_current_projection(st, current.name, text, voice_from_name(current.name))
-        return True
+def _fingerprint_row(item: dict[str, object]) -> dict[str, object]:
+    return {key: item.get(key) for key in ("id", "voice", "source")}
 
 
 def timeline_fingerprint(
@@ -1711,32 +1685,10 @@ def timeline_fingerprint(
 ) -> str:
     """Hash the ordered row metadata and History count shown to the user."""
     ordered_rows = {
-        "current": (
-            {
-                "id": current.get("id"),
-                "voice": current.get("voice"),
-                "source": current.get("source"),
-            }
-            if current is not None
-            else None
-        ),
-        "queue": [
-            {
-                "id": item.get("id"),
-                "voice": item.get("voice"),
-                "source": item.get("source"),
-            }
-            for item in queue_items
-        ],
+        "current": _fingerprint_row(current) if current is not None else None,
+        "queue": [_fingerprint_row(item) for item in queue_items],
         "history_count": history_count,
-        "history": [
-            {
-                "id": item.get("id"),
-                "voice": item.get("voice"),
-                "source": item.get("source"),
-            }
-            for item in history_items
-        ],
+        "history": [_fingerprint_row(item) for item in history_items],
     }
     encoded = json.dumps(ordered_rows, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -1745,12 +1697,10 @@ def timeline_fingerprint(
 def _advance_timeline_revision(st: State, fingerprint: str) -> int:
     """Update the one revision counter owned by status publication."""
     with st.lock:
-        previous = st.timeline_fingerprint
-        if previous is None:
+        if st.timeline_fingerprint != fingerprint:
+            if st.timeline_fingerprint is not None:
+                st.timeline_revision += 1
             st.timeline_fingerprint = fingerprint
-        elif previous != fingerprint:
-            st.timeline_fingerprint = fingerprint
-            st.timeline_revision += 1
         return st.timeline_revision
 
 
@@ -1759,33 +1709,25 @@ def fingerprint_from_status(status: object) -> str | None:
     if not _snapshot_is_valid(status):
         return None
     assert isinstance(status, dict)
-    current = status.get("current")
-    queue_items = status.get("queue")
-    history_items = status.get("history")
-    history_count = status.get("history_count")
-    if not (
-        (current is None or isinstance(current, dict))
-        and isinstance(queue_items, list)
-        and all(isinstance(item, dict) for item in queue_items)
-        and isinstance(history_items, list)
-        and all(isinstance(item, dict) for item in history_items)
-        and isinstance(history_count, int)
-    ):
-        return None
-    return timeline_fingerprint(current, queue_items, history_count, history_items)
+    return timeline_fingerprint(
+        status["current"],
+        status["queue"],
+        status["history_count"],
+        status["history"],
+    )
 
 
 def load_timeline_revision_seed() -> tuple[int, str | None]:
     """Load the last valid revision before the engine replaces its status file."""
     try:
         stored_status = json.loads(STATUS.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return 0, None
     fingerprint = fingerprint_from_status(stored_status)
-    revision = stored_status.get("timeline_revision") if isinstance(stored_status, dict) else None
-    if fingerprint is None or not isinstance(revision, int) or revision < 0:
+    if fingerprint is None:
         return 0, None
-    return revision, fingerprint
+    assert isinstance(stored_status, dict)
+    return stored_status["timeline_revision"], fingerprint
 
 
 def publish_startup_status(timeline_revision: int) -> dict[str, object]:
@@ -1793,12 +1735,11 @@ def publish_startup_status(timeline_revision: int) -> dict[str, object]:
     previous: dict[str, object] | None = None
     try:
         candidate = json.loads(STATUS.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError):
+    except (OSError, ValueError):
         pass
     else:
         if (
-            _snapshot_is_valid(candidate)
-            and fingerprint_from_status(candidate) is not None
+            fingerprint_from_status(candidate) is not None
             and not _contains_private_status_field(candidate)
         ):
             assert isinstance(candidate, dict)
@@ -1846,16 +1787,26 @@ def publish_status(
         math.nextafter(_last_status_updated_at, math.inf),
     )
 
-    activate_next_chunk(st)
     with st.lock:
+        try:
+            ordered_queue = queue_files_in_order()
+        except RuntimeError as error:
+            log(str(error))
+            return None
+        current_path = ordered_queue[0] if ordered_queue else None
+        if not st.stop.is_set():
+            if current_path is None:
+                st.current_projection = None
+            elif (
+                st.current_projection is None
+                or st.current_projection.filename != current_path.name
+            ):
+                try:
+                    text = current_path.read_text(encoding="utf-8").strip()
+                except OSError:
+                    text = ""
+                st.current_projection = CurrentProjection(current_path.name, text)
         current_projection = st.current_projection
-
-    try:
-        ordered_queue = queue_files_in_order()
-    except RuntimeError as error:
-        log(str(error))
-        return None
-    current_path = ordered_queue[0] if ordered_queue else None
     queue_files = ordered_queue[1:]
     queue_items = []
     for path in queue_files:
@@ -1879,7 +1830,6 @@ def publish_status(
             status_projection = CurrentProjection(
                 current_path.name,
                 current_text,
-                voice_from_name(current_path.name),
             )
         else:
             status_projection = current_projection
@@ -2065,7 +2015,6 @@ def _apply_play_mutation_locked(
             st,
             target.name,
             selected_text,
-            voice_from_name(target.name),
             skip_initial_gap=True,
         )
         st.saw_stop = False
@@ -2877,7 +2826,7 @@ def run_engine_loop(
                     piece,
                     _buffered_piece_count,
                     text,
-                    voice,
+                    _voice,
                     piece_start,
                     piece_end,
                     claim_generation,
@@ -2938,7 +2887,7 @@ def run_engine_loop(
             session_first = False
 
             if first:
-                if not start_current_playback(st, path.name, text, voice):
+                if not start_current_playback(st, path.name, text):
                     invalidate_claim(st, path.name)
                     continue
             if not update_current_piece(
@@ -3101,7 +3050,6 @@ def _stopped_status_payload() -> dict[str, object]:
         projection = CurrentProjection(
             current_path.name,
             str(boundary["text"]),
-            str(boundary["voice"]),
         )
         current = _current_status_item(current_path, projection)
     history_count, history_items = history_snapshot()

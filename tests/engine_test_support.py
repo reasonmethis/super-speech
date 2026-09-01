@@ -60,7 +60,6 @@ def set_current(
     path: Path,
     *,
     text: str | None = None,
-    voice: str | None = None,
     piece: int = 0,
     piece_start: int | None = None,
     piece_end: int | None = None,
@@ -78,7 +77,6 @@ def set_current(
     state.current_projection = engine.CurrentProjection(
         path.name,
         current_text,
-        voice or engine.voice_from_name(path.name),
         active_piece,
     )
 
@@ -110,7 +108,7 @@ def write_upgrade_catalog(engine, *paths: Path) -> None:
     )
 
 
-def ready_status(engine, engine_pid: int, updated_at: float = 0) -> dict[str, object]:
+def loading_status(engine, engine_pid: int, updated_at: float = 0) -> dict[str, object]:
     return {
         "version": engine.STATUS_VERSION,
         "timeline_revision": 0,

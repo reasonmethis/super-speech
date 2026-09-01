@@ -17,7 +17,6 @@ from engine_test_support import (
     configure_runtime,
     load_engine,
     prepare_timeline,
-    ready_status,
     rejected_result,
     request_mutation,
     set_current,
@@ -1687,7 +1686,6 @@ def test_invalidated_synthesis_failure_cannot_stop_the_selected_boundary(
             state,
             selected.name,
             selected.read_text(encoding="utf-8"),
-            engine.voice_from_name(selected.name),
         )
     assert engine.archive(old)
     release_synthesis.set()

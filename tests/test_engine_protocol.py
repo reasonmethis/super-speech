@@ -99,8 +99,9 @@ def test_unreadable_current_has_one_empty_piece_status_shape(
     monkeypatch.setattr(Path, "read_text", read_text)
 
     projected = engine.publish_status("playing", engine.State(), force=True)
-    monkeypatch.setattr(engine, "activate_next_chunk", lambda _state: False)
-    direct = engine.publish_status("playing", engine.State(), force=True)
+    stopped_state = engine.State()
+    stopped_state.stop.set()
+    direct = engine.publish_status("playing", stopped_state, force=True)
     stopped = engine._stopped_status_payload()
 
     assert projected is not None
