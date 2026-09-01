@@ -76,6 +76,7 @@ from speechicle_identity import (
     SpeechicleFilename,
     is_public_id,
 )
+from super_speech_version import __version__ as ENGINE_VERSION
 from timeline_storage import (
     MutationOutcomeUnconfirmed,
     TimelinePaths,
@@ -147,7 +148,6 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
-ENGINE_VERSION = "0.7.5"
 STATUS_VERSION = 16
 STARTUP_TIMEOUT = 120.0
 
