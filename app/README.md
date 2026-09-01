@@ -138,10 +138,10 @@ rather than the repository build:
 npm run test:installed
 ```
 
-On macOS, point the same test at the installed app executable:
+On macOS, the same command uses the standard `/Applications` install:
 
 ```bash
-SUPER_SPEECH_INSTALLED_APP="/Applications/Super Speech.app/Contents/MacOS/Super Speech" npm run test:installed
+npm run test:installed
 ```
 
 The installed smoke test uses an isolated runtime and silent audio. It checks
@@ -161,8 +161,8 @@ not currently publish either package automatically.
 - `SUPER_SPEECH_ENGINE_PATH` selects a staged engine executable
 - `SUPER_SPEECH_MODEL_DIR` selects the Kokoro model directory
 - `SUPER_SPEECH_INSTALLED_APP` selects the executable tested by
-  `npm run test:installed`; without it, the test uses the standard Windows
-  current-user install path
+  `npm run test:installed`; without it, the test uses the standard Windows or
+  macOS install path
 
 Use these overrides for development and tests. Normal installed use reads the
 paths written by the desktop installer.

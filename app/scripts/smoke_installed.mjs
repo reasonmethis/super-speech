@@ -9,12 +9,27 @@ const appDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 const expectedVersion = JSON.parse(
   readFileSync(path.join(appDirectory, "package.json"), "utf8"),
 ).version;
-const installedApp = process.env.SUPER_SPEECH_INSTALLED_APP ?? path.join(
-  process.env.LOCALAPPDATA ?? "",
-  "Programs",
-  "super-speech-app",
-  "Super Speech.exe",
-);
+
+function standardInstalledApp() {
+  if (process.platform === "win32") {
+    const localAppData = process.env.LOCALAPPDATA;
+    if (!localAppData) {
+      throw new Error("LOCALAPPDATA is unavailable; set SUPER_SPEECH_INSTALLED_APP");
+    }
+    return path.join(
+      localAppData,
+      "Programs",
+      "super-speech-app",
+      "Super Speech.exe",
+    );
+  }
+  if (process.platform === "darwin") {
+    return "/Applications/Super Speech.app/Contents/MacOS/Super Speech";
+  }
+  throw new Error("Set SUPER_SPEECH_INSTALLED_APP on this platform");
+}
+
+const installedApp = process.env.SUPER_SPEECH_INSTALLED_APP ?? standardInstalledApp();
 
 if (!existsSync(installedApp)) {
   throw new Error(`Installed Super Speech app not found: ${installedApp}`);

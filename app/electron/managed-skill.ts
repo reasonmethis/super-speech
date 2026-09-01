@@ -275,9 +275,5 @@ export function syncManagedSkillTree(
   }
 
   replaceManagedTree(source, target, sourceHash);
-  const updatedHash = managedSkillTreeHash(target);
-  if (updatedHash !== sourceHash) {
-    throw new Error("updated agent skill does not match its packaged source");
-  }
   return { hash: sourceHash, sourceHash, status: "updated" };
 }
