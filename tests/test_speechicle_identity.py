@@ -19,35 +19,36 @@ from speechicle_identity import (
     catalog_payload,
     embed_public_ids_from_intent,
     generate_public_id,
-    is_public_id,
     load_catalog,
-    migration_from_intent,
     write_catalog,
 )
 
 
-def test_canonical_filename_round_trip_and_voice_change() -> None:
-    public_id = f"sp_{'a' * 32}"
-    filename = SpeechicleFilename(7, public_id, "af_heart", 250)
+def public_id(digit: str) -> str:
+    return f"sp_{digit * 32}"
 
-    assert filename.render() == f"007-{public_id}-af_heart-g250-say.txt"
+
+def test_canonical_filename_round_trip_and_voice_change() -> None:
+    speechicle_id = public_id("a")
+    filename = SpeechicleFilename(7, speechicle_id, "af_heart", 250)
+
+    assert filename.render() == f"007-{speechicle_id}-af_heart-g250-say.txt"
     assert SpeechicleFilename.parse(filename.render()) == filename
     assert filename.with_voice("bm_fable") == SpeechicleFilename(
-        7, public_id, "bm_fable", 250
+        7, speechicle_id, "bm_fable", 250
     )
-    assert filename == SpeechicleFilename(7, public_id, "af_heart", 250)
 
 
 @pytest.mark.parametrize(
     "name",
     [
-        f"07-sp_{'a' * 32}-af_heart-say.txt",
-        f"0007-sp_{'a' * 32}-af_heart-say.txt",
-        f"007-sp_{'A' * 32}-af_heart-say.txt",
-        f"007-sp_{'a' * 32}-AF_heart-say.txt",
-        f"007-sp_{'a' * 32}-af_heart-g0250-say.txt",
-        f"007-sp_{'a' * 32}-af_heart-g1501-say.txt",
-        f"007-sp_{'a' * 32}-af_heart.txt",
+        f"07-{public_id('a')}-af_heart-say.txt",
+        f"0007-{public_id('a')}-af_heart-say.txt",
+        f"007-{public_id('A')}-af_heart-say.txt",
+        f"007-{public_id('a')}-AF_heart-say.txt",
+        f"007-{public_id('a')}-af_heart-g0250-say.txt",
+        f"007-{public_id('a')}-af_heart-g1501-say.txt",
+        f"007-{public_id('a')}-af_heart.txt",
     ],
 )
 def test_canonical_filename_parser_rejects_noncanonical_variants(name: str) -> None:
@@ -56,15 +57,17 @@ def test_canonical_filename_parser_rejects_noncanonical_variants(name: str) -> N
 
 
 def test_public_id_generation_retries_invalid_existing_and_duplicate_values() -> None:
-    existing = f"sp_{'a' * 32}"
-    generated = iter(["bad", existing, f"sp_{'b' * 32}"])
+    existing = public_id("a")
+    generated = iter(["bad", existing, public_id("b")])
 
-    assert generate_public_id({existing}, generate=lambda: next(generated)) == f"sp_{'b' * 32}"
+    assert generate_public_id(
+        {existing}, generate=lambda: next(generated)
+    ) == public_id("b")
 
 
 def test_embed_public_ids_journal_round_trip_is_self_contained() -> None:
-    first_id = f"sp_{'1' * 32}"
-    second_id = f"sp_{'2' * 32}"
+    first_id = public_id("1")
+    second_id = public_id("2")
     digest = "a" * 64
     migration = EmbedPublicIdsMigration(
         (
@@ -116,8 +119,7 @@ def test_embed_public_ids_journal_round_trip_is_self_contained() -> None:
 
 
 def test_embed_public_ids_parser_rejects_target_collisions() -> None:
-    public_id = f"sp_{'1' * 32}"
-    target = SpeechicleFilename(1, public_id, "af_heart").render()
+    target = SpeechicleFilename(1, public_id("1"), "af_heart").render()
     migration = EmbedPublicIdsMigration(
         (
             EmbedPublicIdsFile("queue", "one.txt", target, "a" * 64),
@@ -132,8 +134,8 @@ def test_embed_public_ids_parser_rejects_target_collisions() -> None:
 
 
 def test_embed_public_ids_parser_rejects_target_source_ambiguity() -> None:
-    first_id = f"sp_{'1' * 32}"
-    second_id = f"sp_{'2' * 32}"
+    first_id = public_id("1")
+    second_id = public_id("2")
     first_target = SpeechicleFilename(1, first_id, "af_heart").render()
     second_target = SpeechicleFilename(2, second_id, "af_heart").render()
     migration = EmbedPublicIdsMigration(
@@ -151,8 +153,8 @@ def test_embed_public_ids_parser_rejects_target_source_ambiguity() -> None:
 
 
 def test_embed_public_ids_parser_rejects_duplicate_target_sequences() -> None:
-    first_id = f"sp_{'1' * 32}"
-    second_id = f"sp_{'2' * 32}"
+    first_id = public_id("1")
+    second_id = public_id("2")
     migration = EmbedPublicIdsMigration(
         (
             EmbedPublicIdsFile(
@@ -207,7 +209,7 @@ def test_embed_public_ids_parser_rejects_unsupported_root_transitions(
     target_collection: str,
     source_root: str,
 ) -> None:
-    target = SpeechicleFilename(1, f"sp_{'1' * 32}", "af_heart").render()
+    target = SpeechicleFilename(1, public_id("1"), "af_heart").render()
     files = (EmbedPublicIdsFile(source_root, "source.txt", target, "a" * 64),)
     migration = EmbedPublicIdsMigration(
         files if target_collection == "queue" else (),
@@ -240,7 +242,7 @@ def test_embed_public_ids_parser_rejects_unsupported_root_transitions(
 def test_embed_public_ids_parser_rejects_windows_unsafe_names(
     source_name: str,
 ) -> None:
-    target = SpeechicleFilename(1, f"sp_{'1' * 32}", "af_heart").render()
+    target = SpeechicleFilename(1, public_id("1"), "af_heart").render()
     migration = EmbedPublicIdsMigration(
         (EmbedPublicIdsFile("queue", source_name, target, "a" * 64),),
         (),
@@ -253,7 +255,7 @@ def test_embed_public_ids_parser_rejects_windows_unsafe_names(
 
 
 def test_embed_public_ids_parser_rejects_windows_unsafe_removal_names() -> None:
-    target = SpeechicleFilename(1, f"sp_{'1' * 32}", "af_heart").render()
+    target = SpeechicleFilename(1, public_id("1"), "af_heart").render()
     digest = "a" * 64
     migration = EmbedPublicIdsMigration(
         (EmbedPublicIdsFile("queue", "source.txt", target, digest),),
@@ -271,7 +273,7 @@ def test_embed_public_ids_parser_rejects_windows_unsafe_removal_names() -> None:
 
 
 def test_embed_public_ids_parser_rejects_inverse_replay_removal() -> None:
-    target = SpeechicleFilename(1, f"sp_{'1' * 32}", "af_heart").render()
+    target = SpeechicleFilename(1, public_id("1"), "af_heart").render()
     digest = "a" * 64
     migration = EmbedPublicIdsMigration(
         (),
@@ -289,7 +291,7 @@ def test_embed_public_ids_parser_rejects_inverse_replay_removal() -> None:
 
 
 def test_embed_public_ids_parser_rejects_multiple_replay_removals() -> None:
-    target = SpeechicleFilename(1, f"sp_{'1' * 32}", "af_heart").render()
+    target = SpeechicleFilename(1, public_id("1"), "af_heart").render()
     digest = "a" * 64
     migration = EmbedPublicIdsMigration(
         (EmbedPublicIdsFile("queue", "source.txt", target, digest),),
@@ -309,12 +311,14 @@ def test_embed_public_ids_parser_rejects_multiple_replay_removals() -> None:
         embed_public_ids_from_intent(migration.intent_payload())
 
 
-def test_catalog_round_trip_keeps_retired_sequences(tmp_path: Path) -> None:
+def test_legacy_catalog_round_trip_preserves_sparse_identity_map(
+    tmp_path: Path,
+) -> None:
     catalog = IdentityCatalog(
         8,
         {
-            2: f"sp_{'2' * 32}",
-            7: f"sp_{'7' * 32}",
+            2: public_id("2"),
+            7: public_id("7"),
         },
     )
     path = tmp_path / "speechicle-index.json"
@@ -329,20 +333,20 @@ def test_catalog_round_trip_keeps_retired_sequences(tmp_path: Path) -> None:
     "payload",
     [
         {"version": 2, "next_sequence": 1, "ids_by_sequence": {}},
-        {"version": 1, "next_sequence": 1, "ids_by_sequence": {"0": f"sp_{'1' * 32}"}},
-        {"version": 1, "next_sequence": 1, "ids_by_sequence": {"1": f"sp_{'1' * 32}"}},
+        {"version": 1, "next_sequence": 1, "ids_by_sequence": {"0": public_id("1")}},
+        {"version": 1, "next_sequence": 1, "ids_by_sequence": {"1": public_id("1")}},
         {
             "version": 1,
             "next_sequence": 3,
             "ids_by_sequence": {
-                "1": f"sp_{'1' * 32}",
-                "2": f"sp_{'1' * 32}",
+                "1": public_id("1"),
+                "2": public_id("1"),
             },
         },
         {"version": 1, "next_sequence": 2, "ids_by_sequence": {"1": "speech-1"}},
     ],
 )
-def test_catalog_validation_rejects_ambiguous_or_reusable_identity(
+def test_legacy_catalog_validation_rejects_invalid_or_reusable_identity(
     payload: object,
 ) -> None:
     with pytest.raises((TypeError, ValueError)):

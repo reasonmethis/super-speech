@@ -22,13 +22,17 @@ def configure_runtime(engine, tmp_path: Path) -> None:
     configure_engine_runtime(engine, tmp_path, create_directories=False)
 
 
+def public_id(digit: str) -> str:
+    return f"sp_{digit * 32}"
+
+
 def canonical_name(
     sequence: int,
     digit: str,
     voice: str = "af_heart",
     gap_ms: int | None = None,
 ) -> str:
-    return SpeechicleFilename(sequence, f"sp_{digit * 32}", voice, gap_ms).render()
+    return SpeechicleFilename(sequence, public_id(digit), voice, gap_ms).render()
 
 
 def prepare(engine) -> None:
@@ -48,9 +52,9 @@ def planned_legacy_embed(engine, *, write_intent: bool = True):
     engine.QUEUE.mkdir()
     engine.SPOKEN.mkdir()
     engine.FAILED.mkdir()
-    first_id = f"sp_{'1' * 32}"
-    second_id = f"sp_{'2' * 32}"
-    third_id = f"sp_{'3' * 32}"
+    first_id = public_id("1")
+    second_id = public_id("2")
+    third_id = public_id("3")
     first = engine.QUEUE / "001-af_heart-say.txt"
     second = engine.SPOKEN / "002-bm_fable-say.txt"
     third = engine.FAILED / "003-af_bella-say.txt"
@@ -118,11 +122,11 @@ def test_canonical_preparation_repairs_membership_and_removes_stale_catalog(
     for path in (current, waiting, newer, older):
         path.write_text(path.stem, encoding="utf-8")
     engine.timeline.paths.queue_order.write_text(
-        json.dumps({"version": 2, "ids": [current.name.split("-")[1], f"sp_{'f' * 32}"]}),
+        json.dumps({"version": 2, "ids": [public_id("4"), public_id("f")]}),
         encoding="utf-8",
     )
     engine.timeline.paths.history_order.write_text(
-        json.dumps({"version": 2, "ids": [older.name.split("-")[1]]}),
+        json.dumps({"version": 2, "ids": [public_id("2")]}),
         encoding="utf-8",
     )
     engine.timeline.paths.legacy_identity_index.write_text("corrupt stale catalog", encoding="utf-8")
@@ -130,12 +134,12 @@ def test_canonical_preparation_repairs_membership_and_removes_stale_catalog(
     prepare(engine)
 
     assert read_ids(engine.timeline.paths.queue_order) == [
-        current.name.split("-")[1],
-        waiting.name.split("-")[1],
+        public_id("4"),
+        public_id("8"),
     ]
     assert read_ids(engine.timeline.paths.history_order) == [
-        newer.name.split("-")[1],
-        older.name.split("-")[1],
+        public_id("7"),
+        public_id("2"),
     ]
     assert not engine.timeline.paths.legacy_identity_index.exists()
 
@@ -145,8 +149,8 @@ def test_interrupted_embed_converges_before_deleting_catalog(tmp_path: Path) -> 
     configure_runtime(engine, tmp_path)
     engine.QUEUE.mkdir()
     engine.SPOKEN.mkdir()
-    first_id = f"sp_{'1' * 32}"
-    second_id = f"sp_{'2' * 32}"
+    first_id = public_id("1")
+    second_id = public_id("2")
     first = engine.QUEUE / "001-af_heart-say.txt"
     second = engine.SPOKEN / "002-bm_fable-say.txt"
     first.write_text("First", encoding="utf-8")
@@ -440,12 +444,15 @@ def test_embed_keeps_catalog_and_journal_until_order_validation_succeeds(
     configure_runtime(engine, tmp_path)
     engine.QUEUE.mkdir()
     engine.SPOKEN.mkdir()
-    public_id = f"sp_{'3' * 32}"
+    speechicle_id = public_id("3")
     legacy = engine.QUEUE / "003-af_heart-say.txt"
     legacy.write_text("Keep recovery evidence", encoding="utf-8")
-    write_catalog(engine.timeline.paths.legacy_identity_index, IdentityCatalog(4, {3: public_id}))
+    write_catalog(
+        engine.timeline.paths.legacy_identity_index,
+        IdentityCatalog(4, {3: speechicle_id}),
+    )
     engine.timeline.paths.queue_order.write_text(
-        json.dumps({"version": 2, "ids": [public_id]}), encoding="utf-8"
+        json.dumps({"version": 2, "ids": [speechicle_id]}), encoding="utf-8"
     )
 
     def fail_normalization() -> None:
@@ -492,6 +499,34 @@ def test_catalog_free_allocation_and_metadata_use_canonical_filenames(
     assert not engine.timeline.paths.legacy_identity_index.exists()
 
 
+def test_cutover_ignores_legacy_catalog_high_water_when_starting_counter(
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("embedded_identity_counter_cutover")
+    configure_runtime(engine, tmp_path)
+    engine.QUEUE.mkdir()
+    engine.SPOKEN.mkdir()
+    legacy = engine.QUEUE / "001-af_heart-say.txt"
+    legacy.write_text("Legacy", encoding="utf-8")
+    speechicle_id = public_id("1")
+    write_catalog(
+        engine.timeline.paths.legacy_identity_index,
+        IdentityCatalog(100, {1: speechicle_id}),
+    )
+    engine.timeline.paths.queue_order.write_text(
+        json.dumps({"version": 2, "ids": [speechicle_id]}), encoding="utf-8"
+    )
+    engine.timeline.paths.history_order.write_text(
+        json.dumps({"version": 2, "ids": []}), encoding="utf-8"
+    )
+
+    prepare(engine)
+    queued = engine.enqueue_text("Next", "af_heart")
+
+    assert SpeechicleFilename.parse(queued.name).sequence == 2
+    assert not engine.timeline.paths.legacy_identity_index.exists()
+
+
 def test_missing_catalog_rejects_pending_v2_plan_before_storage_write(
     tmp_path: Path,
 ) -> None:
@@ -501,7 +536,7 @@ def test_missing_catalog_rejects_pending_v2_plan_before_storage_write(
     engine.SPOKEN.mkdir()
     source = engine.QUEUE / "001-af_heart-say.txt"
     source.write_text("Do not move", encoding="utf-8")
-    public_id = f"sp_{'6' * 32}"
+    speechicle_id = public_id("6")
     intent = {
         "version": 2,
         "operation": "timeline_plan",
@@ -513,10 +548,10 @@ def test_missing_catalog_rejects_pending_v2_plan_before_storage_write(
                 "preserve_existing_target": False,
             }
         ],
-        "previous_queue_ids": [public_id],
+        "previous_queue_ids": [speechicle_id],
         "previous_history_ids": [],
         "queue_ids": [],
-        "history_ids": [public_id],
+        "history_ids": [speechicle_id],
     }
     engine.timeline.paths.intent.write_text(json.dumps(intent), encoding="utf-8")
 
@@ -551,8 +586,12 @@ def test_fresh_cutover_rejects_unprovable_v2_orders_before_writing(
     engine.SPOKEN.mkdir()
     legacy = engine.QUEUE / "001-af_heart-say.txt"
     legacy.write_text("Keep the original identity", encoding="utf-8")
-    public_id = f"sp_{'7' * 32}"
-    ids = [public_id] if sidecar_problem == "missing_catalog" else [public_id, public_id]
+    speechicle_id = public_id("7")
+    ids = (
+        [speechicle_id]
+        if sidecar_problem == "missing_catalog"
+        else [speechicle_id, speechicle_id]
+    )
     engine.timeline.paths.queue_order.write_text(
         json.dumps({"version": 2, "ids": ids}), encoding="utf-8"
     )

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -24,7 +24,7 @@ def public_id(digit: str) -> str:
 
 
 def generated_ids(*digits: str) -> Callable[[], str]:
-    values: Iterator[str] = iter(public_id(digit) for digit in digits)
+    values = iter(public_id(digit) for digit in digits)
     return lambda: next(values)
 
 
@@ -56,7 +56,7 @@ def plan(
     return plan_embed_public_ids(*paths, "af_bella", generate=generate)
 
 
-def test_precatalog_plan_preserves_suffix_metadata_and_separates_sequences(
+def test_legacy_plan_preserves_suffix_metadata_and_separates_duplicate_sequences(
     tmp_path: Path,
 ) -> None:
     paths = migration_paths(tmp_path)
@@ -154,7 +154,7 @@ def test_missing_history_order_keeps_numbered_rows_ahead_of_malformed_rows(
     )
 
 
-def test_current_catalog_and_v2_order_ids_survive_embedding(tmp_path: Path) -> None:
+def test_legacy_catalog_and_v2_order_ids_survive_embedding(tmp_path: Path) -> None:
     paths = migration_paths(tmp_path)
     queue, spoken, _, queue_order, history_order, catalog_path = paths
     queued = queue / "001-af_heart-say.txt"
@@ -180,7 +180,7 @@ def test_current_catalog_and_v2_order_ids_survive_embedding(tmp_path: Path) -> N
     }
 
 
-def test_v3_journal_does_not_preserve_the_retired_sequence_high_water(
+def test_embed_journal_excludes_legacy_catalog_state(
     tmp_path: Path,
 ) -> None:
     paths = migration_paths(tmp_path)
@@ -225,7 +225,9 @@ def test_failed_speech_is_inventoried_but_excluded_from_timeline_orders(
     }
 
 
-def test_repairs_no_intent_partial_history_boundary(tmp_path: Path) -> None:
+def test_legacy_plan_reclassifies_queue_files_from_stale_history_order(
+    tmp_path: Path,
+) -> None:
     paths = migration_paths(tmp_path)
     queue, spoken, _, queue_order, history_order, _ = paths
     files = {

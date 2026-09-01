@@ -32,6 +32,32 @@ def test_prepare_requires_the_engine_owner_lock(tmp_path: Path) -> None:
         storage.prepare(SimpleNamespace(held=False))
 
 
+@pytest.mark.parametrize(
+    ("second_sequence", "second_public_id", "error"),
+    [
+        (2, f"sp_{'a' * 32}", "duplicate speech public ID"),
+        (1, f"sp_{'b' * 32}", "duplicate live speech sequence"),
+    ],
+)
+def test_canonical_inventory_rejects_duplicate_ids_and_sequences(
+    tmp_path: Path,
+    second_sequence: int,
+    second_public_id: str,
+    error: str,
+) -> None:
+    paths = TimelinePaths(tmp_path)
+    paths.queue.mkdir()
+    paths.history.mkdir()
+    paths.failed.mkdir()
+    first = SpeechicleFilename(1, f"sp_{'a' * 32}", "af_heart")
+    second = SpeechicleFilename(second_sequence, second_public_id, "bm_fable")
+    (paths.queue / first.render()).write_text("First", encoding="utf-8")
+    (paths.history / second.render()).write_text("Second", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match=error):
+        TimelineStorage(paths, "af_bella").canonical_inventory()
+
+
 def test_reserve_uses_only_the_counter_after_preparation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
