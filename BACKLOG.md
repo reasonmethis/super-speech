@@ -42,9 +42,9 @@ items are future work, ordered by priority.
 
 ## P1: interactive queue
 
-- [x] Let a user select any upcoming chunk and start it immediately
-- [x] Let a user move playback to any archived chunk without changing timeline order
-- [x] Keep the current chunk and sample position when the user only pauses
+- [x] Let a user select any upcoming Speechicle and start it immediately
+- [x] Let a user move playback to any archived Speechicle without changing timeline order
+- [x] Keep the current Speechicle and sample position when the user only pauses
 - Add previous and next controls using the identifier-based selection command
 - [x] Add replay through the same identifier-based selection command
 - [x] Add per-item move-to-History controls
@@ -53,7 +53,7 @@ items are future work, ordered by priority.
 - [x] Add mouse and keyboard queue reordering
 - [x] Add mouse and keyboard reordering for recent History
 - [x] Change one item's voice and play the same text
-- Show when each chunk was queued, when it started, and when it finished
+- Show when each Speechicle was queued, when it started, and when it finished
 - Preserve enough rendered audio history to make replay instant
 - Record completed, skipped, and cleared outcomes before labeling history as played
 - [x] Define queue-selection behavior in tests before changing the file protocol
@@ -68,7 +68,7 @@ items are future work, ordered by priority.
 - [x] Extend the queue protocol with a versioned metadata record instead of
   adding more meaning to the filename
 - Record the source app, source task, queued timestamp, voice, requested gap,
-  and original text for every chunk
+  and original text for every Speechicle
 - [x] Add optional source metadata flags to `super-speech-engine speak`
 - Show a recognizable source-app icon only when the source is known
 - Decide how much source history remains local and add a clear privacy control

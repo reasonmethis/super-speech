@@ -5,8 +5,9 @@ synthesis runs on the user's computer, without an API key or per-word bill.
 
 One agent reply becomes one Speechicle. A Speechicle stays one row and one
 replay target even though the engine prepares it in smaller pieces. Queue
-contains the Speechicle at the playback boundary, called Current, plus any
-Waiting Speechicles. Current may be playing, paused, preparing, or stopped.
+contains one Current Speechicle plus any Waiting Speechicles. Current is the
+reply being prepared, played, paused, or held for playback. It sits between
+Waiting and History at the playback boundary.
 Finished, skipped, cleared, or manually archived Speechicles appear in History.
 
 ## Choose an installation

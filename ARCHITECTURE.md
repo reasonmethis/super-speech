@@ -28,13 +28,13 @@ headless skill.
 - A **Speechicle** is one complete spoken reply. It stays one timeline row and
   one replay target
 - A **piece** is a smaller sentence-sized part prepared inside a Speechicle
-- **Current** is the one Speechicle at the playback boundary
 - **Waiting** contains the Speechicles that will play after Current
-- **Queue** contains Current and all Waiting Speechicles
 - **History** contains inactive Speechicles. Rows enter it after playback
   finishes, Skip, Clear all, manual archive, or a synthesis failure after
   playback began
-- The **playback boundary** is Current's place between Waiting and History
+- The **playback boundary** is the dividing point between Waiting and History
+- **Current** is the one Speechicle occupying the playback boundary
+- **Queue** contains Current and all Waiting Speechicles
 - A **row** is the card that represents a Speechicle in the desktop window
 
 Older command names and internal variables sometimes use `chunk` for a
