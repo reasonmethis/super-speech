@@ -1761,10 +1761,7 @@ function setExpandedItem(id: string | null): void {
 }
 
 async function playTimelineItem(item: TimelineItem, voice?: string): Promise<void> {
-  if (
-    (item.kind === "current" && !voice && currentStatus.state !== "stopped") ||
-    timelineMutationBlocked()
-  ) {
+  if (item.kind === "current" && !voice && currentStatus.state !== "stopped") {
     return;
   }
   await runTimelineMutation(
@@ -1781,16 +1778,12 @@ async function playTimelineItem(item: TimelineItem, voice?: string): Promise<voi
 }
 
 async function moveWaitingItem(id: string, beforeId: string | null): Promise<void> {
-  if (timelineMutationBlocked()) {
-    return;
-  }
   const item = visibleTimelineItems().find((entry) => entry.id === id);
   if (!item || item.kind !== "waiting") {
     return;
   }
   const reordered = moveSpeechicleItemBefore(currentStatus.queue, id, beforeId);
-  const previousIds = currentStatus.queue.map((item) => item.id);
-  if (reordered.every((item, index) => item.id === previousIds[index])) {
+  if (reordered.every((item, index) => item.id === currentStatus.queue[index]?.id)) {
     return;
   }
   await runTimelineMutation(
@@ -1804,16 +1797,12 @@ async function moveWaitingItem(id: string, beforeId: string | null): Promise<voi
 }
 
 async function moveHistoryItem(id: string, beforeId: string | null): Promise<void> {
-  if (timelineMutationBlocked()) {
-    return;
-  }
   const item = visibleTimelineItems().find((entry) => entry.id === id);
   if (!item || item.kind !== "history") {
     return;
   }
   const reordered = moveSpeechicleItemBefore(currentStatus.history, id, beforeId);
-  const previousIds = currentStatus.history.map((item) => item.id);
-  if (reordered.every((item, index) => item.id === previousIds[index])) {
+  if (reordered.every((item, index) => item.id === currentStatus.history[index]?.id)) {
     return;
   }
   await runTimelineMutation(
@@ -1827,9 +1816,6 @@ async function moveHistoryItem(id: string, beforeId: string | null): Promise<voi
 }
 
 async function archiveWaitingItem(id: string): Promise<void> {
-  if (timelineMutationBlocked()) {
-    return;
-  }
   const item = currentStatus.queue.find((queued) => queued.id === id);
   if (!item) {
     return;
@@ -1845,9 +1831,6 @@ async function archiveWaitingItem(id: string): Promise<void> {
 }
 
 async function deleteHistoryItem(id: string): Promise<void> {
-  if (timelineMutationBlocked()) {
-    return;
-  }
   const item = currentStatus.history.find((entry) => entry.id === id);
   if (!item) {
     return;
@@ -1906,9 +1889,7 @@ async function runTimelineMutation(
       ? "The app and speech engine returned incompatible data. Restart or reinstall Super Speech."
       : failureMessage;
   } finally {
-    if (pendingTimelineMutation === pending) {
-      pendingTimelineMutation = null;
-    }
+    pendingTimelineMutation = null;
     renderedTimelineKey = null;
     render(currentStatus);
     if (restoreTimelineFocus) {
@@ -1952,25 +1933,16 @@ async function runPlaybackAction(): Promise<void> {
   commandPending = true;
   commandStatus.textContent = "";
   render(currentStatus);
-  if (action === "setup") {
-    try {
-      await desktopApi?.openSetup();
-    } catch (error) {
-      console.error("Could not open the setup guide", error);
-    } finally {
-      commandPending = false;
-      render(currentStatus);
-    }
-    return;
-  }
   const paused = action === "pause";
   const pendingPlay = pendingTimelineMutation?.kind === "play"
     ? pendingTimelineMutation
     : null;
   try {
-    if (desktopApi) {
+    if (action === "setup") {
+      await desktopApi?.openSetup();
+    } else if (desktopApi) {
       const status = await desktopApi.setPaused(paused);
-      if (pendingTimelineMutation === pendingPlay && pendingPlay) {
+      if (pendingPlay && pendingTimelineMutation === pendingPlay) {
         pendingPlay.playbackState = paused ? "paused" : "playing";
       }
       render(adoptTimelineSnapshot(currentStatus, status));
@@ -1978,10 +1950,14 @@ async function runPlaybackAction(): Promise<void> {
       render({ ...currentStatus, state: paused ? "paused" : "playing" });
     }
   } catch (error) {
-    console.error("Could not change playback state", error);
-    commandStatus.textContent = paused
-      ? "Could not pause speech. Try again."
-      : "Could not resume speech. Try again.";
+    if (action === "setup") {
+      console.error("Could not open the setup guide", error);
+    } else {
+      console.error("Could not change playback state", error);
+      commandStatus.textContent = paused
+        ? "Could not pause speech. Try again."
+        : "Could not resume speech. Try again.";
+    }
   } finally {
     commandPending = false;
     render(currentStatus);
@@ -2001,14 +1977,12 @@ function closeComposer(restoreFocus: boolean): void {
 
 playbackButton.addEventListener("click", () => void runPlaybackAction());
 
-composerText.addEventListener("input", () => {
-  renderComposerControls();
-});
+composerText.addEventListener("input", renderComposerControls);
 
 speechComposer.addEventListener("submit", async (event) => {
   event.preventDefault();
   const text = composerText.value.trim();
-  if (!text || timelineMutationBlocked()) {
+  if (!text) {
     return;
   }
   const committed = await runTimelineMutation(
@@ -2026,7 +2000,7 @@ speechComposer.addEventListener("submit", async (event) => {
   if (committed) {
     composerOpen = false;
     composerText.value = "";
-    composerActions.classList.add("is-hidden");
+    renderComposerControls();
   }
 });
 
@@ -2091,8 +2065,7 @@ currentText.addEventListener("keydown", (event) => {
 });
 
 clearQueueButton.addEventListener("click", async () => {
-  const activeItems = visibleTimelineItems().filter(({ kind }) => kind !== "history");
-  if (timelineMutationBlocked() || activeItems.length === 0) {
+  if (!currentStatus.current && currentStatus.queue.length === 0) {
     return;
   }
   await runTimelineMutation(
@@ -2121,13 +2094,17 @@ requiredElement<HTMLButtonElement>("hide-button").addEventListener("click", () =
   void desktopApi?.hide();
 });
 
+function cancelTransientInteractions(): void {
+  cancelTimelinePointerDrag();
+  cancelSpeechiclePointerGesture();
+  cancelPendingSpeechicleExpansion();
+  setOpenActionMenu(null);
+  setOpenVoiceMenu(null);
+}
+
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
-    cancelTimelinePointerDrag();
-    cancelSpeechiclePointerGesture();
-    cancelPendingSpeechicleExpansion();
-    setOpenActionMenu(null);
-    setOpenVoiceMenu(null);
+    cancelTransientInteractions();
   } else {
     void refreshStatus();
   }
@@ -2216,34 +2193,22 @@ window.addEventListener("keydown", (event) => {
   }
 });
 document.addEventListener("pointerdown", (event) => {
-  if (
-    composerOpen &&
-    event.target instanceof Element &&
-    !event.target.closest("#speech-composer")
-  ) {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    return;
+  }
+  if (composerOpen && !target.closest("#speech-composer")) {
     closeComposer(false);
   }
-  if (
-    openMenuItemId &&
-    event.target instanceof Element &&
-    !event.target.closest(".speechicle-actions, #queue-action-menu")
-  ) {
+  if (openMenuItemId && !target.closest(".speechicle-actions, #queue-action-menu")) {
     setOpenActionMenu(null);
   }
-  if (
-    openVoiceItemId &&
-    event.target instanceof Element &&
-    !event.target.closest(".speechicle-voice, #voice-menu")
-  ) {
+  if (openVoiceItemId && !target.closest(".speechicle-voice, #voice-menu")) {
     setOpenVoiceMenu(null);
   }
 }, true);
 window.addEventListener("blur", () => {
-  cancelTimelinePointerDrag();
-  cancelSpeechiclePointerGesture();
-  cancelPendingSpeechicleExpansion();
-  setOpenActionMenu(null);
-  setOpenVoiceMenu(null);
+  cancelTransientInteractions();
   closeComposer(false);
 });
 
