@@ -222,6 +222,12 @@ button {
   stroke-width: 1.3;
 }
 
+.window-button .settings-glyph {
+  width: 15px;
+  fill: var(--text-muted);
+  stroke: none;
+}
+
 .window-button .restore-glyph,
 .window-button.is-maximized .maximize-glyph {
   display: none;
