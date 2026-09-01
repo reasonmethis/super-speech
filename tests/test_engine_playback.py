@@ -23,6 +23,7 @@ from engine_test_support import (
     speechicle_id,
 )
 
+
 def test_play_command_starts_engine_then_publishes_the_requested_id(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -30,6 +31,7 @@ def test_play_command_starts_engine_then_publishes_the_requested_id(
     configure_runtime(engine, tmp_path)
     calls: list[object] = []
     monkeypatch.setattr(engine, "start_engine", lambda: calls.append("start"))
+
     def request(mutation) -> str:
         calls.append((mutation.id, mutation.voice))
         return "a" * 24
@@ -718,24 +720,37 @@ def test_preparation_rejects_a_nonidentical_canonical_identity_collision(
     assert selected.read_text(encoding="utf-8") == "Selected"
 
 
-def test_enqueue_waits_while_history_rows_are_moving(tmp_path: Path) -> None:
+def test_enqueue_waits_while_history_rows_are_moving(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     engine = load_engine("super_speech_engine_timeline_file_lock")
     configure_runtime(engine, tmp_path)
     prepare_timeline(engine)
     lock = engine.InterprocessFileLock(engine.timeline.paths.mutation_lock)
     assert lock.acquire()
+    attempted_acquire = threading.Event()
+    real_acquire = engine.InterprocessFileLock.acquire
+
+    def observe_acquire(pending_lock) -> bool:
+        if threading.current_thread().name == "enqueue":
+            attempted_acquire.set()
+        return real_acquire(pending_lock)
+
+    monkeypatch.setattr(engine.InterprocessFileLock, "acquire", observe_acquire)
     queued: list[Path] = []
     writer = threading.Thread(
+        name="enqueue",
         target=lambda: queued.append(engine.enqueue_text("New", "af_heart"))
     )
     writer.start()
-    threading.Event().wait(0.05)
+    try:
+        assert attempted_acquire.wait(1)
+        assert writer.is_alive()
+        assert not list(engine.QUEUE.glob("*.txt"))
+    finally:
+        lock.release()
+        writer.join(1)
 
-    assert writer.is_alive()
-    assert not list(engine.QUEUE.glob("*.txt"))
-
-    lock.release()
-    writer.join(1)
     assert not writer.is_alive()
     assert len(queued) == 1
 
@@ -1232,9 +1247,20 @@ def test_selecting_a_prefetched_item_restarts_synthesis_at_piece_one(
         worker.join(1)
 
     assert not worker.is_alive()
-    assert restarted[0] == selected
-    assert restarted[5] == 1
-    assert restarted[6] == "First sentence. Second sentence."
+    (
+        restarted_path,
+        _,
+        _,
+        restarted_first,
+        _,
+        restarted_piece,
+        restarted_text,
+        *_,
+    ) = restarted
+    assert restarted_path == selected
+    assert restarted_first
+    assert restarted_piece == 1
+    assert restarted_text == "First sentence. Second sentence."
 
 
 def test_selection_interrupts_an_inter_chunk_gap(
@@ -1596,7 +1622,7 @@ def test_failed_synthesis_archive_stops_instead_of_leaving_a_stuck_claim(
     assert state.stop.is_set()
 
 
-def test_mid_item_synthesis_failure_emits_one_terminal_piece_and_stops(
+def test_mid_item_synthesis_failure_emits_one_terminal_piece_and_ends_the_item(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     engine = load_engine("super_speech_engine_mid_item_synth_failure")
@@ -1629,17 +1655,19 @@ def test_mid_item_synthesis_failure_emits_one_terminal_piece_and_stops(
     worker.start()
     first = buffer.get(timeout=1)
     terminal = buffer.get(timeout=1)
-    threading.Event().wait(0.05)
     state.stop.set()
     worker.join(1)
 
+    _, first_audio, _, _, first_is_terminal, first_piece, *_ = first
+    _, terminal_audio, _, _, terminal_is_terminal, terminal_piece, *_ = terminal
     assert not worker.is_alive()
     assert calls == ["One.", "Two."]
-    assert len(first[1]) == 8
-    assert first[4] is False
-    assert len(terminal[1]) == 0
-    assert terminal[4] is True
-    assert terminal[5] == 2
+    assert len(first_audio) == 8
+    assert not first_is_terminal
+    assert first_piece == 1
+    assert len(terminal_audio) == 0
+    assert terminal_is_terminal
+    assert terminal_piece == 2
     with pytest.raises(queue.Empty):
         buffer.get_nowait()
 
@@ -1710,6 +1738,7 @@ def test_clear_wins_a_synthesis_failure_after_the_first_claim_check(
     set_current(engine, state, current)
     entered_error_log = threading.Event()
     release_error_log = threading.Event()
+    ignored_stale_error = threading.Event()
     original_log = engine.log
 
     class FailingKokoro:
@@ -1721,6 +1750,8 @@ def test_clear_wins_a_synthesis_failure_after_the_first_claim_check(
         if message.startswith("synth error"):
             entered_error_log.set()
             assert release_error_log.wait(1)
+        elif message.startswith("ignored stale synth error"):
+            ignored_stale_error.set()
         original_log(message, **kwargs)
 
     monkeypatch.setattr(engine, "log", block_after_claim_check)
@@ -1733,7 +1764,7 @@ def test_clear_wins_a_synthesis_failure_after_the_first_claim_check(
 
     assert engine.do_clear(queue.Queue(), state)
     release_error_log.set()
-    threading.Event().wait(0.05)
+    assert ignored_stale_error.wait(1)
 
     assert not state.stop.is_set()
     assert not (engine.FAILED / current.name).exists()
@@ -1755,6 +1786,14 @@ def test_preplay_terminal_item_releases_the_current_boundary(
     waiting.write_text("" if failure == "empty" else "Waiting", encoding="utf-8")
     state = engine.State()
     set_current(engine, state, waiting)
+    preplay_released = threading.Event()
+    real_release = engine.release_preplay_chunk
+
+    def observe_release(*args) -> None:
+        real_release(*args)
+        preplay_released.set()
+
+    monkeypatch.setattr(engine, "release_preplay_chunk", observe_release)
 
     class Kokoro:
         @staticmethod
@@ -1766,20 +1805,18 @@ def test_preplay_terminal_item_releases_the_current_boundary(
         args=(Kokoro(), queue.Queue(), state),
     )
     worker.start()
-    destination = engine.SPOKEN if failure == "empty" else engine.FAILED
-    for _ in range(100):
-        if (destination / waiting.name).exists():
-            break
-        threading.Event().wait(0.01)
-    state.stop.set()
-    worker.join(timeout=1)
+    try:
+        assert preplay_released.wait(1)
+    finally:
+        state.stop.set()
+        worker.join(timeout=1)
 
     assert not worker.is_alive()
     assert state.current_projection is None
     assert state.claims == {}
 
 
-def test_transient_current_read_failure_remains_claimable_during_stop(
+def test_unclaimed_current_remains_claimable_during_stop(
     tmp_path: Path,
 ) -> None:
     engine = load_engine("super_speech_engine_current_read_failure")
@@ -2251,47 +2288,19 @@ def test_clear_cannot_race_a_worker_refilling_a_full_buffer(tmp_path: Path) -> N
         def __init__(self, entry: tuple[object, ...]) -> None:
             self.items = [entry]
             self.worker_attempted = threading.Event()
-            self.space_observed = threading.Event()
-            self.worker_inserted = threading.Event()
 
-        def put(
-            self,
-            entry: tuple[object, ...],
-            block: bool = True,
-            timeout: float | None = None,
-        ) -> None:
-            if threading.current_thread() is not threading.main_thread():
-                self.worker_attempted.set()
-                if block:
-                    self.space_observed.wait(timeout)
+        def put_nowait(self, entry: tuple[object, ...]) -> None:
+            self.worker_attempted.set()
             if self.items:
                 raise queue.Full
             self.items.append(entry)
-            if threading.current_thread() is not threading.main_thread():
-                self.worker_inserted.set()
-
-        def put_nowait(self, entry: tuple[object, ...]) -> None:
-            self.put(entry, block=False)
 
         def get_nowait(self) -> tuple[object, ...]:
             if self.items:
                 return self.items.pop(0)
-            self.space_observed.set()
-            self.worker_inserted.wait(0.05)
             raise queue.Empty
 
-    current_entry = (
-        current,
-        np.zeros(1, dtype=np.float32),
-        1000,
-        False,
-        True,
-        2,
-        2,
-        "Current",
-        "af_heart",
-    )
-    buffer = ObservedFullBuffer(current_entry)
+    buffer = ObservedFullBuffer((current,))
     kokoro = SimpleNamespace(
         create=lambda *_args, **_kwargs: (np.zeros(1, dtype=np.float32), 1000)
     )

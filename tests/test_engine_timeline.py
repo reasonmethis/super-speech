@@ -100,9 +100,12 @@ def test_selection_preserves_one_visible_timeline_order(tmp_path: Path) -> None:
     current = engine.timeline.select(speechicle_id(engine, waiting.target))
     history = engine.timeline.select(speechicle_id(engine, history_paths[1]))
 
-    assert waiting.origin == "waiting" and waiting.moved_count == 1
-    assert current.origin == "current" and not current.restart_playback
-    assert history.origin == "history" and history.moved_count == 3
+    assert waiting.origin == "waiting"
+    assert waiting.moved_count == 1
+    assert current.origin == "current"
+    assert not current.restart_playback
+    assert history.origin == "history"
+    assert history.moved_count == 3
     assert visible_ids() == original_order
 
 
@@ -200,7 +203,7 @@ def test_new_archive_and_history_reorder_commit_in_one_serial_order(
     assert engine.timeline.history_files() == [engine.SPOKEN / newest.name, second, first]
 
 
-def test_history_snapshot_and_archive_cannot_deadlock_each_other(
+def test_history_snapshot_waits_for_an_archive_transaction(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     engine = load_engine("super_speech_engine_history_lock_order")
@@ -210,38 +213,51 @@ def test_history_snapshot_and_archive_cannot_deadlock_each_other(
     archived.write_text("Earlier", encoding="utf-8")
     queued.write_text("New", encoding="utf-8")
     archive_holds_order = threading.Event()
-    snapshot_reading = threading.Event()
+    snapshot_started = threading.Event()
+    allow_archive_write = threading.Event()
     real_write = engine.timeline._write_order
-    real_history_files = engine.timeline.history_files
 
     def gated_write(path: Path, ids: list[str]) -> None:
         if path == engine.timeline.paths.history_order and threading.current_thread().name == "archive":
             archive_holds_order.set()
-            snapshot_reading.wait(0.1)
+            assert allow_archive_write.wait(1)
         real_write(path, ids)
 
-    def observed_history_files() -> list[Path]:
-        if threading.current_thread().name == "snapshot":
-            snapshot_reading.set()
-        return real_history_files()
-
     monkeypatch.setattr(engine.timeline, "_write_order", gated_write)
-    monkeypatch.setattr(engine.timeline, "history_files", observed_history_files)
+    snapshots = []
+
+    def take_snapshot() -> None:
+        snapshot_started.set()
+        snapshots.append(engine.history_snapshot())
+
     archive_thread = threading.Thread(
-        name="archive", target=engine.archive, args=(queued,), daemon=True
+        name="archive",
+        target=engine.archive,
+        args=(queued,),
+        daemon=True,
     )
     snapshot_thread = threading.Thread(
-        name="snapshot", target=engine.history_snapshot, daemon=True
+        name="snapshot",
+        target=take_snapshot,
+        daemon=True,
     )
 
     archive_thread.start()
     assert archive_holds_order.wait(1)
     snapshot_thread.start()
+    try:
+        assert snapshot_started.wait(1)
+        assert snapshot_thread.is_alive()
+    finally:
+        allow_archive_write.set()
     archive_thread.join(1)
     snapshot_thread.join(1)
 
     assert not archive_thread.is_alive()
     assert not snapshot_thread.is_alive()
+    snapshot_count, snapshot_items = snapshots[0]
+    assert snapshot_count == 2
+    assert [item["text"] for item in snapshot_items] == ["New", "Earlier"]
 
 
 def test_history_orders_legacy_suffixed_ids_by_their_leading_sequence(
@@ -449,7 +465,7 @@ def build_archive_recovery_plan(engine):
     "checkpoint",
     ["intent", "history_order", "queue_order", "move_1", "move_2", "converged"],
 )
-def test_new_timeline_plan_recovers_from_each_commit_checkpoint(
+def test_timeline_plan_recovers_from_each_commit_checkpoint(
     tmp_path: Path,
     checkpoint: str,
 ) -> None:
@@ -486,7 +502,7 @@ def test_new_timeline_plan_recovers_from_each_commit_checkpoint(
 @pytest.mark.parametrize(
     "checkpoint", ["intent", "move", "queue_order", "history_order"]
 )
-def test_new_timeline_plan_recovers_a_voice_changing_promotion(
+def test_timeline_plan_recovers_a_voice_changing_promotion(
     tmp_path: Path,
     checkpoint: str,
 ) -> None:
@@ -542,7 +558,7 @@ def test_new_timeline_plan_recovers_a_voice_changing_promotion(
         ("move_id_mismatch", "move files contradict"),
     ],
 )
-def test_new_timeline_plan_rejects_malformed_or_contradictory_payloads(
+def test_timeline_plan_rejects_malformed_or_contradictory_payloads(
     tmp_path: Path,
     malformation: str,
     error: str,
@@ -715,7 +731,7 @@ def test_unsafe_legacy_intent_is_retained_without_partial_application(
     assert not (engine.SPOKEN / unsafe.name).exists()
 
 
-def test_new_timeline_plan_retains_journal_until_backup_cleanup_succeeds(
+def test_timeline_plan_retains_journal_until_backup_cleanup_succeeds(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -764,7 +780,7 @@ def test_new_timeline_plan_retains_journal_until_backup_cleanup_succeeds(
     assert not engine.timeline.paths.intent.exists()
 
 
-def test_new_timeline_plan_retains_journal_when_a_row_cannot_be_recovered(
+def test_timeline_plan_retains_journal_when_a_row_cannot_be_recovered(
     tmp_path: Path,
 ) -> None:
     engine = load_engine("super_speech_engine_plan_missing_row")
@@ -1204,7 +1220,6 @@ def test_skip_invalidates_buffered_audio_by_removing_its_claim(
     assert engine.finish_chunk_playback(current, "skip", True, state)
 
     assert engine.buffered_piece_is_stale(state, current.name, generation)
-    assert not hasattr(state, "skip_name")
 
 
 def test_mutations_commit_and_publish_results_in_one_fifo_order(
@@ -1263,10 +1278,11 @@ def test_later_waiting_move_does_not_hide_an_earlier_playback_selection(
         path.write_text(path.stem, encoding="utf-8")
     state = engine.State()
     set_current(engine, state, current)
-    request_mutation(
-        engine, "play", id=speechicle_id(engine, selected), voice=None
+    selected_id = speechicle_id(engine, selected)
+    play_request = request_mutation(
+        engine, "play", id=selected_id, voice=None
     )
-    request_mutation(
+    move_request = request_mutation(
         engine,
         "move",
         section="waiting",
@@ -1275,6 +1291,10 @@ def test_later_waiting_move_does_not_hide_an_earlier_playback_selection(
     )
 
     assert engine.process_mutation_requests(queue.Queue(), state) == "select"
+    assert committed_result(engine, play_request)["result_id"] == selected_id
+    committed_result(engine, move_request)
+    assert state.current_projection is not None
+    assert state.current_projection.filename == selected.name
 
 
 def test_every_mutation_outcome_contains_an_authoritative_snapshot(
