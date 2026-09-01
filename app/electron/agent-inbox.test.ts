@@ -15,20 +15,19 @@ test("agent replies append complete self-identifying JSON Lines messages", async
   const directory = await mkdtemp(path.join(tmpdir(), "super-speech-inbox-"));
   const inbox = path.join(directory, "agent-inbox.jsonl");
   try {
-    const first = await appendAgentInboxMessage(inbox, {
+    await appendAgentInboxMessage(inbox, {
       speechicleId: SPEECHICLE_ID,
       source: "Codex UI task",
       text: "  Please check the retry path.  ",
     });
-    const second = await appendAgentInboxMessage(inbox, {
+    await appendAgentInboxMessage(inbox, {
       speechicleId: SPEECHICLE_ID,
       text: "No source label here",
     });
     const lines = (await readFile(inbox, "utf8")).trimEnd().split("\n");
-    const messages = lines.map((line) => JSON.parse(line) as AgentInboxMessage);
+    const [first, second] = lines.map((line) => JSON.parse(line) as AgentInboxMessage);
 
     assert.equal(lines.length, 2);
-    assert.deepEqual(messages, [first, second]);
     assert.equal(first.text, "Please check the retry path.");
     assert.equal(first.source, "Codex UI task");
     assert.equal(second.source, undefined);

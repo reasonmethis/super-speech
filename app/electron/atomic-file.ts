@@ -16,8 +16,6 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-type RenameFile = (oldPath: string, newPath: string) => Promise<void>;
-
 async function targetContains(targetPath: string, content: string): Promise<boolean> {
   try {
     return await readFile(targetPath, "utf8") === content;
@@ -30,7 +28,7 @@ async function replaceFile(
   tempPath: string,
   targetPath: string,
   content: string,
-  renameFile: RenameFile,
+  renameFile: typeof rename,
 ): Promise<void> {
   const deadline = Date.now() + WINDOWS_REPLACE_TIMEOUT_MS;
   while (true) {
@@ -53,7 +51,7 @@ async function replaceFile(
 export async function writeTextAtomically(
   targetPath: string,
   content: string,
-  renameFile: RenameFile = rename,
+  renameFile: typeof rename = rename,
 ): Promise<void> {
   const tempPath = `${targetPath}.${process.pid}.${randomUUID()}.tmp`;
   try {

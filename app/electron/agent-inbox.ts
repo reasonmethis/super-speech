@@ -31,7 +31,13 @@ function validInboxPath(inboxPath: string): boolean {
     path.isAbsolute(inboxPath);
 }
 
-function messageFrom(input: AgentInboxMessageInput): AgentInboxMessage {
+export async function appendAgentInboxMessage(
+  inboxPath: string,
+  input: AgentInboxMessageInput,
+): Promise<void> {
+  if (!validInboxPath(inboxPath)) {
+    throw new Error("Invalid agent inbox path");
+  }
   const text = input.text.trim();
   if (
     !isSpeechicleId(input.speechicleId) ||
@@ -40,25 +46,15 @@ function messageFrom(input: AgentInboxMessageInput): AgentInboxMessage {
   ) {
     throw new Error("Invalid agent message");
   }
-  return {
+  const message: AgentInboxMessage = {
     version: 1,
     kind: "user_message",
     id: randomUUID(),
     sent_at: new Date().toISOString(),
     speechicle_id: input.speechicleId,
-    ...(input.source === undefined ? {} : { source: input.source }),
+    source: input.source,
     text,
   };
-}
-
-export async function appendAgentInboxMessage(
-  inboxPath: string,
-  input: AgentInboxMessageInput,
-): Promise<AgentInboxMessage> {
-  if (!validInboxPath(inboxPath)) {
-    throw new Error("Invalid agent inbox path");
-  }
-  const message = messageFrom(input);
   const inbox = await open(inboxPath, "a");
   try {
     await inbox.writeFile(`${JSON.stringify(message)}\n`, "utf8");
@@ -66,5 +62,4 @@ export async function appendAgentInboxMessage(
   } finally {
     await inbox.close();
   }
-  return message;
 }
