@@ -55,8 +55,8 @@ import {
   syncManagedSkillTree,
 } from "./managed-skill";
 import {
-  trayPlaybackControl,
-  trayPlaybackControlKey,
+  trayPlaybackAction,
+  type TrayPlaybackAction,
 } from "./tray-menu";
 import {
   MINIMUM_WINDOW_SIZE,
@@ -92,7 +92,7 @@ let engineRestartFailures = 0;
 let engineRestartTimer: NodeJS.Timeout | null = null;
 let quitting = false;
 let lastEngineStatus: EngineStatus | null = null;
-let lastTrayPlaybackControlKey: string | null = null;
+let lastTrayPlaybackAction: TrayPlaybackAction | undefined;
 let windowStateSaveTimer: NodeJS.Timeout | null = null;
 let windowStateWrite = Promise.resolve();
 let windowStateFlushStarted = false;
@@ -713,30 +713,35 @@ function stopOwnedEngine(): void {
   }
 }
 
+function failSmokeTest(interval: NodeJS.Timeout, message: string): void {
+  clearInterval(interval);
+  quitting = true;
+  stopOwnedEngine();
+  console.error(message);
+  app.exit(1);
+}
+
 function runSmokeTest(): void {
   const startedAt = Date.now();
   let firstEnginePid: number | null = null;
   let restartedAt: number | null = null;
   const interval = setInterval(() => {
     const status = getStatus();
-    if (
-      firstEnginePid === null &&
-      status.engine_running &&
+    const engineIdle = status.engine_running &&
       status.state === "idle" &&
       status.queue_count === 0 &&
-      !status.current
-    ) {
+      !status.current;
+    if (firstEnginePid === null && engineIdle) {
       const engine = ownedEngine;
       if (
         !engine?.child.pid ||
         status.engine_pid !== engine.child.pid ||
         !engine.child.kill()
       ) {
-        clearInterval(interval);
-        quitting = true;
-        stopOwnedEngine();
-        console.error("Super Speech desktop smoke test could not stop its engine fixture");
-        app.exit(1);
+        failSmokeTest(
+          interval,
+          "Super Speech desktop smoke test could not stop its engine fixture",
+        );
         return;
       }
       firstEnginePid = status.engine_pid;
@@ -744,11 +749,8 @@ function runSmokeTest(): void {
     }
     if (
       firstEnginePid !== null &&
-      status.engine_running &&
       status.engine_pid !== firstEnginePid &&
-      status.state === "idle" &&
-      status.queue_count === 0 &&
-      !status.current
+      engineIdle
     ) {
       restartedAt ??= Date.now();
       if (Date.now() - restartedAt >= 5_000) {
@@ -763,19 +765,11 @@ function runSmokeTest(): void {
       status.state === "setup_required" ||
       (firstEnginePid === null && status.state === "stopped")
     ) {
-      clearInterval(interval);
-      quitting = true;
-      stopOwnedEngine();
-      console.error(`Super Speech desktop smoke test failed: ${status.state}`);
-      app.exit(1);
+      failSmokeTest(interval, `Super Speech desktop smoke test failed: ${status.state}`);
       return;
     }
     if (Date.now() - startedAt > 90_000) {
-      clearInterval(interval);
-      quitting = true;
-      stopOwnedEngine();
-      console.error("Super Speech desktop smoke test timed out");
-      app.exit(1);
+      failSmokeTest(interval, "Super Speech desktop smoke test timed out");
     }
   }, 250);
 }
@@ -797,8 +791,8 @@ async function setPaused(paused: boolean): Promise<RuntimeStatus> {
     state: runtime.current ? ack.state : "idle",
     updated_at: Math.max(runtime.updated_at, ack.updated_at),
   };
-  const expectedStates = paused ? ["paused", "idle"] : ["playing", "idle"];
-  if (!expectedStates.includes(status.state)) {
+  const expectedState = paused ? "paused" : "playing";
+  if (status.state !== expectedState && status.state !== "idle") {
     throw new Error("The engine did not enter the requested playback state");
   }
   refreshTrayMenu(status);
@@ -821,15 +815,11 @@ function windowStatePath(): string {
   return path.join(app.getPath("userData"), WINDOW_STATE_FILENAME);
 }
 
-function captureWindowState(window: BrowserWindow): SavedWindowState {
-  return {
+function persistWindowState(window: BrowserWindow): Promise<void> {
+  const state: SavedWindowState = {
     bounds: window.getNormalBounds(),
     maximized: window.isMaximized(),
   };
-}
-
-function persistWindowState(window: BrowserWindow): Promise<void> {
-  const state = captureWindowState(window);
   windowStateWrite = windowStateWrite
     .then(() => writeSavedWindowState(windowStatePath(), state))
     .catch((error) => {
@@ -859,15 +849,16 @@ function flushWindowState(window: BrowserWindow): Promise<void> {
 }
 
 function showWindow(): void {
-  if (!mainWindow || mainWindow.isDestroyed()) {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) {
     createWindow();
     return;
   }
-  if (mainWindow.isMinimized()) {
-    mainWindow.restore();
+  if (window.isMinimized()) {
+    window.restore();
   }
-  mainWindow.show();
-  mainWindow.focus();
+  window.show();
+  window.focus();
 }
 
 function createWindow(): void {
@@ -880,7 +871,7 @@ function createWindow(): void {
   ];
   const savedWindowState = readSavedWindowState(windowStatePath());
   const initialBounds = restoredWindowBounds(savedWindowState, displayWorkAreas);
-  mainWindow = new BrowserWindow({
+  const window = new BrowserWindow({
     title: "Super Speech",
     ...initialBounds,
     minWidth: Math.min(MINIMUM_WINDOW_SIZE.width, initialBounds.width),
@@ -903,48 +894,40 @@ function createWindow(): void {
       backgroundThrottling: false,
     },
   });
-  mainWindow.on("close", (event) => {
+  mainWindow = window;
+  window.on("close", (event) => {
     if (!quitting) {
       event.preventDefault();
-      mainWindow?.hide();
+      window.hide();
     }
   });
-  mainWindow.on("closed", () => {
-    mainWindow = null;
-  });
-  mainWindow.on("move", () => {
-    if (mainWindow) {
-      scheduleWindowStateSave(mainWindow);
+  window.on("closed", () => {
+    if (mainWindow === window) {
+      mainWindow = null;
     }
   });
-  mainWindow.on("resize", () => {
-    if (mainWindow) {
-      scheduleWindowStateSave(mainWindow);
-    }
+  const scheduleStateSave = () => scheduleWindowStateSave(window);
+  window.on("move", scheduleStateSave);
+  window.on("resize", scheduleStateSave);
+  window.on("maximize", () => {
+    window.webContents.send(IPC_CHANNELS.maximizedChanged, true);
+    scheduleStateSave();
   });
-  mainWindow.on("maximize", () => {
-    mainWindow?.webContents.send(IPC_CHANNELS.maximizedChanged, true);
-    if (mainWindow) {
-      scheduleWindowStateSave(mainWindow);
-    }
+  window.on("unmaximize", () => {
+    window.webContents.send(IPC_CHANNELS.maximizedChanged, false);
+    scheduleStateSave();
   });
-  mainWindow.on("unmaximize", () => {
-    mainWindow?.webContents.send(IPC_CHANNELS.maximizedChanged, false);
-    if (mainWindow) {
-      scheduleWindowStateSave(mainWindow);
-    }
-  });
-  mainWindow.once("ready-to-show", () => {
+  window.once("ready-to-show", () => {
     // Reapply saved bounds after Windows creates the frameless native window
-    mainWindow?.setBounds(initialBounds);
+    window.setBounds(initialBounds);
     if (savedWindowState?.maximized) {
-      mainWindow?.maximize();
+      window.maximize();
     }
     if (!startHidden) {
-      mainWindow?.show();
+      window.show();
     }
   });
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  window.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith("https://") || url.startsWith("http://")) {
       void shell.openExternal(url);
     }
@@ -952,9 +935,9 @@ function createWindow(): void {
   });
 
   if (process.env.VITE_DEV_SERVER_URL) {
-    void mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
+    void window.loadURL(process.env.VITE_DEV_SERVER_URL);
   } else {
-    void mainWindow.loadFile(path.join(rendererDir, "index.html"));
+    void window.loadFile(path.join(rendererDir, "index.html"));
   }
 }
 
@@ -962,19 +945,18 @@ function refreshTrayMenu(status = getStatus()): void {
   if (!tray) {
     return;
   }
-  const controlKey = trayPlaybackControlKey(status.state);
-  if (controlKey === lastTrayPlaybackControlKey) {
+  const action = trayPlaybackAction(status.state);
+  if (action === lastTrayPlaybackAction) {
     return;
   }
-  lastTrayPlaybackControlKey = controlKey;
-  const control = trayPlaybackControl(status.state);
-  const paused = status.state === "paused";
+  lastTrayPlaybackAction = action;
+  const paused = action === "resume";
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: "Open Super Speech", click: showWindow },
       {
-        label: control.label,
-        enabled: control.enabled,
+        label: paused ? "Resume Speech" : "Pause Speech",
+        enabled: action !== null,
         click: () => {
           void setPaused(!paused).catch((error) => {
             console.error(
@@ -1055,10 +1037,11 @@ if (!hasSingleInstanceLock) {
     quitting = true;
     stopEngineHealthMonitor();
     stopOwnedEngine();
-    if (!windowStateFlushStarted && mainWindow && !mainWindow.isDestroyed()) {
+    const window = mainWindow;
+    if (!windowStateFlushStarted && window && !window.isDestroyed()) {
       event.preventDefault();
       windowStateFlushStarted = true;
-      void flushWindowState(mainWindow).finally(() => app.quit());
+      void flushWindowState(window).finally(() => app.quit());
     }
   });
   app.on("activate", showWindow);

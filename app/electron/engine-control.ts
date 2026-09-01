@@ -7,18 +7,17 @@ const CONTROL_PROTOCOL_VERSION = 1;
 const MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
 
 interface EngineControlEndpoint {
-  version: typeof CONTROL_PROTOCOL_VERSION;
-  engine_pid: number;
   port: number;
   token: string;
 }
 
-export interface PlaybackControlAck {
-  version: typeof CONTROL_PROTOCOL_VERSION;
-  engine_pid: number;
+interface PlaybackControlAck {
   state: "idle" | "paused" | "playing";
   updated_at: number;
-  audio_state: "idle" | "paused" | "playing";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isPlaybackState(
@@ -31,7 +30,7 @@ export function parseEngineControlEndpoint(
   value: unknown,
   enginePid: number,
 ): EngineControlEndpoint | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  if (!isRecord(value)) {
     return null;
   }
   const endpoint = value as Record<string, unknown>;
@@ -51,8 +50,6 @@ export function parseEngineControlEndpoint(
     return null;
   }
   return {
-    version: CONTROL_PROTOCOL_VERSION,
-    engine_pid: enginePid,
     port,
     token,
   };
@@ -81,13 +78,13 @@ export function parsePlaybackControlAck(
   value: unknown,
   enginePid: number,
 ): PlaybackControlAck | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  if (!isRecord(value)) {
     return null;
   }
   const ack = value as Record<string, unknown>;
   if (
     Object.keys(ack).length !== 5 ||
-    ack.version !== 1 ||
+    ack.version !== CONTROL_PROTOCOL_VERSION ||
     ack.engine_pid !== enginePid ||
     !isPlaybackState(ack.state) ||
     typeof ack.updated_at !== "number" ||
@@ -98,11 +95,8 @@ export function parsePlaybackControlAck(
     return null;
   }
   return {
-    version: CONTROL_PROTOCOL_VERSION,
-    engine_pid: enginePid,
     state: ack.state,
     updated_at: ack.updated_at,
-    audio_state: ack.audio_state,
   };
 }
 
@@ -147,9 +141,7 @@ export function runEngineControl(
             reject(new Error("Engine control returned invalid JSON"));
             return;
           }
-          const envelope = parsed && typeof parsed === "object" && !Array.isArray(parsed)
-            ? parsed as Record<string, unknown>
-            : null;
+          const envelope = isRecord(parsed) ? parsed : null;
           if (
             response.statusCode === 200 &&
             envelope &&

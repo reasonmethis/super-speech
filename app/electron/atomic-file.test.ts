@@ -19,7 +19,7 @@ import {
   managedSkillHashForTarget,
   syncManagedSkillTree,
 } from "./managed-skill.ts";
-import { trayPlaybackControl, trayPlaybackControlKey } from "./tray-menu.ts";
+import { trayPlaybackAction } from "./tray-menu.ts";
 
 test("readers see a complete file while atomic writes replace it", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "super-speech-atomic-"));
@@ -369,19 +369,9 @@ test("managed skill installation creates a missing skills directory", async () =
   }
 });
 
-test("tray playback controls change only across pause-relevant states", () => {
-  assert.deepEqual(trayPlaybackControl("idle"), {
-    enabled: false,
-    label: "Pause Speech",
-  });
-  assert.deepEqual(trayPlaybackControl("playing"), {
-    enabled: true,
-    label: "Pause Speech",
-  });
-  assert.deepEqual(trayPlaybackControl("paused"), {
-    enabled: true,
-    label: "Resume Speech",
-  });
-  assert.equal(trayPlaybackControlKey("idle"), trayPlaybackControlKey("stopped"));
-  assert.notEqual(trayPlaybackControlKey("idle"), trayPlaybackControlKey("playing"));
+test("tray playback actions change only across pause-relevant states", () => {
+  assert.equal(trayPlaybackAction("idle"), null);
+  assert.equal(trayPlaybackAction("stopped"), null);
+  assert.equal(trayPlaybackAction("playing"), "pause");
+  assert.equal(trayPlaybackAction("paused"), "resume");
 });

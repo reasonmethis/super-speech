@@ -18,7 +18,10 @@ test("accepts only the endpoint owned by the current engine process", () => {
     token: "a".repeat(64),
   };
 
-  assert.deepEqual(parseEngineControlEndpoint(endpoint, 123), endpoint);
+  assert.deepEqual(parseEngineControlEndpoint(endpoint, 123), {
+    port: endpoint.port,
+    token: endpoint.token,
+  });
   assert.equal(parseEngineControlEndpoint(endpoint, 456), null);
   assert.equal(
     parseEngineControlEndpoint({ ...endpoint, token: "unsafe" }, 123),
@@ -35,7 +38,10 @@ test("accepts only playback acknowledgements from the current engine", () => {
     audio_state: "paused",
   };
 
-  assert.deepEqual(parsePlaybackControlAck(ack, 123), ack);
+  assert.deepEqual(parsePlaybackControlAck(ack, 123), {
+    state: ack.state,
+    updated_at: ack.updated_at,
+  });
   assert.equal(parsePlaybackControlAck(ack, 456), null);
   assert.equal(parsePlaybackControlAck({ ...ack, state: "loading" }, 123), null);
 });
