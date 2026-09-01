@@ -160,8 +160,8 @@ async function assertDragClean(page) {
   assert.equal(new Set(historyIds).size, historyIds.length, "History cards must have unique IDs");
 }
 
-async function actionMenuIsFullyVisible(page) {
-  return page.locator("#queue-action-menu:not([hidden])").evaluate((menu) => {
+async function timelineMenuIsFullyVisible(page, selector) {
+  return page.locator(selector).evaluate((menu) => {
     const bounds = menu.getBoundingClientRect();
     const listBounds = document.querySelector("#speechicle-list").getBoundingClientRect();
     const center = document.elementFromPoint(
@@ -1016,21 +1016,63 @@ try {
   );
   const inlineVoice = menuRow.locator(".speechicle-voice");
   await inlineVoice.hover();
-  const inlineVoiceStyle = await inlineVoice.evaluate((select) => {
-    const style = getComputedStyle(select);
+  const inlineVoiceStyle = await inlineVoice.evaluate((button) => {
+    const style = getComputedStyle(button);
     return {
-      appearance: style.appearance,
       background: style.backgroundColor,
       cursor: style.cursor,
     };
   });
-  assert.equal(inlineVoiceStyle.appearance, "none", "Inline voices must not show a select arrow");
   assert.equal(inlineVoiceStyle.cursor, "pointer");
   assert.notEqual(
     inlineVoiceStyle.background,
     "rgba(0, 0, 0, 0)",
     "Inline voices must show hover feedback",
   );
+  assert.equal(await inlineVoice.textContent(), "Heart");
+  await inlineVoice.click();
+  const visibleVoiceMenu = page.locator("#voice-menu:not([hidden])");
+  assert.equal(await visibleVoiceMenu.count(), 1, "The voice menu did not open");
+  const voiceMenuStyle = await visibleVoiceMenu.evaluate((menu) => {
+    const style = getComputedStyle(menu);
+    const bounds = menu.getBoundingClientRect();
+    return {
+      width: bounds.width,
+      scrollbarWidth: style.scrollbarWidth,
+    };
+  });
+  assert(
+    voiceMenuStyle.width >= 180,
+    `The voice menu is too narrow at ${voiceMenuStyle.width}px`,
+  );
+  assert.equal(
+    voiceMenuStyle.scrollbarWidth,
+    "thin",
+    "The voice menu must use the same thin scrollbar as the Speechicles list",
+  );
+  assert(
+    await timelineMenuIsFullyVisible(page, "#voice-menu:not([hidden])"),
+    "The voice menu was clipped or covered",
+  );
+  assert.deepEqual(
+    await visibleVoiceMenu.locator(".voice-menu-group").allTextContents(),
+    ["US female", "US male", "UK female", "UK male"],
+  );
+  assert.equal(
+    await visibleVoiceMenu.locator('.voice-menu-option[aria-selected="true"]').textContent(),
+    "Heart",
+  );
+  assert.equal(
+    await page.locator("#voice-menu .voice-menu-option:focus").textContent(),
+    "Heart",
+    "Opening the voice menu must focus the selected voice",
+  );
+  await page.keyboard.press("ArrowDown");
+  assert.equal(await page.locator("#voice-menu .voice-menu-option:focus").textContent(), "Jessica");
+  await page.keyboard.press("ArrowUp");
+  assert.equal(await page.locator("#voice-menu .voice-menu-option:focus").textContent(), "Heart");
+  await visibleVoiceMenu.locator('[data-voice="af_heart"]').click();
+  assert.equal(await visibleVoiceMenu.count(), 0, "Selecting the current voice did not close the menu");
   await menuButton.click();
   const visibleActions = page.locator("#queue-action-menu:not([hidden])");
   await new Promise((resolve) => setTimeout(resolve, 800));
@@ -1040,7 +1082,7 @@ try {
     "Opening row actions must move keyboard focus into the popover",
   );
   assert(
-    await actionMenuIsFullyVisible(page),
+    await timelineMenuIsFullyVisible(page, "#queue-action-menu:not([hidden])"),
     "The row action menu was clipped or covered",
   );
   assert.deepEqual(
@@ -1057,7 +1099,7 @@ try {
     await menuButton.locator("span").evaluate((dot) => getComputedStyle(dot).width),
     "2.5px",
   );
-  assert.equal(await menuRow.locator(".speechicle-voice").inputValue(), "af_heart");
+  assert.equal(await menuRow.locator(".speechicle-voice").textContent(), "Heart");
   assert.equal(
     await menuRow.locator(".speechicle-status:not(.is-hidden)").count(),
     0,
@@ -1135,7 +1177,7 @@ try {
   await historyMenuButton.scrollIntoViewIfNeeded();
   await historyMenuButton.click();
   assert(
-    await actionMenuIsFullyVisible(page),
+    await timelineMenuIsFullyVisible(page, "#queue-action-menu:not([hidden])"),
     "A History menu near the viewport edge was clipped or covered",
   );
   assert.deepEqual(
@@ -1479,10 +1521,11 @@ try {
     "The row menu must not duplicate inline voice selection",
   );
   await page.locator("#speech-heading").click();
-  const currentVoiceSelect = page.locator(
+  const currentVoiceButton = page.locator(
     `[data-item-id="${currentBeforeVoiceChange.id}"] .speechicle-voice`,
   );
-  await currentVoiceSelect.selectOption("bm_fable");
+  await currentVoiceButton.click();
+  await page.locator('#voice-menu [data-voice="bm_fable"]').click();
   assert.equal(
     await page.locator("body").getAttribute("data-state"),
     "playing",
@@ -1643,8 +1686,8 @@ try {
     "The renderer did not show the manual voice and source",
   );
   assert.equal(
-    await page.locator(".speechicle-item.is-current .speechicle-voice").inputValue(),
-    "bm_george",
+    await page.locator(".speechicle-item.is-current .speechicle-voice").textContent(),
+    "George",
   );
   runEngine("pause");
   await waitFor(() => status().state === "paused", "Manual speech did not pause");

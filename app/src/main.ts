@@ -94,6 +94,7 @@ const metadataRow = requiredElement<HTMLDivElement>("metadata-row");
 const clearQueueButton = requiredElement<HTMLButtonElement>("clear-queue-button");
 const speechicleList = requiredElement<HTMLDivElement>("speechicle-list");
 const queueActionMenu = requiredElement<HTMLDivElement>("queue-action-menu");
+const voiceMenu = requiredElement<HTMLDivElement>("voice-menu");
 const inboxReplyDialog = requiredElement<HTMLDialogElement>("inbox-reply-dialog");
 const inboxReplyForm = requiredElement<HTMLFormElement>("inbox-reply-form");
 const inboxReplyTitle = requiredElement<HTMLHeadingElement>("inbox-reply-title");
@@ -198,6 +199,7 @@ let speechiclePointerGesture: SpeechiclePointerGesture | null = null;
 const suppressedSpeechicleClicks = new WeakSet<HTMLButtonElement>();
 let pendingSpeechicleExpansion: PendingSpeechicleExpansion | null = null;
 let openMenuItemId: string | null = null;
+let openVoiceItemId: string | null = null;
 let revealedCurrentItemId: string | null = null;
 let ringSettlingAnimations: Animation[] = [];
 let playbackExpanded = false;
@@ -1191,7 +1193,43 @@ function reconcileTimelineNodes(items: TimelineItem[]): boolean {
   return true;
 }
 
+function positionTimelineMenu(
+  menu: HTMLElement,
+  button: HTMLElement,
+  horizontalAlignment: "start" | "end",
+): void {
+  const edgeGap = 8;
+  const itemGap = 4;
+  const listBounds = speechicleList.getBoundingClientRect();
+  const buttonBounds = button.getBoundingClientRect();
+  const availableTop = Math.max(edgeGap, listBounds.top + edgeGap);
+  const availableBottom = Math.min(window.innerHeight - edgeGap, listBounds.bottom - edgeGap);
+  menu.style.maxHeight = `${Math.max(0, availableBottom - availableTop)}px`;
+  const menuBounds = menu.getBoundingClientRect();
+  const availableLeft = Math.max(edgeGap, listBounds.left);
+  const availableRight = Math.min(window.innerWidth - edgeGap, listBounds.right);
+  const preferredLeft = horizontalAlignment === "start"
+    ? buttonBounds.left
+    : buttonBounds.right - menuBounds.width;
+  const left = Math.min(
+    Math.max(availableLeft, preferredLeft),
+    availableRight - menuBounds.width,
+  );
+  const below = buttonBounds.bottom + itemGap;
+  const above = buttonBounds.top - menuBounds.height - itemGap;
+  const top = below + menuBounds.height <= availableBottom
+    ? below
+    : above >= availableTop
+      ? above
+      : Math.min(Math.max(availableTop, buttonBounds.top), availableBottom - menuBounds.height);
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+}
+
 function setOpenActionMenu(itemId: string | null): void {
+  if (itemId) {
+    setOpenVoiceMenu(null);
+  }
   const shouldFocus = itemId !== null && itemId !== openMenuItemId;
   const item = itemId
     ? visibleTimelineItems().find(({ id }) => id === itemId)
@@ -1262,30 +1300,7 @@ function setOpenActionMenu(itemId: string | null): void {
     ));
   }
   queueActionMenu.replaceChildren(...actions);
-
-  const edgeGap = 8;
-  const itemGap = 4;
-  const listBounds = speechicleList.getBoundingClientRect();
-  const buttonBounds = button.getBoundingClientRect();
-  const availableTop = Math.max(edgeGap, listBounds.top + edgeGap);
-  const availableBottom = Math.min(window.innerHeight - edgeGap, listBounds.bottom - edgeGap);
-  queueActionMenu.style.maxHeight = `${Math.max(0, availableBottom - availableTop)}px`;
-  const menuBounds = queueActionMenu.getBoundingClientRect();
-  const availableLeft = Math.max(edgeGap, listBounds.left);
-  const availableRight = Math.min(window.innerWidth - edgeGap, listBounds.right);
-  const left = Math.min(
-    Math.max(availableLeft, buttonBounds.right - menuBounds.width),
-    availableRight - menuBounds.width,
-  );
-  const below = buttonBounds.bottom + itemGap;
-  const above = buttonBounds.top - menuBounds.height - itemGap;
-  const top = below + menuBounds.height <= availableBottom
-    ? below
-    : above >= availableTop
-      ? above
-      : Math.min(Math.max(availableTop, buttonBounds.top), availableBottom - menuBounds.height);
-  queueActionMenu.style.left = `${left}px`;
-  queueActionMenu.style.top = `${top}px`;
+  positionTimelineMenu(queueActionMenu, button, "end");
   if (shouldFocus) {
     queueActionMenu.querySelector<HTMLElement>("button")?.focus();
   }
@@ -1303,6 +1318,86 @@ function closeActionMenu(restoreFocus: boolean): void {
   } else if (restoreFocus === false) {
     speechicleList.focus({ preventScroll: true });
   }
+}
+
+function setOpenVoiceMenu(itemId: string | null): void {
+  if (itemId) {
+    setOpenActionMenu(null);
+  }
+  const shouldFocus = itemId !== null && itemId !== openVoiceItemId;
+  const item = itemId
+    ? visibleTimelineItems().find(({ id }) => id === itemId)
+    : null;
+  const target = item
+    ? speechicleList.querySelector<HTMLElement>(`[data-item-id="${item.id}"]`)
+    : null;
+  const button = target?.querySelector<HTMLButtonElement>(".speechicle-voice");
+  if (itemId) {
+    const listBounds = speechicleList.getBoundingClientRect();
+    const targetBounds = target?.getBoundingClientRect();
+    if (
+      !item ||
+      !button ||
+      !targetBounds ||
+      targetBounds.bottom <= listBounds.top ||
+      targetBounds.top >= listBounds.bottom
+    ) {
+      itemId = null;
+    }
+  }
+  openVoiceItemId = itemId;
+  for (const row of speechicleList.querySelectorAll<HTMLElement>(".speechicle-item")) {
+    const open = row.dataset.itemId === itemId;
+    row.querySelector<HTMLButtonElement>(".speechicle-voice")
+      ?.setAttribute("aria-expanded", String(open));
+  }
+  voiceMenu.hidden = !itemId;
+  if (!itemId || !item || !button) {
+    voiceMenu.replaceChildren();
+    return;
+  }
+
+  const contents: HTMLElement[] = [];
+  let activeGroup: string | null = null;
+  for (const [id, label, group] of selectableVoiceOptions(allowExtraVoices, item.voice)) {
+    if (group !== activeGroup) {
+      const heading = document.createElement("div");
+      heading.className = "voice-menu-group";
+      heading.textContent = group;
+      contents.push(heading);
+      activeGroup = group;
+    }
+    const option = document.createElement("button");
+    option.className = "voice-menu-option";
+    option.type = "button";
+    option.role = "option";
+    option.dataset.voice = id;
+    option.textContent = label;
+    option.setAttribute("aria-selected", String(id === item.voice));
+    option.disabled = timelineMutationBlocked();
+    option.addEventListener("click", () => {
+      setOpenVoiceMenu(null);
+      if (id !== item.voice) {
+        void playTimelineItem(item, id);
+      }
+    });
+    contents.push(option);
+  }
+  voiceMenu.replaceChildren(...contents);
+  positionTimelineMenu(voiceMenu, button, "start");
+  if (shouldFocus) {
+    voiceMenu.querySelector<HTMLElement>('[aria-selected="true"]')?.focus();
+  }
+}
+
+function closeVoiceMenu(restoreFocus: boolean): void {
+  const button = restoreFocus && openVoiceItemId
+    ? speechicleList.querySelector<HTMLButtonElement>(
+        `[data-item-id="${openVoiceItemId}"] .speechicle-voice`,
+      )
+    : null;
+  setOpenVoiceMenu(null);
+  button?.focus({ preventScroll: true });
 }
 
 function createMenuAction(
@@ -1434,6 +1529,7 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
   }
   cancelTimelinePointerDrag();
   setOpenActionMenu(null);
+  setOpenVoiceMenu(null);
   renderedTimelineKey = timelineKey;
 
   const previousScrollTop = speechicleList.scrollTop;
@@ -1519,14 +1615,16 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
 
     const meta = document.createElement("div");
     meta.className = "queue-meta";
-    const inlineVoice = document.createElement("select");
+    const inlineVoice = document.createElement("button");
     inlineVoice.className = "speechicle-voice";
+    inlineVoice.type = "button";
+    inlineVoice.textContent = formatVoice(item.voice);
+    inlineVoice.setAttribute("aria-haspopup", "listbox");
+    inlineVoice.setAttribute("aria-expanded", "false");
+    inlineVoice.setAttribute("aria-controls", voiceMenu.id);
     inlineVoice.setAttribute("aria-label", `Voice for ${reference}`);
-    populateVoiceSelect(inlineVoice, item.voice);
-    inlineVoice.addEventListener("change", () => {
-      if (inlineVoice.value !== item.voice) {
-        void playTimelineItem(item, inlineVoice.value);
-      }
+    inlineVoice.addEventListener("click", () => {
+      setOpenVoiceMenu(openVoiceItemId === item.id ? null : item.id);
     });
     const source = document.createElement("span");
     source.className = "speechicle-source";
@@ -1660,9 +1758,10 @@ function updateTimelineRows(items: TimelineItem[]): void {
       "aria-label",
       `Full text for ${reference}`,
     );
-    const inlineVoice = row.querySelector<HTMLSelectElement>(".speechicle-voice");
+    const inlineVoice = row.querySelector<HTMLButtonElement>(".speechicle-voice");
     if (inlineVoice) {
       inlineVoice.disabled = timelineCommandInFlight;
+      inlineVoice.textContent = formatVoice(item.voice);
       inlineVoice.setAttribute("aria-label", `Voice for ${reference}`);
     }
     const action = row.querySelector<HTMLElement>(".speechicle-status");
@@ -2075,6 +2174,7 @@ document.addEventListener("visibilitychange", () => {
     cancelSpeechiclePointerGesture();
     cancelPendingSpeechicleExpansion();
     setOpenActionMenu(null);
+    setOpenVoiceMenu(null);
   } else {
     void refreshStatus();
   }
@@ -2110,7 +2210,30 @@ speechicleList.addEventListener("scroll", () => {
   if (openMenuItemId) {
     setOpenActionMenu(openMenuItemId);
   }
+  if (openVoiceItemId) {
+    setOpenVoiceMenu(openVoiceItemId);
+  }
 }, { passive: true });
+voiceMenu.addEventListener("keydown", (event) => {
+  const options = [
+    ...voiceMenu.querySelectorAll<HTMLButtonElement>(".voice-menu-option:not(:disabled)"),
+  ];
+  const currentIndex = options.findIndex((option) => option === document.activeElement);
+  let nextIndex: number | null = null;
+  if (event.key === "ArrowDown") {
+    nextIndex = (currentIndex + 1) % options.length;
+  } else if (event.key === "ArrowUp") {
+    nextIndex = (currentIndex - 1 + options.length) % options.length;
+  } else if (event.key === "Home") {
+    nextIndex = 0;
+  } else if (event.key === "End") {
+    nextIndex = options.length - 1;
+  }
+  if (nextIndex !== null && options[nextIndex]) {
+    event.preventDefault();
+    options[nextIndex].focus();
+  }
+});
 window.addEventListener("pointermove", updateTimelinePointerDrag, true);
 window.addEventListener("pointermove", updateSpeechiclePointerGesture, true);
 window.addEventListener("pointerup", (event) => {
@@ -2130,6 +2253,7 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     cancelTimelinePointerDrag();
     closeActionMenu(true);
+    closeVoiceMenu(true);
     closeComposer(true);
     if (playbackExpanded) {
       setPlaybackExpanded(false);
@@ -2153,12 +2277,20 @@ document.addEventListener("pointerdown", (event) => {
   ) {
     setOpenActionMenu(null);
   }
+  if (
+    openVoiceItemId &&
+    event.target instanceof Element &&
+    !event.target.closest(".speechicle-voice, #voice-menu")
+  ) {
+    setOpenVoiceMenu(null);
+  }
 }, true);
 window.addEventListener("blur", () => {
   cancelTimelinePointerDrag();
   cancelSpeechiclePointerGesture();
   cancelPendingSpeechicleExpansion();
   setOpenActionMenu(null);
+  setOpenVoiceMenu(null);
   closeComposer(false);
 });
 

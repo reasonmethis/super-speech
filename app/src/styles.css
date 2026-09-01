@@ -799,6 +799,10 @@ body[data-state="loading"] .playback-copy {
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+.speechicle-list,
+.voice-menu {
   scrollbar-color: var(--scrollbar) transparent;
   scrollbar-width: thin;
 }
@@ -807,16 +811,19 @@ body[data-state="loading"] .playback-copy {
   cursor: grabbing;
 }
 
-.speechicle-list::-webkit-scrollbar {
+.speechicle-list::-webkit-scrollbar,
+.voice-menu::-webkit-scrollbar {
   width: 5px;
 }
 
-.speechicle-list::-webkit-scrollbar-thumb {
+.speechicle-list::-webkit-scrollbar-thumb,
+.voice-menu::-webkit-scrollbar-thumb {
   border-radius: 999px;
   background: var(--scrollbar);
 }
 
-.speechicle-list::-webkit-scrollbar-track {
+.speechicle-list::-webkit-scrollbar-track,
+.voice-menu::-webkit-scrollbar-track {
   background: transparent;
 }
 
@@ -998,6 +1005,65 @@ body[data-state="loading"] .playback-copy {
 
 .queue-action-menu[hidden] {
   display: none;
+}
+
+.voice-menu {
+  position: fixed;
+  z-index: 31;
+  display: grid;
+  width: 184px;
+  padding: 5px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--panel-text);
+  background: var(--panel-bg);
+  box-shadow: 0 12px 28px var(--panel-shadow);
+}
+
+.voice-menu[hidden] {
+  display: none;
+}
+
+.voice-menu-group {
+  padding: 7px 8px 3px;
+  color: var(--text-muted);
+  font-size: 8px;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.voice-menu-option {
+  width: 100%;
+  min-height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
+  outline: 0;
+  color: var(--panel-text);
+  background: transparent;
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.voice-menu-option:hover,
+.voice-menu-option:focus-visible {
+  background: var(--control-hover);
+}
+
+.voice-menu-option[aria-selected="true"] {
+  color: var(--accent-bright);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.voice-menu-option:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 
 .inbox-reply-dialog {
@@ -1186,9 +1252,6 @@ body[data-state="loading"] .playback-copy {
 }
 
 .speechicle-voice {
-  field-sizing: content;
-  width: auto;
-  max-width: 110px;
   height: 18px;
   padding: 0 4px 0 2px;
   border: 0;
@@ -1198,7 +1261,6 @@ body[data-state="loading"] .playback-copy {
   background: transparent;
   font: inherit;
   font-size: 9.5px;
-  appearance: none;
   cursor: pointer;
 }
 
