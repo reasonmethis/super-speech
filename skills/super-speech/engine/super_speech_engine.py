@@ -1521,7 +1521,7 @@ class State:
         self.current_projection: CurrentProjection | None = None
         self.read_failures: dict[str, float] = {}
         self.stop = threading.Event()    # tell the worker to exit
-        self.saw_stop = False            # graceful Stop; new speech or Play may cancel it
+        self.saw_stop = False            # graceful Stop; a newer accepted command may cancel it
         self.timeline_revision = timeline_revision
         self.timeline_fingerprint = timeline_fingerprint
 
