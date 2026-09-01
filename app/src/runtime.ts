@@ -388,11 +388,10 @@ function timelineItem(
 export function timelineItems(
   status: Pick<EngineStatus, "current" | "queue" | "history">,
 ): TimelineItem[] {
-  const waiting = status.queue.map((item, index) =>
-    timelineItem(item, "waiting", index + 1)
-  );
   return [
-    ...waiting.reverse(),
+    ...status.queue.map((item, index) =>
+      timelineItem(item, "waiting", index + 1)
+    ).reverse(),
     ...(status.current ? [timelineItem(status.current, "current", null)] : []),
     ...status.history.map((item) => timelineItem(item, "history", null)),
   ];
@@ -408,11 +407,9 @@ export function moveSpeechicleItemBefore<T extends { id: string }>(
     return [...items];
   }
   const reordered = items.filter((item) => item.id !== id);
-  if (beforeId === null) {
-    reordered.push(source);
-    return reordered;
-  }
-  const destination = reordered.findIndex((item) => item.id === beforeId);
+  const destination = beforeId === null
+    ? reordered.length
+    : reordered.findIndex((item) => item.id === beforeId);
   if (destination < 0) {
     return [...items];
   }
@@ -451,10 +448,6 @@ export type TimelineMutationResult<TSnapshot extends EngineStatus = EngineStatus
     error: string;
     snapshot: TSnapshot;
   };
-
-function isNonemptyString(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0;
-}
 
 function isKokoroVoiceId(value: unknown): value is string {
   return typeof value === "string" && KOKORO_VOICE_ID.test(value);
@@ -498,8 +491,7 @@ function hasOnlyFields(
   value: Record<string, unknown>,
   allowed: readonly string[],
 ): boolean {
-  const allowedFields = new Set(allowed);
-  return Object.keys(value).every((field) => allowedFields.has(field));
+  return Object.keys(value).every((field) => allowed.includes(field));
 }
 
 export function parseTimelineMutation(value: unknown): TimelineMutation | null {
@@ -511,13 +503,13 @@ export function parseTimelineMutation(value: unknown): TimelineMutation | null {
     return hasOnlyFields(mutation, ["type"]) ? { type: "clear" } : null;
   }
   if (mutation.type === "enqueue") {
+    const text = typeof mutation.text === "string" ? mutation.text.trim() : null;
     const source = typeof mutation.source === "string"
       ? mutation.source.trim()
       : mutation.source;
     if (
       !hasOnlyFields(mutation, ["type", "text", "voice", "source"]) ||
-      typeof mutation.text !== "string" ||
-      !mutation.text.trim() ||
+      !text ||
       !isKokoroVoiceId(mutation.voice) ||
       (source !== undefined && !isSourceLabel(source))
     ) {
@@ -525,7 +517,7 @@ export function parseTimelineMutation(value: unknown): TimelineMutation | null {
     }
     return {
       type: "enqueue",
-      text: mutation.text.trim(),
+      text,
       voice: mutation.voice,
       ...(source === undefined ? {} : { source }),
     };
@@ -567,6 +559,14 @@ export function parseTimelineMutation(value: unknown): TimelineMutation | null {
   return null;
 }
 
+const TIMELINE_MUTATION_RESULT_FIELDS = [
+  "outcome",
+  "request_id",
+  "result_id",
+  "error",
+  "snapshot",
+] as const;
+
 export function parseTimelineMutationResult(
   value: unknown,
 ): TimelineMutationResult | null {
@@ -580,13 +580,7 @@ export function parseTimelineMutationResult(
   }
   if (result.outcome === "committed") {
     if (
-      !hasOnlyFields(result, [
-        "outcome",
-        "request_id",
-        "result_id",
-        "error",
-        "snapshot",
-      ]) ||
+      !hasOnlyFields(result, TIMELINE_MUTATION_RESULT_FIELDS) ||
       (result.error !== undefined && result.error !== null) ||
       result.result_id !== undefined &&
       result.result_id !== null &&
@@ -603,15 +597,10 @@ export function parseTimelineMutationResult(
   }
   if (
     (result.outcome === "rejected" || result.outcome === "unconfirmed") &&
-    hasOnlyFields(result, [
-      "outcome",
-      "request_id",
-      "result_id",
-      "error",
-      "snapshot",
-    ]) &&
+    hasOnlyFields(result, TIMELINE_MUTATION_RESULT_FIELDS) &&
     (result.result_id === undefined || result.result_id === null) &&
-    isNonemptyString(result.error)
+    typeof result.error === "string" &&
+    result.error.length > 0
   ) {
     return {
       outcome: result.outcome,

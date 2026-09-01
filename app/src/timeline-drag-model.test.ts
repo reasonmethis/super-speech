@@ -14,15 +14,15 @@ import { moveSpeechicleItemBefore } from "./runtime.ts";
 const initialOrder = ["newest", "middle", "oldest"];
 
 function begin(pointerId = 1): TimelineDragState {
-  const state = startTimelineDrag(pointerId, "middle", initialOrder);
+  const state = startTimelineDrag(pointerId, "middle", initialOrder, "waiting");
   assert(state);
   return state;
 }
 
 test("rejects a missing source and duplicate IDs", () => {
-  assert.equal(startTimelineDrag(1, "missing", initialOrder), null);
+  assert.equal(startTimelineDrag(1, "missing", initialOrder, "waiting"), null);
   assert.equal(
-    startTimelineDrag(1, "middle", ["middle", "middle"]),
+    startTimelineDrag(1, "middle", ["middle", "middle"], "waiting"),
     null,
   );
 });
@@ -169,10 +169,14 @@ test("moving over History preserves the current section preview until settlement
     type: "preview-history",
     pointerId: 1,
   });
+  const repeatedHistoryPreview = transitionTimelineDrag(historyPreview.state, {
+    type: "preview-history",
+    pointerId: 1,
+  });
 
-  assert.deepEqual(historyPreview.visualOrder, ["middle", "newest", "oldest"]);
+  assert.deepEqual(repeatedHistoryPreview.visualOrder, ["middle", "newest", "oldest"]);
   assert.deepEqual(
-    transitionTimelineDrag(historyPreview.state, {
+    transitionTimelineDrag(repeatedHistoryPreview.state, {
       type: "finish",
       pointerId: 1,
       commit: true,
@@ -183,74 +187,50 @@ test("moving over History preserves the current section preview until settlement
       command: { type: "archive", id: "middle" },
     },
   );
-  assert.deepEqual(transitionTimelineDrag(historyPreview.state, { type: "cancel" }), {
+  assert.deepEqual(transitionTimelineDrag(repeatedHistoryPreview.state, { type: "cancel" }), {
     state: null,
     visualOrder: initialOrder,
     command: null,
   });
 });
 
-test("every source and destination round-trips through engine playback order", () => {
-  for (let size = 1; size <= 5; size += 1) {
-    const visualOrder = Array.from({ length: size }, (_, index) => `item-${index}`);
-    for (const sourceId of visualOrder) {
-      for (const beforeId of [...visualOrder, null]) {
-        const state = startTimelineDrag(1, sourceId, visualOrder);
-        assert(state);
-        const preview = transitionTimelineDrag(state, {
-          type: "preview-section",
-          pointerId: 1,
-          beforeId,
-        });
-        const finished = transitionTimelineDrag(preview.state, {
-          type: "finish",
-          pointerId: 1,
-          commit: true,
-        });
-        assert(finished.visualOrder);
-        if (!finished.command || finished.command.type !== "move") {
-          assert.deepEqual(finished.visualOrder, visualOrder);
-          continue;
+test("Waiting and History drag commands round-trip through engine order", () => {
+  for (const kind of ["waiting", "history"] as const) {
+    for (let size = 1; size <= 5; size += 1) {
+      const visualOrder = Array.from({ length: size }, (_, index) => `item-${index}`);
+      for (const sourceId of visualOrder) {
+        for (const beforeId of [...visualOrder, null]) {
+          const state = startTimelineDrag(1, sourceId, visualOrder, kind);
+          assert(state);
+          const preview = transitionTimelineDrag(state, {
+            type: "preview-section",
+            pointerId: 1,
+            beforeId,
+          });
+          const finished = transitionTimelineDrag(preview.state, {
+            type: "finish",
+            pointerId: 1,
+            commit: true,
+          });
+          assert(finished.visualOrder);
+          if (!finished.command || finished.command.type !== "move") {
+            assert.deepEqual(finished.visualOrder, visualOrder);
+            continue;
+          }
+          const engineOrder = kind === "waiting"
+            ? [...visualOrder].reverse()
+            : visualOrder;
+          const persistedEngineOrder = moveSpeechicleItemBefore(
+            engineOrder.map((id) => ({ id })),
+            finished.command.id,
+            finished.command.beforeId,
+          ).map(({ id }) => id);
+          const persistedVisualOrder = kind === "waiting"
+            ? persistedEngineOrder.reverse()
+            : persistedEngineOrder;
+          assert.deepEqual(persistedVisualOrder, finished.visualOrder);
         }
-        const engineOrder = [...visualOrder].reverse().map((id) => ({ id }));
-        const persistedVisualOrder = moveSpeechicleItemBefore(
-          engineOrder,
-          finished.command.id,
-          finished.command.beforeId,
-        ).map(({ id }) => id).reverse();
-        assert.deepEqual(persistedVisualOrder, finished.visualOrder);
       }
-    }
-  }
-});
-
-test("History drag commands round-trip through matching visual and engine order", () => {
-  const visualOrder = ["newest", "middle", "oldest"];
-  for (const sourceId of visualOrder) {
-    for (const beforeId of [...visualOrder, null]) {
-      const state = startTimelineDrag(1, sourceId, visualOrder, "history");
-      assert(state);
-      const preview = transitionTimelineDrag(state, {
-        type: "preview-section",
-        pointerId: 1,
-        beforeId,
-      });
-      const finished = transitionTimelineDrag(preview.state, {
-        type: "finish",
-        pointerId: 1,
-        commit: true,
-      });
-      assert(finished.visualOrder);
-      if (!finished.command || finished.command.type !== "move") {
-        assert.deepEqual(finished.visualOrder, visualOrder);
-        continue;
-      }
-      const persisted = moveSpeechicleItemBefore(
-        visualOrder.map((id) => ({ id })),
-        finished.command.id,
-        finished.command.beforeId,
-      ).map(({ id }) => id);
-      assert.deepEqual(persisted, finished.visualOrder);
     }
   }
 });
@@ -270,7 +250,7 @@ test("History-origin drags cannot enter the archive drop phase", () => {
 });
 
 test("stale pointer events cannot affect a newer session", () => {
-  const restarted = startTimelineDrag(2, "oldest", initialOrder);
+  const restarted = startTimelineDrag(2, "oldest", initialOrder, "waiting");
   assert(restarted);
 
   const staleFinish = transitionTimelineDrag(restarted, {

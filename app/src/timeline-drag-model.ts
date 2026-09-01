@@ -61,7 +61,7 @@ export function startTimelineDrag(
   pointerId: number,
   sourceId: string,
   visualOrder: readonly string[],
-  kind: "waiting" | "history" = "waiting",
+  kind: "waiting" | "history",
 ): TimelineDragState | null {
   if (!visualOrder.includes(sourceId) || new Set(visualOrder).size !== visualOrder.length) {
     return null;
@@ -76,14 +76,7 @@ export function startTimelineDrag(
 }
 
 function settleDrag(state: TimelineDragState, commit: boolean): TimelineDragTransition {
-  if (!commit || state.phase === "armed") {
-    return {
-      state: null,
-      visualOrder: state.initialVisualOrder,
-      command: null,
-    };
-  }
-  if (state.phase === "history") {
+  if (commit && state.phase === "history") {
     return {
       state: null,
       visualOrder: state.previewVisualOrder,
@@ -91,29 +84,32 @@ function settleDrag(state: TimelineDragState, commit: boolean): TimelineDragTran
     };
   }
 
-  const changed = state.previewVisualOrder.some(
-    (id, index) => id !== state.initialVisualOrder[index],
-  );
-  if (!changed) {
+  if (
+    commit &&
+    state.phase === "section" &&
+    state.previewVisualOrder.some(
+      (id, index) => id !== state.initialVisualOrder[index]
+    )
+  ) {
+    const engineOrder = state.kind === "waiting"
+      ? [...state.previewVisualOrder].reverse()
+      : [...state.previewVisualOrder];
+    const sourceIndex = engineOrder.indexOf(state.sourceId);
     return {
       state: null,
-      visualOrder: state.initialVisualOrder,
-      command: null,
+      visualOrder: state.previewVisualOrder,
+      command: {
+        type: "move",
+        kind: state.kind,
+        id: state.sourceId,
+        beforeId: engineOrder[sourceIndex + 1] ?? null,
+      },
     };
   }
-  const engineOrder = state.kind === "waiting"
-    ? [...state.previewVisualOrder].reverse()
-    : [...state.previewVisualOrder];
-  const sourceIndex = engineOrder.indexOf(state.sourceId);
   return {
     state: null,
-    visualOrder: state.previewVisualOrder,
-    command: {
-      type: "move",
-      kind: state.kind,
-      id: state.sourceId,
-      beforeId: engineOrder[sourceIndex + 1] ?? null,
-    },
+    visualOrder: state.initialVisualOrder,
+    command: null,
   };
 }
 
@@ -134,16 +130,14 @@ export function transitionTimelineDrag(
     if (state.kind !== "waiting") {
       return { state, ...NO_CHANGE };
     }
-    const previewVisualOrder = state.phase === "section"
-      ? state.previewVisualOrder
-      : state.initialVisualOrder;
+    const previewVisualOrder = state.phase === "armed"
+      ? state.initialVisualOrder
+      : state.previewVisualOrder;
     return {
       state: {
+        ...state,
+        kind: "waiting",
         phase: "history",
-        pointerId: state.pointerId,
-        sourceId: state.sourceId,
-        initialVisualOrder: state.initialVisualOrder,
-        kind: state.kind,
         previewVisualOrder,
       },
       visualOrder: previewVisualOrder,
@@ -159,11 +153,8 @@ export function transitionTimelineDrag(
   ).map(({ id }) => id);
   return {
     state: {
+      ...state,
       phase: "section",
-      pointerId: state.pointerId,
-      sourceId: state.sourceId,
-      initialVisualOrder: state.initialVisualOrder,
-      kind: state.kind,
       previewVisualOrder,
     },
     visualOrder: previewVisualOrder,

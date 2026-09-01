@@ -45,6 +45,16 @@ const status: EngineStatus = {
   history: [],
 };
 
+function liveRuntime(overrides: Partial<RuntimeStatus> = {}): RuntimeStatus {
+  return {
+    ...status,
+    state: "idle",
+    engine_running: true,
+    installed: true,
+    ...overrides,
+  };
+}
+
 test("archives only registered voices", () => {
   assert.deepEqual(
     [...ARCHIVED_VOICE_IDS],
@@ -548,46 +558,39 @@ test("validates every timeline mutation variant", () => {
     { type: "enqueue", text: "Speech", voice: "af_heart", source: "Manual" },
   );
 
-  assert.equal(parseTimelineMutation({ type: "play", id: "old-name" }), null);
-  assert.equal(
-    parseTimelineMutation({
+  const invalid = [
+    { type: "play", id: "old-name" },
+    {
       type: "enqueue",
       text: "Speech",
       voice: "af_heart",
       source: "line\nbreak",
-    }),
-    null,
-  );
-  assert.equal(
-    parseTimelineMutation({ type: "enqueue", text: " ", voice: "af_heart" }),
-    null,
-  );
-  assert.equal(parseTimelineMutation({ type: "play", id, voice: "" }), null);
-  assert.equal(parseTimelineMutation({ type: "play", id, voice: "Heart" }), null);
-  assert.equal(parseTimelineMutation({ type: "clear", id }), null);
-  assert.equal(parseTimelineMutation({ type: "archive", id, beforeId: null }), null);
-  assert.equal(
-    parseTimelineMutation({ type: "move", section: "current", id, beforeId: null }),
-    null,
-  );
-  assert.equal(
-    parseTimelineMutation({ type: "move", section: "waiting", id }),
-    null,
-  );
-  assert.equal(parseTimelineMutation({ type: "unknown", id }), null);
+    },
+    { type: "enqueue", text: " ", voice: "af_heart" },
+    { type: "play", id, voice: "" },
+    { type: "play", id, voice: "Heart" },
+    { type: "clear", id },
+    { type: "archive", id, beforeId: null },
+    { type: "move", section: "current", id, beforeId: null },
+    { type: "move", section: "waiting", id },
+    { type: "unknown", id },
+  ];
+  for (const mutation of invalid) {
+    assert.equal(parseTimelineMutation(mutation), null);
+  }
 });
 
 test("normalizes committed and failed mutation results", () => {
   const id = speechicleId(8);
   const request1 = "1".repeat(24);
   const request2 = "2".repeat(24);
+  const committed = {
+    outcome: "committed",
+    request_id: request1,
+    snapshot: status,
+  };
   assert.deepEqual(
-    parseTimelineMutationResult({
-      outcome: "committed",
-      request_id: request1,
-      result_id: id,
-      snapshot: status,
-    }),
+    parseTimelineMutationResult({ ...committed, result_id: id }),
     {
       outcome: "committed",
       requestId: request1,
@@ -611,67 +614,26 @@ test("normalizes committed and failed mutation results", () => {
       },
     );
   }
-  assert.equal(
-    parseTimelineMutationResult({
-      outcome: "committed",
-      request_id: "3".repeat(24),
-      result_id: "old-name",
-      snapshot: status,
-    }),
-    null,
-  );
-  assert.equal(
-    parseTimelineMutationResult({
-      outcome: "committed",
-      request_id: "4".repeat(24),
-      snapshot: status,
-      extra: true,
-    }),
-    null,
-  );
-  assert.equal(
-    parseTimelineMutationResult({
-      outcome: "rejected",
-      request_id: "5".repeat(24),
-      snapshot: status,
-    }),
-    null,
-  );
-  assert.equal(
-    parseTimelineMutationResult({
-      outcome: "committed",
-      request_id: "6".repeat(24),
-      error: "Contradictory",
-      snapshot: status,
-    }),
-    null,
-  );
-  assert.equal(
-    parseTimelineMutationResult({
+  const invalid = [
+    { ...committed, result_id: "old-name" },
+    { ...committed, extra: true },
+    { ...committed, outcome: "rejected" },
+    { ...committed, error: "Contradictory" },
+    {
+      ...committed,
       outcome: "unconfirmed",
-      request_id: "7".repeat(24),
       result_id: id,
       error: "Contradictory",
-      snapshot: status,
-    }),
-    null,
-  );
-  assert.equal(
-    parseTimelineMutationResult({
-      outcome: "committed",
-      request_id: "8".repeat(24),
-      snapshot: { ...status, version: ENGINE_STATUS_VERSION - 1 },
-    }),
-    null,
-  );
-  assert.equal(
-    parseTimelineMutationResult({
-      outcome: "committed",
+    },
+    { ...committed, snapshot: { ...status, version: ENGINE_STATUS_VERSION - 1 } },
+    {
+      ...committed,
       request_id: "not-a-request-id",
-      snapshot: status,
-    }),
-    null,
-  );
+    },
+  ];
+  for (const result of invalid) {
+    assert.equal(parseTimelineMutationResult(result), null);
+  }
 });
 
 test("a committed Play result must identify the selected Speechicle", () => {
@@ -700,14 +662,10 @@ test("a committed Play result must identify the selected Speechicle", () => {
 });
 
 test("adopts timeline snapshots by revision and then publication time", () => {
-  const current: RuntimeStatus = {
-    ...status,
+  const current = liveRuntime({
     timeline_revision: 5,
     updated_at: 20,
-    state: "idle",
-    engine_running: true,
-    installed: true,
-  };
+  });
   const olderRevision = {
     ...current,
     timeline_revision: 4,
@@ -728,14 +686,10 @@ test("adopts timeline snapshots by revision and then publication time", () => {
 });
 
 test("a stale poll cannot roll back a committed snapshot", () => {
-  const current: RuntimeStatus = {
-    ...status,
+  const current = liveRuntime({
     timeline_revision: 8,
     updated_at: 80,
-    state: "idle",
-    engine_running: true,
-    installed: true,
-  };
+  });
   const stalePoll = {
     ...current,
     timeline_revision: 7,
@@ -760,14 +714,10 @@ test("a stale poll cannot roll back a committed snapshot", () => {
 });
 
 test("an older recovery snapshot keeps the newer timeline but renders loading", () => {
-  const current: RuntimeStatus = {
-    ...status,
+  const current = liveRuntime({
     timeline_revision: 8,
-    state: "idle",
     updated_at: 50,
-    engine_running: true,
-    installed: true,
-  };
+  });
   const recovering: RuntimeStatus = {
     ...current,
     timeline_revision: 0,
@@ -786,31 +736,19 @@ test("an older recovery snapshot keeps the newer timeline but renders loading", 
 });
 
 test("a new engine Loading snapshot keeps rows until its ready snapshot arrives", () => {
-  const current: RuntimeStatus = {
-    ...status,
-    state: "idle",
+  const current = liveRuntime({
     timeline_revision: 8,
     updated_at: 80,
     engine_pid: 100,
-    engine_running: true,
-    installed: true,
     history_count: 1,
     history: [{ id: speechicleId(10), text: "Saved", voice: "af_heart" }],
-  };
-  const loading: RuntimeStatus = {
-    ...status,
+  });
+  const loading = liveRuntime({
     state: "loading",
     timeline_revision: 0,
     updated_at: 1,
     engine_pid: 200,
-    engine_running: true,
-    installed: true,
-    current: null,
-    queue_count: 0,
-    queue: [],
-    history_count: 0,
-    history: [],
-  };
+  });
   const retained = adoptTimelineSnapshot(current, loading);
 
   assert.equal(retained.state, "loading");
@@ -826,14 +764,11 @@ test("a new engine Loading snapshot keeps rows until its ready snapshot arrives"
 });
 
 test("a new engine process starts a fresh timeline revision sequence", () => {
-  const oldProcess: RuntimeStatus = {
-    ...status,
+  const oldProcess = liveRuntime({
     timeline_revision: 80,
     updated_at: 80,
     engine_pid: 100,
-    engine_running: true,
-    installed: true,
-  };
+  });
   const newProcess: RuntimeStatus = {
     ...oldProcess,
     timeline_revision: 0,
@@ -845,14 +780,11 @@ test("a new engine process starts a fresh timeline revision sequence", () => {
 });
 
 test("a live process is adopted after the stopped state cleared the old PID", () => {
-  const oldProcess: RuntimeStatus = {
-    ...status,
+  const oldProcess = liveRuntime({
     timeline_revision: 80,
     updated_at: 80,
     engine_pid: 100,
-    engine_running: true,
-    installed: true,
-  };
+  });
   const stopped = adoptTimelineSnapshot(oldProcess, {
     ...oldProcess,
     timeline_revision: 79,
@@ -861,28 +793,22 @@ test("a live process is adopted after the stopped state cleared the old PID", ()
     engine_pid: null,
     engine_running: false,
   });
-  const newProcess: RuntimeStatus = {
-    ...status,
+  const newProcess = liveRuntime({
     timeline_revision: 0,
     updated_at: 1,
     engine_pid: 200,
-    engine_running: true,
-    installed: true,
-  };
+  });
 
   assert.equal(stopped.engine_pid, null);
   assert.equal(adoptTimelineSnapshot(stopped, newProcess), newProcess);
 });
 
 test("mutation snapshots must belong to the live engine process", () => {
-  const runtime: RuntimeStatus = {
-    ...status,
+  const runtime = liveRuntime({
     timeline_revision: 2,
     updated_at: 20,
     engine_pid: 200,
-    engine_running: true,
-    installed: true,
-  };
+  });
   const newerSnapshot = {
     ...status,
     timeline_revision: 3,
@@ -907,14 +833,11 @@ test("mutation snapshots must belong to the live engine process", () => {
 });
 
 test("mutation snapshots cannot regress the live process timeline", () => {
-  const runtime: RuntimeStatus = {
-    ...status,
+  const runtime = liveRuntime({
     timeline_revision: 5,
     updated_at: 20,
     engine_pid: 200,
-    engine_running: true,
-    installed: true,
-  };
+  });
   const olderRevision = {
     ...status,
     timeline_revision: 4,
