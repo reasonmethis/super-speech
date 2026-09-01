@@ -90,7 +90,7 @@ def test_copy_skill_excludes_generated_runtime(
     assert not (destination / "runtime").exists()
 
 
-def test_stop_existing_engine_retries_during_status_before_heartbeat_startup(
+def test_stop_existing_engine_retries_until_the_owner_lock_is_released(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     installer = load_installer()
@@ -119,7 +119,7 @@ def test_stop_existing_engine_retries_during_status_before_heartbeat_startup(
     assert attempts == [[str(engine), "interrupt"], [str(engine), "interrupt"]]
 
 
-def test_status_without_an_owner_lock_does_not_block_an_upgrade(
+def test_status_and_heartbeat_do_not_report_activity_without_the_owner_lock(
     tmp_path: Path,
 ) -> None:
     installer = load_installer()
@@ -129,21 +129,8 @@ def test_status_without_an_owner_lock_does_not_block_an_upgrade(
         json.dumps({"state": "loading", "engine_pid": os.getpid()}),
         encoding="utf-8",
     )
+    (runtime / "engine.alive").write_text("heartbeat", encoding="utf-8")
 
-    assert not installer.runtime_engine_is_active(runtime)
-
-
-def test_stale_heartbeat_does_not_report_an_active_engine(
-    tmp_path: Path,
-) -> None:
-    installer = load_installer()
-    runtime = tmp_path / "runtime"
-    runtime.mkdir()
-    (runtime / "engine.alive").write_text("stale", encoding="utf-8")
-    (runtime / "status.json").write_text(
-        json.dumps({"state": "stopped", "engine_pid": 123}),
-        encoding="utf-8",
-    )
     assert not installer.runtime_engine_is_active(runtime)
 
 
@@ -152,25 +139,12 @@ def test_held_engine_lock_reports_an_active_owner(tmp_path: Path) -> None:
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     lock_path = runtime / "engine.lock"
-    lock_path.write_bytes(b"\0")
-
-    with lock_path.open("r+b") as lock_file:
-        if os.name == "nt":
-            import msvcrt
-
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        try:
-            assert installer.runtime_engine_is_active(runtime)
-        finally:
-            lock_file.seek(0)
-            if os.name == "nt":
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    owner = installer.InterprocessFileLock(lock_path)
+    assert owner.acquire()
+    try:
+        assert installer.runtime_engine_is_active(runtime)
+    finally:
+        owner.release()
 
 
 def test_install_holds_the_engine_lock_while_updating_its_environment(

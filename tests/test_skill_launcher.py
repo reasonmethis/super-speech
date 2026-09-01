@@ -26,7 +26,7 @@ def test_shell_launcher_is_directly_executable() -> None:
     assert os.access(SHELL_LAUNCHER, os.X_OK)
 
 
-def powershell() -> str:
+def powershell_runner() -> str:
     executable = shutil.which("pwsh") or shutil.which("powershell")
     if not executable:
         pytest.skip("PowerShell is not available")
@@ -47,7 +47,7 @@ def run_powershell_launcher(
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
-            powershell(),
+            powershell_runner(),
             "-NoProfile",
             "-NonInteractive",
             "-ExecutionPolicy",
@@ -168,7 +168,7 @@ def test_powershell_launcher_reports_one_installation_error(tmp_path: Path) -> N
     assert result.stderr.strip() == INSTALLATION_ERROR
 
 
-def bash() -> str:
+def shell_runner() -> str:
     if os.name == "nt":
         executable = shutil.which("wsl")
         if not executable:
@@ -191,7 +191,7 @@ def make_shell_executable(path: Path) -> None:
     path.chmod(0o755)
     if os.name == "nt":
         subprocess.run(
-            [bash(), "-e", "chmod", "+x", shell_path(path)],
+            [shell_runner(), "-e", "chmod", "+x", shell_path(path)],
             check=True,
             capture_output=True,
             text=True,
@@ -230,7 +230,7 @@ def run_shell_launcher(
     *arguments: str,
     environment: dict[str, str],
 ) -> subprocess.CompletedProcess[str]:
-    command = [bash(), shell_path(launcher), *arguments]
+    command = [shell_runner(), shell_path(launcher), *arguments]
     process_environment = environment
     if os.name == "nt":
         forwarded_names = (
@@ -249,7 +249,7 @@ def run_shell_launcher(
             and not (name == "PATH" and not environment[name].startswith("/"))
         ]
         command = [
-            bash(),
+            shell_runner(),
             "-e",
             "/usr/bin/env",
             "-u",

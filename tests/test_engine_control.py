@@ -44,6 +44,9 @@ def test_control_server_authenticates_and_dispatches_requests(tmp_path: Path) ->
     server.start()
     try:
         endpoint = json.loads((tmp_path / "control.json").read_text(encoding="utf-8"))
+        assert set(endpoint) == {"version", "engine_pid", "port", "token"}
+        assert endpoint["version"] == 1
+        assert endpoint["engine_pid"] == 123
         with pytest.raises(urllib.error.HTTPError) as unauthorized:
             post_control(endpoint, {"command": "pause"}, "wrong-token")
         assert unauthorized.value.code == 401
@@ -62,10 +65,16 @@ def test_control_server_authenticates_and_dispatches_requests(tmp_path: Path) ->
     endpoint_path = tmp_path / "control.json"
     assert not endpoint_path.exists()
 
+
+def test_control_server_preserves_a_replacement_endpoint_when_stopping(
+    tmp_path: Path,
+) -> None:
+    endpoint_path = tmp_path / "control.json"
+    server = EngineControlServer(tmp_path, 123, lambda payload: payload)
     server.start()
-    replacement = json.loads(endpoint_path.read_text(encoding="utf-8"))
-    replacement["token"] = "f" * 64
     try:
+        replacement = json.loads(endpoint_path.read_text(encoding="utf-8"))
+        replacement["token"] = "f" * 64
         endpoint_path.write_text(json.dumps(replacement), encoding="utf-8")
     finally:
         server.stop()
