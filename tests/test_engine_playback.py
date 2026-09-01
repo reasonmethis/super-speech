@@ -13,6 +13,7 @@ import pytest
 
 from engine_test_support import (
     CallbackStop,
+    claim_next_speechicle,
     committed_result,
     configure_runtime,
     load_engine,
@@ -301,9 +302,9 @@ def test_selecting_waiting_speechicle_archives_everything_older(
 
     assert engine.finish_chunk_playback(current, "select", False, state)
     assert state.current_projection is not None and state.current_projection.filename == selected.name
-    assert engine.claim_next_queued_chunk(state) == selected
-    assert engine.claim_next_queued_chunk(state) == newer
-    assert engine.claim_next_queued_chunk(state) is None
+    assert claim_next_speechicle(engine, state) == selected
+    assert claim_next_speechicle(engine, state) == newer
+    assert claim_next_speechicle(engine, state) is None
     assert result["result_id"] == speechicle_id(engine, selected)
 
 
@@ -444,7 +445,7 @@ def test_replaying_history_reuses_its_id_without_duplicating_history(
     replay = engine.QUEUE / archived.name
     assert not archived.exists()
     assert replay.read_text(encoding="utf-8") == "Say this again"
-    assert engine.claim_next_queued_chunk(state) == replay
+    assert claim_next_speechicle(engine, state) == replay
     assert committed_result(engine, request_id)["result_id"] == archived_id
     assert engine.archive(replay)
     assert [path.name for path in engine.SPOKEN.glob("*.txt")] == [archived.name]
@@ -547,7 +548,7 @@ def test_history_replay_stays_first_after_an_engine_restart(
     assert engine.process_mutation_requests(queue.Queue(), engine.State()) == "select"
     committed_result(engine, request_id)
 
-    assert engine.claim_next_queued_chunk(engine.State()) == engine.QUEUE / archived.name
+    assert claim_next_speechicle(engine, engine.State()) == engine.QUEUE / archived.name
 
 
 def test_startup_repairs_an_interrupted_history_boundary_move(tmp_path: Path) -> None:
@@ -821,7 +822,7 @@ def test_history_selection_excludes_worker_claims_until_rollback_finishes(
     state = engine.State()
     claimed = []
     worker = threading.Thread(
-        target=lambda: claimed.append(engine.claim_next_queued_chunk(state))
+        target=lambda: claimed.append(claim_next_speechicle(engine, state))
     )
     worker.start()
     assert worker.is_alive()
@@ -916,7 +917,7 @@ def test_replaying_history_with_another_voice_preserves_text_and_gap(
     assert not archived.exists()
     assert variant.name == "007-sp_00000000000000000000000000000007-af_heart-g350-say.txt"
     assert variant.read_text(encoding="utf-8") == "Say this another way"
-    assert engine.claim_next_queued_chunk(state) == variant
+    assert claim_next_speechicle(engine, state) == variant
 
 
 def test_history_voice_change_keeps_the_row_position(
@@ -1018,8 +1019,8 @@ def test_changing_a_waiting_voice_keeps_the_selection_position(
     assert not selected.exists()
     assert (engine.SPOKEN / older.name).exists()
     assert not (engine.SPOKEN / selected.name).exists()
-    assert engine.claim_next_queued_chunk(state) == variant
-    assert engine.claim_next_queued_chunk(state) == newer
+    assert claim_next_speechicle(engine, state) == variant
+    assert claim_next_speechicle(engine, state) == newer
 
 
 def test_changing_the_current_voice_replaces_it_without_changing_text(
@@ -1049,7 +1050,7 @@ def test_changing_the_current_voice_replaces_it_without_changing_text(
     assert variant.read_text(encoding="utf-8") == "Current words"
     assert not current.exists()
     assert not (engine.SPOKEN / current.name).exists()
-    assert engine.claim_next_queued_chunk(state) == variant
+    assert claim_next_speechicle(engine, state) == variant
 
 
 def test_play_mutation_rejects_a_missing_chunk(
@@ -1065,7 +1066,9 @@ def test_play_mutation_rejects_a_missing_chunk(
     assert engine.process_mutation_requests(queue.Queue(), engine.State()) is None
 
     result = rejected_result(engine, request_id)
-    assert "chunk not found" in str(result["error"])
+    assert "Speechicle not found in Current, Waiting, or History" in str(
+        result["error"]
+    )
 
 
 def test_engine_loop_replays_history_before_the_existing_queue(
@@ -1196,7 +1199,7 @@ def test_idle_selection_replaces_worker_claims_and_becomes_next(
 
     assert state.current_projection is not None and state.current_projection.filename == selected.name
     assert state.claims == {}
-    assert engine.claim_next_queued_chunk(state) == selected
+    assert claim_next_speechicle(engine, state) == selected
 
 
 def test_selecting_a_prefetched_item_restarts_synthesis_at_piece_one(
@@ -1280,7 +1283,7 @@ def test_selection_interrupts_an_inter_chunk_gap(
     )
 
     assert engine.gap_wait(1.0, queue.Queue(), state) == "select"
-    assert engine.claim_next_queued_chunk(state) == selected
+    assert claim_next_speechicle(engine, state) == selected
 
 
 def test_reordering_during_a_gap_preserves_the_held_current_piece(
@@ -1480,7 +1483,7 @@ def test_failed_archive_keeps_chunk_claimed_instead_of_repeating(
     assert state.current_projection is None
     assert set(state.claims) == {current.name}
     assert state.stop.is_set()
-    assert engine.claim_next_queued_chunk(state) is None
+    assert claim_next_speechicle(engine, state) is None
 
 
 def test_failed_clear_archive_stops_instead_of_leaving_a_stuck_waiting_item(
@@ -1589,7 +1592,7 @@ def test_clear_does_not_manufacture_a_claim_for_a_preplay_current(tmp_path: Path
 
     assert state.claims == {}
     assert state.current_projection is None
-    assert engine.claim_next_queued_chunk(state) is None
+    assert claim_next_speechicle(engine, state) is None
     assert not current.exists()
     assert not waiting.exists()
 
@@ -1830,7 +1833,7 @@ def test_unclaimed_current_remains_claimable_during_stop(
     state.saw_stop = True
 
     assert waiting.exists()
-    assert engine.claim_next_queued_chunk(state) == waiting
+    assert claim_next_speechicle(engine, state) == waiting
 
 
 def test_persistent_current_read_failure_cannot_hang_graceful_stop(

@@ -197,20 +197,9 @@ class EngineInstanceLock(InterprocessFileLock):
         super().__init__(INSTANCE_LOCK)
 
 
-_playback_command_lock_local = threading.local()
-
-
 @contextmanager
 def playback_command_lock(timeout: float = 10.0):
     """Serialize publication and acceptance of ordered playback commands."""
-    depth = getattr(_playback_command_lock_local, "depth", 0)
-    if depth:
-        _playback_command_lock_local.depth = depth + 1
-        try:
-            yield
-        finally:
-            _playback_command_lock_local.depth -= 1
-        return
     lock = InterprocessFileLock(PLAYBACK_COMMAND_LOCK)
     deadline = time.monotonic() + timeout
     try:
@@ -218,10 +207,8 @@ def playback_command_lock(timeout: float = 10.0):
             if time.monotonic() >= deadline:
                 raise RuntimeError("timed out waiting for the playback command lock")
             time.sleep(0.01)
-        _playback_command_lock_local.depth = 1
         yield
     finally:
-        _playback_command_lock_local.depth = 0
         lock.release()
 
 
@@ -1471,8 +1458,10 @@ class CurrentProjection:
 class BufferedPiece(NamedTuple):
     """One synthesized piece waiting for the player.
 
-    `claim_generation` is the version assigned when synthesis starts. The
-    player accepts the piece only while that version is active for its Speechicle.
+    `claim_generation` identifies the synthesis attempt that made the piece.
+    The engine records only the current generation for each Speechicle. Removing
+    or replacing that record cancels older work, so the player drops pieces whose
+    generation no longer matches.
     """
 
     path: Path
@@ -2413,12 +2402,6 @@ def claim_next_queued_chunk_with_generation(st: State) -> tuple[Path, int] | Non
     return None
 
 
-def claim_next_queued_chunk(st: State) -> Path | None:
-    """Claim the next item while hiding the worker-only claim generation."""
-    claim = claim_next_queued_chunk_with_generation(st)
-    return claim[0] if claim is not None else None
-
-
 def synth_worker(kokoro, buf: "queue.Queue[BufferedPiece]", st: State) -> None:
     """Synthesize claimed Speechicles into a bounded queue of playback pieces."""
     while not st.stop.is_set():
@@ -3120,7 +3103,9 @@ def print_status() -> None:
 def cli(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="super-speech-engine")
     parser.add_argument("--version", action="version", version=ENGINE_VERSION)
-    commands = parser.add_subparsers(dest="command", required=True)
+    commands = parser.add_subparsers(
+        dest="command", required=True, metavar="command"
+    )
 
     commands.add_parser("serve", help="run the speech engine")
     speak = commands.add_parser(
@@ -3151,7 +3136,7 @@ def cli(argv: list[str] | None = None) -> int:
     commands.add_parser("pause", help="pause at the current audio sample")
     commands.add_parser("resume", help="resume from the current audio sample")
     play = commands.add_parser(
-        "play", help="play a queued or recent Speechicle by ID"
+        "play", help="play a Speechicle from Current, Waiting, or History by ID"
     )
     play.add_argument("speechicle_id", help="Speechicle ID from status output")
     play.add_argument(
@@ -3191,7 +3176,7 @@ def cli(argv: list[str] | None = None) -> int:
     delete_command.add_argument(
         "speechicle_id", help="History Speechicle ID from status output"
     )
-    mutate = commands.add_parser("mutate", help=argparse.SUPPRESS)
+    mutate = commands.add_parser("mutate")
     mutate.add_argument("mutation_json", help=argparse.SUPPRESS)
     commands.add_parser("skip", help="skip the current Speechicle")
     commands.add_parser("clear", help="move Current and Waiting speech to History")

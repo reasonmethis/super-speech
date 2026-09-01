@@ -1157,7 +1157,9 @@ def test_deleted_public_identity_and_sequence_are_not_reused(
     request_id = request_mutation(engine, "play", id=first_id, voice=None)
     assert engine.process_mutation_requests(queue.Queue(), engine.State()) is None
     result = rejected_result(engine, request_id)
-    assert "chunk not found" in str(result["error"])
+    assert "Speechicle not found in Current, Waiting, or History" in str(
+        result["error"]
+    )
 
 
 def test_voice_and_history_lifecycle_preserve_one_public_identity(

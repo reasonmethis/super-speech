@@ -1216,12 +1216,18 @@ class TimelineStorage:
         with self.mutation(timeout=None):
             self._recover_current_plan()
             target = self.voice_variant(source, voice)
+            if not source.is_file():
+                raise ValueError(
+                    "Speechicle not found in Current or Waiting: "
+                    f"{self.public_id(source)}"
+                )
             if target == source:
                 return source
-            if not source.is_file():
-                raise ValueError(f"waiting chunk not found: {source.stem}")
             if target.exists():
-                raise RuntimeError(f"voice target already exists: {target.stem}")
+                raise RuntimeError(
+                    "Speechicle already has this voice: "
+                    f"{self.public_id(source)}"
+                )
             replace_path_with_confirmation(
                 source,
                 target,
@@ -1239,7 +1245,9 @@ class TimelineStorage:
             try:
                 selected_index = history.index(source)
             except ValueError as error:
-                raise ValueError(f"history chunk not found: {source.stem}") from error
+                raise ValueError(
+                    f"Speechicle not found in History: {self.public_id(source)}"
+                ) from error
             promoted = history[: selected_index + 1]
             remaining_history = history[selected_index + 1 :]
             previous_queue = self.queue_files()
@@ -1249,7 +1257,8 @@ class TimelineStorage:
                 selected_target = self.voice_variant(selected_target, voice)
                 if selected_target.exists():
                     raise RuntimeError(
-                        f"voice target already exists: {selected_target.stem}"
+                        "Speechicle already has this voice: "
+                        f"{self.public_id(selected_source)}"
                     )
             targets = [
                 selected_target
@@ -1315,7 +1324,9 @@ class TimelineStorage:
             older = queue[:target_index]
             try:
                 if not self.archive_many(older):
-                    raise RuntimeError("could not archive older waiting chunks")
+                    raise RuntimeError(
+                        "Could not move preceding Speechicles to History"
+                    )
             except (OSError, RuntimeError, ValueError) as error:
                 outcome_unconfirmed = isinstance(error, MutationOutcomeUnconfirmed)
                 if voice_changed:
@@ -1332,7 +1343,9 @@ class TimelineStorage:
 
         history_source = self.find(self.paths.history, public_id)
         if history_source is None:
-            raise ValueError(f"chunk not found: {public_id}")
+            raise ValueError(
+                f"Speechicle not found in Current, Waiting, or History: {public_id}"
+            )
         selected, moved_count = self.promote_history(history_source, voice)
         return TimelineSelection(selected, "history", True, moved_count)
 
@@ -1340,7 +1353,7 @@ class TimelineStorage:
         with self.mutation(timeout=None):
             self._recover_current_plan()
             if self.find(self.paths.queue, public_id) is not None:
-                raise ValueError(f"history chunk is active: {public_id}")
+                raise ValueError(f"Speechicle is Current or Waiting: {public_id}")
             history_item = self.find(self.paths.history, public_id)
             if history_item is None:
                 return None
@@ -1360,7 +1373,7 @@ class TimelineStorage:
                 (path for path in ordered if self.public_id(path) == public_id), None
             )
             if source is None:
-                raise ValueError(f"history chunk not found: {public_id}")
+                raise ValueError(f"Speechicle not found in History: {public_id}")
             if before_id == public_id:
                 return source
             ordered.remove(source)
@@ -1373,7 +1386,9 @@ class TimelineStorage:
                     None,
                 )
                 if destination is None:
-                    raise ValueError(f"history destination not found: {before_id}")
+                    raise ValueError(
+                        f"Destination Speechicle not found in History: {before_id}"
+                    )
                 ordered.insert(ordered.index(destination), source)
             self.save_history_order(ordered)
             self.invalidate_history()
@@ -1386,7 +1401,7 @@ class TimelineStorage:
             (path for path in ordered if self.public_id(path) == public_id), None
         )
         if source is None or (ordered and source == ordered[0]):
-            raise ValueError(f"waiting chunk not found: {public_id}")
+            raise ValueError(f"Speechicle not found in Waiting: {public_id}")
         return ordered, source
 
     def reorder_waiting(
@@ -1411,7 +1426,9 @@ class TimelineStorage:
                     None,
                 )
                 if destination is None:
-                    raise ValueError(f"waiting destination not found: {before_id}")
+                    raise ValueError(
+                        f"Destination Speechicle not found in Waiting: {before_id}"
+                    )
                 ordered.insert(ordered.index(destination), source)
             self.save_queue_order(ordered)
             return current, source

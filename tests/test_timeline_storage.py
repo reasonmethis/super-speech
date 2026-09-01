@@ -125,6 +125,23 @@ def test_metadata_follows_one_id_through_voice_history_and_delete(
     assert storage.metadata(speechicle_id) == timeline_storage_module.SpeechicleMetadata()
 
 
+def test_missing_speechicle_errors_use_the_public_id(tmp_path: Path) -> None:
+    storage = prepared_storage(tmp_path)
+    public_id = f"sp_{'a' * 32}"
+    filename = SpeechicleFilename(1, public_id, "af_heart").render()
+
+    for voice in ("af_heart", "bm_fable"):
+        with pytest.raises(ValueError) as queue_error:
+            storage.replace_queue_voice(storage.paths.queue / filename, voice)
+        assert str(queue_error.value) == (
+            f"Speechicle not found in Current or Waiting: {public_id}"
+        )
+    with pytest.raises(ValueError) as history_error:
+        storage.promote_history(storage.paths.history / filename)
+
+    assert str(history_error.value) == f"Speechicle not found in History: {public_id}"
+
+
 def test_version_one_source_metadata_remains_readable(tmp_path: Path) -> None:
     storage = prepared_storage(tmp_path)
     queued = storage.reserve("af_heart", None, "Hello")

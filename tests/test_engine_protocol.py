@@ -191,6 +191,21 @@ def test_private_mutate_prints_unconfirmed_result_and_exits_successfully(
     }
 
 
+def test_help_hides_private_mutate_command(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine = load_engine("super_speech_engine_public_cli_help")
+
+    with pytest.raises(SystemExit) as exit_info:
+        engine.cli(["--help"])
+
+    assert exit_info.value.code == 0
+    output = capsys.readouterr().out
+    assert "mutate" not in output
+    assert "speak" in output
+    assert "delete" in output
+
+
 @pytest.mark.parametrize(
     ("outcome", "result_id", "error"),
     [

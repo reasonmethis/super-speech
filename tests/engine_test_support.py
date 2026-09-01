@@ -104,6 +104,11 @@ def buffered_piece(
     )
 
 
+def claim_next_speechicle(engine, state) -> Path | None:
+    claim = engine.claim_next_queued_chunk_with_generation(state)
+    return claim[0] if claim is not None else None
+
+
 def speechicle_id(engine, path: Path) -> str:
     return engine.public_id_for_path(path)
 

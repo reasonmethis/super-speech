@@ -15,6 +15,7 @@ from engine_test_support import (
     CallbackStop,
     buffered_piece,
     build_mutation,
+    claim_next_speechicle,
     committed_result,
     configure_runtime,
     load_engine,
@@ -718,7 +719,7 @@ def test_queue_order_uses_its_cache_during_a_transient_sidecar_lock(
 
     monkeypatch.setattr(Path, "read_text", locked_order)
 
-    assert engine.claim_next_queued_chunk(engine.State()) == second
+    assert claim_next_speechicle(engine, engine.State()) == second
 
 
 def test_voice_rename_recovery_keeps_the_saved_queue_position(tmp_path: Path) -> None:
@@ -788,7 +789,7 @@ def test_moving_a_waiting_chunk_resets_banked_audio_but_keeps_current(
     assert kept.audio == "current piece"
     assert buffered.empty()
     assert state.claims == {current.name: generations[current.name]}
-    assert engine.claim_next_queued_chunk(state) == third
+    assert claim_next_speechicle(engine, state) == third
 
 
 def test_reset_waiting_buffer_keeps_queue_first_claim_without_cached_progress(
@@ -1104,7 +1105,7 @@ def test_waiting_mutation_rejects_queue_first_without_a_projection(tmp_path: Pat
     waiting.write_text("Waiting", encoding="utf-8")
     state = engine.State()
 
-    with pytest.raises(ValueError, match="waiting chunk not found"):
+    with pytest.raises(ValueError, match="Speechicle not found in Waiting"):
         engine.apply_archive_mutation(
             queue.Queue(),
             state,
@@ -1154,7 +1155,7 @@ def test_history_delete_is_rejected_while_the_same_item_is_active(
     history.write_text("Active replay", encoding="utf-8")
     prepare_timeline(engine)
 
-    with pytest.raises(ValueError, match="history chunk is active"):
+    with pytest.raises(ValueError, match="Speechicle is Current or Waiting"):
         engine.apply_delete_mutation(
             build_mutation(engine, "delete", id=speechicle_id(engine, queued))
         )
@@ -1463,7 +1464,7 @@ def test_queue_request_rejects_the_current_chunk(
     assert engine.process_mutation_requests(queue.Queue(), state) is None
 
     result = rejected_result(engine, request_id)
-    assert "waiting chunk not found" in str(result["error"])
+    assert "Speechicle not found in Waiting" in str(result["error"])
     assert current.is_file()
 
 
