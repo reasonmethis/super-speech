@@ -80,8 +80,10 @@ def test_metadata_follows_one_id_through_voice_history_and_delete(
     speechicle_id = storage.public_id(queued)
 
     changed = storage.replace_queue_voice(queued, "bm_fable")
-    assert storage.source_label(speechicle_id) == "Codex UI task"
-    assert storage.inbox_path(speechicle_id) == str(inbox)
+    assert storage.metadata(speechicle_id) == timeline_storage_module.SpeechicleMetadata(
+        source="Codex UI task",
+        inbox=str(inbox),
+    )
 
     assert storage.archive_many([changed])
     assert storage.history_snapshot(50)[1] == [
@@ -95,8 +97,7 @@ def test_metadata_follows_one_id_through_voice_history_and_delete(
     ]
 
     assert storage.delete_history(speechicle_id) is not None
-    assert storage.source_label(speechicle_id) is None
-    assert storage.inbox_path(speechicle_id) is None
+    assert storage.metadata(speechicle_id) == timeline_storage_module.SpeechicleMetadata()
 
 
 def test_version_one_source_metadata_remains_readable(tmp_path: Path) -> None:
@@ -108,8 +109,9 @@ def test_version_one_source_metadata_remains_readable(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    assert storage.source_label(speechicle_id) == "Older agent"
-    assert storage.inbox_path(speechicle_id) is None
+    assert storage.metadata(speechicle_id) == timeline_storage_module.SpeechicleMetadata(
+        source="Older agent"
+    )
 
 
 def test_reserve_rejects_invalid_source_metadata(tmp_path: Path) -> None:

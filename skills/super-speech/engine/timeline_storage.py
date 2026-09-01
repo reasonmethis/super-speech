@@ -385,12 +385,6 @@ class TimelineStorage:
             pass
         return SpeechicleMetadata()
 
-    def source_label(self, public_id: str) -> str | None:
-        return self.metadata(public_id).source
-
-    def inbox_path(self, public_id: str) -> str | None:
-        return self.metadata(public_id).inbox
-
     def _write_metadata(
         self,
         public_id: str,
@@ -644,7 +638,7 @@ class TimelineStorage:
             raise RuntimeError(
                 "speech sequence counter is missing; restart the engine"
             ) from error
-        except (OSError, ValueError, json.JSONDecodeError) as error:
+        except (OSError, ValueError) as error:
             raise RuntimeError("speech sequence counter is invalid") from error
         if not isinstance(payload, dict) or set(payload) != {
             "version",
@@ -767,7 +761,8 @@ class TimelineStorage:
                 read_failed = False
                 previous = {str(item["id"]): item for item in self._history_items}
                 for path in history_files[:limit]:
-                    speechicle_id = self.public_id(path)
+                    filename = self.canonical_filename(path)
+                    speechicle_id = filename.public_id
                     try:
                         text = path.read_text(encoding="utf-8").strip()
                     except OSError:
@@ -776,7 +771,7 @@ class TimelineStorage:
                     item: dict[str, object] = {
                         "id": speechicle_id,
                         "text": text,
-                        "voice": self.canonical_filename(path).voice,
+                        "voice": filename.voice,
                     }
                     metadata = self.metadata(speechicle_id)
                     if metadata.source is not None:
@@ -1577,7 +1572,7 @@ class TimelineStorage:
         }
         try:
             payload = json.loads(self.paths.queue_order.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+        except (OSError, ValueError):
             saved_ids: list[str] = []
         else:
             raw_ids = payload.get("ids") if isinstance(payload, dict) else None
@@ -1794,13 +1789,13 @@ class TimelineStorage:
             for path in self._migration_root(root).glob("*.txt")
         }
         allowed: set[tuple[str, str]] = set()
-        expected_final: dict[tuple[str, str], str] = {}
+        expected_final: set[tuple[str, str]] = set()
         for target_root, files in self._embed_sections(migration):
             for item in files:
                 source_key = (item.source_root, item.source_name)
                 target_key = (target_root, item.target_name)
                 allowed.update((source_key, target_key))
-                expected_final[target_key] = item.sha256
+                expected_final.add(target_key)
                 present = [key for key in {source_key, target_key} if key in actual]
                 if final:
                     if present != [target_key] and not (
@@ -1825,7 +1820,7 @@ class TimelineStorage:
             if final and removal_key in actual:
                 raise RuntimeError("embedded replay duplicate still exists")
         if final:
-            if set(actual) != set(expected_final):
+            if set(actual) != expected_final:
                 raise RuntimeError(
                     "embedded identity final inventory has undeclared files"
                 )
@@ -1861,7 +1856,7 @@ class TimelineStorage:
             return None
         try:
             payload = json.loads(self.paths.intent.read_text(encoding="utf-8"))
-        except (OSError, ValueError, json.JSONDecodeError) as error:
+        except (OSError, ValueError) as error:
             raise RuntimeError(
                 "could not read the pending timeline transaction"
             ) from error
@@ -1897,35 +1892,14 @@ class TimelineStorage:
             raise RuntimeError("invalid pending timeline transaction")
         self.paths.intent.unlink()
         self.invalidate_history()
-        if not isinstance(operation, str):
-            raise RuntimeError("invalid pending timeline transaction")
         return operation
-
-    @staticmethod
-    def _is_canonical_name(name: str) -> bool:
-        try:
-            SpeechicleFilename.parse(name)
-        except ValueError:
-            return False
-        return True
-
-    def _all_files_canonical(self) -> bool:
-        return all(
-            self._is_canonical_name(path.name)
-            for directory in (
-                self.paths.queue,
-                self.paths.history,
-                self.paths.failed,
-            )
-            for path in directory.glob("*.txt")
-        )
 
     def _order_is_strict(self, path: Path) -> bool:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return True
-        except (OSError, ValueError, json.JSONDecodeError):
+        except (OSError, ValueError):
             return False
         try:
             self._strict_order_ids(payload, path.name)
@@ -1943,7 +1917,7 @@ class TimelineStorage:
             payload = json.loads(order_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             saved: list[str] = []
-        except (OSError, ValueError, json.JSONDecodeError) as error:
+        except (OSError, ValueError) as error:
             raise RuntimeError(f"invalid speech order: {order_path.name}") from error
         else:
             saved = self._strict_order_ids(payload, order_path.name)
@@ -1967,14 +1941,6 @@ class TimelineStorage:
         )
         self._write_order(self.paths.history_order, history_ids)
         self._write_order(self.paths.queue_order, queue_ids)
-        if set(queue_ids) != {
-            self.public_id(path) for path in self.paths.queue.glob("*.txt")
-        } or len(queue_ids) != len(set(queue_ids)):
-            raise RuntimeError("Queue order does not cover canonical storage")
-        if set(history_ids) != {
-            self.public_id(path) for path in self.paths.history.glob("*.txt")
-        } or len(history_ids) != len(set(history_ids)):
-            raise RuntimeError("History order does not cover canonical storage")
 
     def prepare(self, instance_lock: HeldInstanceLock) -> str | None:
         """Recover old storage and validate canonical files under the engine lock."""
@@ -1989,13 +1955,12 @@ class TimelineStorage:
             if recovered == "embed_public_ids":
                 # Embed recovery already checked inventory, orders, and the counter
                 return recovered
-            needs_embed = not self._all_files_canonical()
-            if not needs_embed:
-                try:
-                    self.canonical_inventory()
-                except RuntimeError:
-                    needs_embed = True
-                needs_embed = needs_embed or not (
+            try:
+                self.canonical_inventory()
+            except RuntimeError:
+                needs_embed = True
+            else:
+                needs_embed = not (
                     self._order_is_strict(self.paths.queue_order)
                     and self._order_is_strict(self.paths.history_order)
                 )
