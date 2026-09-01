@@ -13,7 +13,7 @@ import re
 import secrets
 import time
 from collections.abc import Callable, Collection
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal
@@ -94,7 +94,7 @@ class SpeechicleFilename:
         return SpeechicleFilename(self.sequence, self.public_id, voice, self.gap_ms)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class IdentityCatalog:
     """The legacy sequence-to-public-ID map read during filename upgrades."""
 
@@ -105,7 +105,7 @@ class IdentityCatalog:
         return self.ids_by_sequence.get(sequence)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MigrationMove:
     source_directory: str
     target_directory: str
@@ -113,27 +113,26 @@ class MigrationMove:
     target: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MigrationRemoval:
     directory: str
     name: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class IdentityMigration:
     catalog: IdentityCatalog
     moves: tuple[MigrationMove, ...]
     removals: tuple[MigrationRemoval, ...]
     queue_ids: tuple[str, ...]
     history_ids: tuple[str, ...]
-    row_count: int = 0
 
     def intent_payload(self) -> dict[str, object]:
         return {
             "version": 1,
             "operation": "identity_migration",
-            "moves": [move.__dict__ for move in self.moves],
-            "removals": [removal.__dict__ for removal in self.removals],
+            "moves": [asdict(move) for move in self.moves],
+            "removals": [asdict(removal) for removal in self.removals],
             "catalog": catalog_payload(self.catalog),
             "queue_ids": list(self.queue_ids),
             "history_ids": list(self.history_ids),
@@ -211,29 +210,11 @@ class EmbedPublicIdsMigration:
         return {
             "version": EMBED_PUBLIC_IDS_VERSION,
             "operation": "embed_public_ids",
-            "queue_files": [_embed_file_payload(item) for item in self.queue_files],
-            "history_files": [_embed_file_payload(item) for item in self.history_files],
-            "failed_files": [_embed_file_payload(item) for item in self.failed_files],
-            "removals": [
-                {
-                    "source_root": item.source_root,
-                    "source_name": item.source_name,
-                    "duplicate_root": item.duplicate_root,
-                    "duplicate_name": item.duplicate_name,
-                    "sha256": item.sha256,
-                }
-                for item in self.removals
-            ],
+            "queue_files": [asdict(item) for item in self.queue_files],
+            "history_files": [asdict(item) for item in self.history_files],
+            "failed_files": [asdict(item) for item in self.failed_files],
+            "removals": [asdict(item) for item in self.removals],
         }
-
-
-def _embed_file_payload(item: EmbedPublicIdsFile) -> dict[str, str]:
-    return {
-        "source_root": item.source_root,
-        "source_name": item.source_name,
-        "target_name": item.target_name,
-        "sha256": item.sha256,
-    }
 
 
 def _is_windows_safe_component(value: object) -> bool:
@@ -263,6 +244,7 @@ def _validate_embed_public_ids_migration(
     target_keys: set[tuple[str, str]] = set()
     target_ids: set[str] = set()
     target_sequences: set[int] = set()
+    file_locations: list[tuple[tuple[str, str], tuple[str, str]]] = []
     file_by_source: dict[tuple[str, str], EmbedPublicIdsFile] = {}
     allowed_sources = {
         "queue": frozenset({"queue", "spoken"}),
@@ -296,15 +278,12 @@ def _validate_embed_public_ids_migration(
             target_keys.add(target_key)
             target_ids.add(filename.public_id)
             target_sequences.add(filename.sequence)
+            file_locations.append((source_key, target_key))
             file_by_source[source_key] = item
 
     if any(
         target_key in source_keys and target_key != source_key
-        for target_root, files in collections
-        for item in files
-        for source_key, target_key in (
-            ((item.source_root, item.source_name), (target_root, item.target_name)),
-        )
+        for source_key, target_key in file_locations
     ):
         raise ValueError("embed_public_ids target is another file's source")
 
