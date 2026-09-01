@@ -54,7 +54,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NamedTuple, assert_never
 
-from engine_control import EngineControlServer, LivePlaybackControl
+from engine_control import EngineControlServer, LivePlaybackControl, PlaybackState
 from file_lock import InterprocessFileLock
 from inbox_listener import listen_inbox
 
@@ -66,6 +66,7 @@ from mutation_protocol import (
     MoveMutation,
     MutationRequest,
     PlayMutation,
+    mutation_payload,
     parse_cli_mutation,
     parse_durable_mutation,
     validate_request_id,
@@ -149,19 +150,20 @@ SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 ENGINE_VERSION = "0.7.4"
 STATUS_VERSION = 16
 STARTUP_TIMEOUT = 120.0
-CONTROL_ACK_TIMEOUT = 2.0
 
 timeline = TimelineStorage(TIMELINE_PATHS, DEFAULT_VOICE)
 playback_control = LivePlaybackControl(lambda: PAUSE.exists())
 _playback_marker_executor: ThreadPoolExecutor | None = None
 
 
-def _persist_playback_command(command_sequence: int, paused: bool) -> None:
-    if paused:
-        publish_ordered_marker(PAUSE)
-    else:
-        resume()
-    playback_control.end_command(command_sequence)
+def _persist_playback_command(command_token: object, paused: bool) -> None:
+    try:
+        if paused:
+            publish_ordered_marker(PAUSE)
+        else:
+            resume()
+    finally:
+        playback_control.end_command(command_token)
 
 
 def _report_playback_persistence(future: Future[None]) -> None:
@@ -171,23 +173,19 @@ def _report_playback_persistence(future: Future[None]) -> None:
         log(f"could not persist live playback command: {error}")
 
 
-def _schedule_playback_persistence(command_sequence: int, paused: bool) -> None:
+def _schedule_playback_persistence(command_token: object, paused: bool) -> None:
     executor = _playback_marker_executor
     if executor is None:
-        try:
-            _persist_playback_command(command_sequence, paused)
-        except Exception:
-            playback_control.end_command(command_sequence)
-            raise
+        _persist_playback_command(command_token, paused)
         return
     try:
         future = executor.submit(
             _persist_playback_command,
-            command_sequence,
+            command_token,
             paused,
         )
     except RuntimeError:
-        playback_control.end_command(command_sequence)
+        playback_control.end_command(command_token)
         raise
     future.add_done_callback(_report_playback_persistence)
 
@@ -678,8 +676,8 @@ def consume(signal: Path) -> bool:
     return True
 
 
-def control_requested(signal: Path) -> bool:
-    """Return whether a control belongs to this engine process.
+def consume_control(signal: Path) -> bool:
+    """Consume a control only when it belongs to this engine process.
 
     Empty files remain valid for compatibility with older clients. New clients
     include the lock owner's PID so a delayed command cannot affect its successor.
@@ -690,22 +688,15 @@ def control_requested(signal: Path) -> bool:
         return False
     except OSError:
         return False
-    if not payload:
-        return True
-    try:
-        target_pid = json.loads(payload).get("engine_pid")
-    except (AttributeError, ValueError, json.JSONDecodeError):
-        target_pid = None
-    if target_pid == os.getpid():
-        return True
-    signal.unlink(missing_ok=True)
-    log(f"ignored stale {signal.name} for engine {target_pid}")
-    return False
-
-
-def consume_control(signal: Path) -> bool:
-    if not control_requested(signal):
-        return False
+    if payload:
+        try:
+            target_pid = json.loads(payload).get("engine_pid")
+        except (AttributeError, ValueError):
+            target_pid = None
+        if target_pid != os.getpid():
+            signal.unlink(missing_ok=True)
+            log(f"ignored stale {signal.name} for engine {target_pid}")
+            return False
     signal.unlink(missing_ok=True)
     return True
 
@@ -734,21 +725,17 @@ def _mutation_artifact_sequence(path: Path) -> int | None:
 
 
 def _read_marker_unlocked(signal: Path) -> OrderedMarker | None:
-    last_error: OSError | None = None
     for attempt in range(3):
         try:
             text = signal.read_text(encoding="utf-8")
         except FileNotFoundError:
             return None
         except OSError as error:
-            last_error = error
             if attempt < 2:
                 time.sleep(0.01)
                 continue
             raise RuntimeError(f"{signal.name} marker is unavailable") from error
         break
-    else:
-        raise RuntimeError(f"{signal.name} marker is unavailable") from last_error
     if text == "":
         return OrderedMarker(0, None)
     try:
@@ -932,7 +919,7 @@ def _publish_mutation_unlocked(request: MutationRequest) -> None:
     temp_path = request_path.with_name(
         f"{request_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
     )
-    payload = request.to_payload()
+    payload = mutation_payload(request)
     payload["command_sequence"] = sequence
     try:
         temp_path.write_text(
@@ -1371,12 +1358,10 @@ def execute_mutation(mutation_payload: object) -> dict[str, object]:
     return execute_mutation_request(request)
 
 
-def playback_control_ack(paused: bool) -> dict[str, object]:
-    """Return a compact acknowledgement after the audio loop applies a command."""
-    applied = playback_control.state.wait_for(
-        {"paused", "idle"} if paused else {"playing", "idle"},
-        CONTROL_ACK_TIMEOUT,
-    )
+def playback_control_ack(
+    paused: bool, audio_state: PlaybackState
+) -> dict[str, object]:
+    """Return a compact acknowledgement of the applied live audio state."""
     snapshot = _read_authoritative_status()
     has_work = snapshot.get("current") is not None
     return {
@@ -1384,21 +1369,18 @@ def playback_control_ack(paused: bool) -> dict[str, object]:
         "engine_pid": os.getpid(),
         "state": ("paused" if paused else "playing") if has_work else "idle",
         "updated_at": time.time(),
-        "audio_state": applied,
+        "audio_state": audio_state,
     }
 
 
 def execute_control_request(payload: dict[str, object]) -> object:
     """Apply one request received by the running engine control server."""
     command = payload.get("command")
-    if command == "pause" and set(payload) == {"command"}:
-        command_sequence = playback_control.begin_command(True)
-        _schedule_playback_persistence(command_sequence, True)
-        return playback_control_ack(True)
-    if command == "resume" and set(payload) == {"command"}:
-        command_sequence = playback_control.begin_command(False)
-        _schedule_playback_persistence(command_sequence, False)
-        return playback_control_ack(False)
+    if command in ("pause", "resume") and set(payload) == {"command"}:
+        paused = command == "pause"
+        command_token, audio_state = playback_control.begin_command(paused)
+        _schedule_playback_persistence(command_token, paused)
+        return playback_control_ack(paused, audio_state)
     if command == "mutate" and set(payload) == {"command", "mutation"}:
         request = parse_cli_mutation(payload["mutation"], secrets.token_hex(12))
         if not isinstance(request, ClearMutation):
@@ -2674,7 +2656,6 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
         finished_callback=playback.mark_done,
     )
     stream.start()
-    playback_control.state.set("paused" if paused else "playing")
     publish_status(
         "paused" if paused else "playing",
         st,
@@ -2695,7 +2676,6 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
                 return "fatal"
             paused = playback_control.pause_requested()
             playback_state_changed = playback.set_paused(paused)
-            playback_control.state.set("paused" if paused else "playing")
             if consume_control(INTERRUPT):
                 stream.abort()
                 reject_pending_requests(

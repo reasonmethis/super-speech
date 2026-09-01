@@ -5,7 +5,6 @@ import json
 import os
 import secrets
 import threading
-import time
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -23,41 +22,14 @@ class PauseablePlayback(Protocol):
     def set_paused(self, paused: bool) -> bool: ...
 
 
-class PlaybackStateTracker:
-    """Let control requests wait for the audio loop's applied state."""
-
-    def __init__(self) -> None:
-        self._condition = threading.Condition()
-        self._state: PlaybackState = "idle"
-
-    def set(self, state: PlaybackState) -> None:
-        with self._condition:
-            if self._state == state:
-                return
-            self._state = state
-            self._condition.notify_all()
-
-    def wait_for(self, states: set[PlaybackState], timeout: float) -> PlaybackState:
-        deadline = time.monotonic() + timeout
-        with self._condition:
-            while self._state not in states:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise RuntimeError("engine did not acknowledge the playback command")
-                self._condition.wait(remaining)
-            return self._state
-
-
 class LivePlaybackControl:
     """Apply desktop controls to live audio before persisting their markers."""
 
     def __init__(self, read_persisted_pause: Callable[[], bool]) -> None:
-        self.state = PlaybackStateTracker()
         self._read_persisted_pause = read_persisted_pause
         self._lock = threading.Lock()
         self._playback: PauseablePlayback | None = None
-        self._command: tuple[int, bool] | None = None
-        self._command_sequence = 0
+        self._command: tuple[object, bool] | None = None
         self._clear_owner: str | None = None
         self._silenced_playback: PauseablePlayback | None = None
 
@@ -65,21 +37,19 @@ class LivePlaybackControl:
         with self._lock:
             return self._pause_intent()
 
-    def begin_command(self, paused: bool) -> int:
-        """Apply a command to live audio and return its ownership token."""
+    def begin_command(self, paused: bool) -> tuple[object, PlaybackState]:
+        """Apply a command and return its ownership token and live audio state."""
         with self._lock:
             if self._clear_blocks_playback():
                 raise RuntimeError("playback cannot change while Clear is finishing")
-            self._command_sequence += 1
-            sequence = self._command_sequence
-            self._command = (sequence, paused)
-            self._set_playback_paused(paused)
-            return sequence
+            token = object()
+            self._command = (token, paused)
+            return token, self._set_playback_paused(paused)
 
-    def end_command(self, sequence: int) -> None:
+    def end_command(self, token: object) -> None:
         """Return control to the marker if this command still owns playback."""
         with self._lock:
-            if self._command is None or self._command[0] != sequence:
+            if self._command is None or self._command[0] is not token:
                 return
             self._command = None
             self._set_playback_paused(self._pause_intent())
@@ -115,7 +85,6 @@ class LivePlaybackControl:
                 self._playback = None
                 if self._silenced_playback is playback:
                     self._silenced_playback = None
-                self.state.set("idle")
 
     def _pause_intent(self) -> bool:
         if self._clear_blocks_playback():
@@ -126,14 +95,14 @@ class LivePlaybackControl:
 
     def _clear_blocks_playback(self) -> bool:
         return self._clear_owner is not None or (
-            self._playback is not None
-            and self._silenced_playback is self._playback
+            self._playback is not None and self._silenced_playback is self._playback
         )
 
-    def _set_playback_paused(self, paused: bool) -> None:
-        if self._playback is not None:
-            self._playback.set_paused(paused)
-            self.state.set("paused" if paused else "playing")
+    def _set_playback_paused(self, paused: bool) -> PlaybackState:
+        if self._playback is None:
+            return "idle"
+        self._playback.set_paused(paused)
+        return "paused" if paused else "playing"
 
 
 class _ControlHttpServer(ThreadingHTTPServer):
@@ -150,9 +119,7 @@ class _ControlRequestHandler(BaseHTTPRequestHandler):
         if self.path != "/v1/control":
             self._send(404, {"error": "unknown engine control endpoint"})
             return
-        supplied_token = self.headers.get("Authorization", "").removeprefix(
-            "Bearer "
-        )
+        supplied_token = self.headers.get("Authorization", "").removeprefix("Bearer ")
         if not hmac.compare_digest(supplied_token, self.server.token):
             self._send(401, {"error": "invalid engine control token"})
             return
@@ -207,7 +174,6 @@ class EngineControlServer:
         self.engine_pid = engine_pid
         self.control_handler = control_handler
         self._server: _ControlHttpServer | None = None
-        self._thread: threading.Thread | None = None
 
     def start(self) -> None:
         if self._server is not None:
@@ -216,35 +182,28 @@ class EngineControlServer:
         server = _ControlHttpServer(("127.0.0.1", 0), _ControlRequestHandler)
         server.token = token
         server.control_handler = self.control_handler
-        thread = threading.Thread(
+        threading.Thread(
             target=server.serve_forever,
             kwargs={"poll_interval": 0.02},
             name="super-speech-control",
             daemon=True,
-        )
-        thread.start()
+        ).start()
         try:
             self._publish_endpoint(server.server_port, token)
         except Exception:
             server.shutdown()
             server.server_close()
-            thread.join(timeout=1)
             raise
         self._server = server
-        self._thread = thread
 
     def stop(self) -> None:
         server = self._server
-        thread = self._thread
         if server is None:
             return
         self._remove_owned_endpoint(server.token)
         server.shutdown()
         server.server_close()
-        if thread is not None:
-            thread.join(timeout=1)
         self._server = None
-        self._thread = None
 
     def _publish_endpoint(self, port: int, token: str) -> None:
         self.endpoint_path.parent.mkdir(parents=True, exist_ok=True)
@@ -273,9 +232,5 @@ class EngineControlServer:
             payload = json.loads(self.endpoint_path.read_text(encoding="utf-8"))
         except (FileNotFoundError, OSError, json.JSONDecodeError):
             return
-        if (
-            isinstance(payload, dict)
-            and payload.get("engine_pid") == self.engine_pid
-            and payload.get("token") == token
-        ):
+        if isinstance(payload, dict) and payload.get("token") == token:
             self.endpoint_path.unlink(missing_ok=True)

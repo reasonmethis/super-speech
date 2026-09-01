@@ -49,11 +49,9 @@ def inbox_lines(
 
 def listen_inbox(inbox: str | Path, *, from_end: bool = False) -> None:
     """Print existing and future inbox messages until the caller stops listening."""
-    normalized = normalize_inbox_path(str(inbox))
-    if normalized is None:
-        raise ValueError("inbox path is required")
+
     def report_ready(path: Path) -> None:
         print(f"Listening for Super Speech messages at {path}", file=sys.stderr)
 
-    for line in inbox_lines(normalized, from_end=from_end, on_ready=report_ready):
+    for line in inbox_lines(inbox, from_end=from_end, on_ready=report_ready):
         print(line, flush=True)

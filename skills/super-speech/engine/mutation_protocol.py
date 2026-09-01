@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Literal, TypeAlias
 
 from speechicle_identity import is_public_id
@@ -11,9 +11,6 @@ from timeline_storage import normalize_inbox_path, normalize_source_label
 
 REQUEST_ID_PATTERN = re.compile(r"[a-f0-9]{24}")
 VOICE_PATTERN = re.compile(r"[ab][fm]_[a-z0-9_]+")
-MUTATION_TYPES = frozenset(
-    {"enqueue", "play", "move", "archive", "delete", "clear"}
-)
 
 
 @dataclass(frozen=True)
@@ -28,21 +25,6 @@ class EnqueueMutation:
     command_sequence: int | None = None
     type: Literal["enqueue"] = field(default="enqueue", init=False)
 
-    def to_payload(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "request_id": self.request_id,
-            "type": self.type,
-            "text": self.text,
-            "voice": self.voice,
-        }
-        if self.source is not None:
-            payload["source"] = self.source
-        if self.inbox is not None:
-            payload["inbox"] = self.inbox
-        if self.command_sequence is not None:
-            payload["command_sequence"] = self.command_sequence
-        return payload
-
 
 @dataclass(frozen=True)
 class PlayMutation:
@@ -53,18 +35,6 @@ class PlayMutation:
     voice: str | None
     command_sequence: int | None = None
     type: Literal["play"] = field(default="play", init=False)
-
-    def to_payload(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "request_id": self.request_id,
-            "type": self.type,
-            "id": self.id,
-        }
-        if self.voice is not None:
-            payload["voice"] = self.voice
-        if self.command_sequence is not None:
-            payload["command_sequence"] = self.command_sequence
-        return payload
 
 
 @dataclass(frozen=True)
@@ -78,18 +48,6 @@ class MoveMutation:
     command_sequence: int | None = None
     type: Literal["move"] = field(default="move", init=False)
 
-    def to_payload(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "request_id": self.request_id,
-            "type": self.type,
-            "section": self.section,
-            "id": self.id,
-            "before_id": self.before_id,
-        }
-        if self.command_sequence is not None:
-            payload["command_sequence"] = self.command_sequence
-        return payload
-
 
 @dataclass(frozen=True)
 class ArchiveMutation:
@@ -99,16 +57,6 @@ class ArchiveMutation:
     id: str
     command_sequence: int | None = None
     type: Literal["archive"] = field(default="archive", init=False)
-
-    def to_payload(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "request_id": self.request_id,
-            "type": self.type,
-            "id": self.id,
-        }
-        if self.command_sequence is not None:
-            payload["command_sequence"] = self.command_sequence
-        return payload
 
 
 @dataclass(frozen=True)
@@ -120,16 +68,6 @@ class DeleteMutation:
     command_sequence: int | None = None
     type: Literal["delete"] = field(default="delete", init=False)
 
-    def to_payload(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "request_id": self.request_id,
-            "type": self.type,
-            "id": self.id,
-        }
-        if self.command_sequence is not None:
-            payload["command_sequence"] = self.command_sequence
-        return payload
-
 
 @dataclass(frozen=True)
 class ClearMutation:
@@ -138,15 +76,6 @@ class ClearMutation:
     request_id: str
     command_sequence: int | None = None
     type: Literal["clear"] = field(default="clear", init=False)
-
-    def to_payload(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "request_id": self.request_id,
-            "type": self.type,
-        }
-        if self.command_sequence is not None:
-            payload["command_sequence"] = self.command_sequence
-        return payload
 
 
 MutationRequest: TypeAlias = (
@@ -157,6 +86,16 @@ MutationRequest: TypeAlias = (
     | DeleteMutation
     | ClearMutation
 )
+
+
+def mutation_payload(request: MutationRequest) -> dict[str, object]:
+    """Serialize the mutation dataclass fields used by the durable protocol."""
+    payload = asdict(request)
+    return {
+        name: value
+        for name, value in payload.items()
+        if value is not None or name == "before_id"
+    }
 
 
 def validate_request_id(value: object) -> str:
@@ -192,8 +131,6 @@ def parse_durable_mutation(payload: object) -> MutationRequest:
     if not isinstance(payload, dict):
         raise ValueError("mutation must be an object")
     mutation_type = payload.get("type")
-    if mutation_type not in MUTATION_TYPES:
-        raise ValueError("invalid mutation type")
     request_id = validate_request_id(payload.get("request_id"))
     command_sequence = _validate_command_sequence(payload.get("command_sequence"))
 
@@ -282,11 +219,13 @@ def parse_durable_mutation(payload: object) -> MutationRequest:
             command_sequence=command_sequence,
         )
 
-    _reject_extra_fields(payload, {"request_id", "type", "command_sequence"})
-    return ClearMutation(
-        request_id=request_id,
-        command_sequence=command_sequence,
-    )
+    if mutation_type == "clear":
+        _reject_extra_fields(payload, {"request_id", "type", "command_sequence"})
+        return ClearMutation(
+            request_id=request_id,
+            command_sequence=command_sequence,
+        )
+    raise ValueError("invalid mutation type")
 
 
 def parse_cli_mutation(payload: object, request_id: str) -> MutationRequest:

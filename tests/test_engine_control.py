@@ -8,13 +8,16 @@ from pathlib import Path
 
 import pytest
 
+from engine_control import EngineControlServer, LivePlaybackControl
 from engine_test_support import configure_runtime, load_engine
 
-from engine_control import (
-    EngineControlServer,
-    LivePlaybackControl,
-    PlaybackStateTracker,
-)
+
+class FakePlayback:
+    paused = False
+
+    def set_paused(self, paused: bool) -> bool:
+        self.paused = paused
+        return True
 
 
 def post_control(endpoint: dict[str, object], payload: object, token: str) -> object:
@@ -56,7 +59,18 @@ def test_control_server_authenticates_and_dispatches_requests(tmp_path: Path) ->
     finally:
         server.stop()
 
-    assert not (tmp_path / "control.json").exists()
+    endpoint_path = tmp_path / "control.json"
+    assert not endpoint_path.exists()
+
+    server.start()
+    replacement = json.loads(endpoint_path.read_text(encoding="utf-8"))
+    replacement["token"] = "f" * 64
+    try:
+        endpoint_path.write_text(json.dumps(replacement), encoding="utf-8")
+    finally:
+        server.stop()
+
+    assert json.loads(endpoint_path.read_text(encoding="utf-8")) == replacement
 
 
 def test_control_server_rejects_invalid_payloads(tmp_path: Path) -> None:
@@ -80,12 +94,12 @@ def test_engine_control_stops_live_audio_before_persisting_commands(
     calls: list[object] = []
     playback_states: list[bool] = []
 
-    class FakePlayback:
+    class RecordingPlayback:
         def set_paused(self, paused: bool) -> bool:
             playback_states.append(paused)
             return True
 
-    playback = FakePlayback()
+    playback = RecordingPlayback()
     engine.playback_control.attach(playback)
     paused = {"state": "paused"}
     playing = {"state": "playing"}
@@ -110,7 +124,7 @@ def test_engine_control_stops_live_audio_before_persisting_commands(
     monkeypatch.setattr(
         engine,
         "playback_control_ack",
-        lambda is_paused: paused if is_paused else playing,
+        lambda is_paused, _audio_state: paused if is_paused else playing,
     )
     monkeypatch.setattr(
         engine,
@@ -134,28 +148,29 @@ def test_engine_control_stops_live_audio_before_persisting_commands(
         engine.execute_control_request({"command": "pause", "extra": True})
 
 
-def test_playback_state_tracker_waits_for_the_audio_loop() -> None:
-    tracker = PlaybackStateTracker()
+def test_live_playback_control_reports_the_synchronously_applied_state() -> None:
+    persisted_pause = False
+    control = LivePlaybackControl(lambda: persisted_pause)
 
-    assert tracker.wait_for({"idle"}, 0.01) == "idle"
-    with pytest.raises(RuntimeError, match="did not acknowledge"):
-        tracker.wait_for({"paused"}, 0.01)
+    first_token, audio_state = control.begin_command(True)
+    assert audio_state == "idle"
 
-    tracker.set("playing")
-    assert tracker.wait_for({"playing"}, 0.01) == "playing"
-    tracker.set("paused")
-    assert tracker.wait_for({"paused"}, 0.01) == "paused"
+    playback = FakePlayback()
+    assert control.attach(playback)
+    second_token, audio_state = control.begin_command(False)
+    assert audio_state == "playing"
+    assert not playback.paused
+
+    control.end_command(first_token)
+    assert not playback.paused
+    persisted_pause = True
+    control.end_command(second_token)
+    assert playback.paused
+    control.detach(playback)
 
 
 def test_clear_owns_live_audio_until_the_old_stream_detaches() -> None:
     control = LivePlaybackControl(lambda: False)
-
-    class FakePlayback:
-        paused = False
-
-        def set_paused(self, paused: bool) -> bool:
-            self.paused = paused
-            return True
 
     playback = FakePlayback()
     control.attach(playback)
@@ -189,13 +204,6 @@ def test_live_audio_does_not_wait_for_marker_persistence(
     submitted: list[tuple[object, tuple[object, ...], Future[None]]] = []
     persisted: list[str] = []
 
-    class FakePlayback:
-        paused = False
-
-        def set_paused(self, paused: bool) -> bool:
-            self.paused = paused
-            return True
-
     class DeferredExecutor:
         def submit(self, function, *arguments):
             future: Future[None] = Future()
@@ -208,7 +216,7 @@ def test_live_audio_does_not_wait_for_marker_persistence(
     monkeypatch.setattr(
         engine,
         "playback_control_ack",
-        lambda paused: {"state": "paused" if paused else "playing"},
+        lambda paused, _audio_state: {"state": "paused" if paused else "playing"},
     )
     monkeypatch.setattr(
         engine,
@@ -226,4 +234,16 @@ def test_live_audio_does_not_wait_for_marker_persistence(
     function(*arguments)
     future.set_result(None)
     assert persisted == ["PAUSE"]
+
+    def fail_to_publish(_signal: Path) -> None:
+        raise OSError("marker unavailable")
+
+    monkeypatch.setattr(engine, "publish_ordered_marker", fail_to_publish)
+    engine.execute_control_request({"command": "pause"})
+    function, arguments, _future = submitted.pop()
+
+    with pytest.raises(OSError, match="marker unavailable"):
+        function(*arguments)
+
+    assert not playback.paused
     engine.playback_control.detach(playback)

@@ -290,7 +290,7 @@ def test_mutation_envelope_accepts_each_variant(
     parsed = engine.parse_durable_mutation(payload)
 
     assert type(parsed).__name__ == variant_name
-    assert parsed.to_payload() == payload
+    assert engine.mutation_payload(parsed) == payload
     with pytest.raises(FrozenInstanceError):
         parsed.request_id = "f" * 24
 
