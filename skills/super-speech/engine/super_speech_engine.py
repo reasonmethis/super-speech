@@ -971,7 +971,7 @@ def claim_next_mutation_request() -> Path | None:
             continue
         except OSError as error:
             log(f"could not claim mutation {request.name}: {error}")
-            continue
+            return None
         return claim
     return None
 
@@ -998,27 +998,6 @@ def request_id_from_claim_path(claimed: Path) -> str | None:
         return validate_request_id(parts[-2])
     except ValueError:
         return None
-
-
-def publish_json_payload(
-    target: Path, payload: dict[str, object], label: str
-) -> bool:
-    last_error: OSError | None = None
-    for _ in range(5):
-        temp_path = target.with_name(
-            f"{target.name}.{os.getpid()}.{time.time_ns()}.tmp"
-        )
-        try:
-            temp_path.write_text(json.dumps(payload), encoding="utf-8")
-            os.replace(temp_path, target)
-            return True
-        except OSError as error:
-            last_error = error
-            time.sleep(0.02)
-        finally:
-            temp_path.unlink(missing_ok=True)
-    log(f"could not publish {label}: {last_error}")
-    return False
 
 
 def _mutation_result_payload(
@@ -1068,11 +1047,23 @@ def publish_mutation_result(
         result_id=result_id,
         error=error,
     )
-    return publish_json_payload(
-        mutation_result_path(request_id),
-        payload,
-        "mutation result",
-    )
+    target = mutation_result_path(request_id)
+    last_error: OSError | None = None
+    for _ in range(5):
+        temporary = target.with_name(
+            f"{target.name}.{os.getpid()}.{time.time_ns()}.tmp"
+        )
+        try:
+            temporary.write_text(json.dumps(payload), encoding="utf-8")
+            os.replace(temporary, target)
+            return True
+        except OSError as error:
+            last_error = error
+            time.sleep(0.02)
+        finally:
+            temporary.unlink(missing_ok=True)
+    log(f"could not publish mutation result: {last_error}")
+    return False
 
 
 def retire_claim(claimed: Path, result_published: bool) -> None:
@@ -1116,17 +1107,19 @@ def mutation_is_claimed(request_id: str) -> bool:
 
 
 def wait_for_mutation_payload(
-    target: Path, request_id: str, timeout: float
+    request_id: str, timeout: float
 ) -> dict[str, object] | None:
+    target = mutation_result_path(request_id)
     payload = wait_for_json_payload(target, time.monotonic() + timeout)
     if payload is not None:
         return payload
-    unclaimed_deadline = time.monotonic() + min(max(timeout, 0.1), 5.0)
+    grace_period = min(max(timeout, 0.1), 5.0)
+    unclaimed_deadline = time.monotonic() + grace_period
     while mutation_is_unclaimed(request_id) and time.monotonic() < unclaimed_deadline:
         if cancel_unclaimed_mutation(request_id):
             return None
         time.sleep(0.05)
-    settlement_deadline = time.monotonic() + min(max(timeout, 0.1), 5.0)
+    settlement_deadline = time.monotonic() + grace_period
     while mutation_is_claimed(request_id) and time.monotonic() < settlement_deadline:
         if not engine_is_running():
             try:
@@ -1170,21 +1163,16 @@ def _source_label_is_valid(value: object) -> bool:
         return False
 
 
-def _inbox_path_is_valid(value: object) -> bool:
-    return stored_inbox_path_is_valid(value)
-
-
 def _status_item_is_valid(value: object) -> bool:
-    source = value.get("source") if isinstance(value, dict) else None
-    inbox = value.get("inbox") if isinstance(value, dict) else None
+    if not isinstance(value, dict):
+        return False
     return (
-        isinstance(value, dict)
-        and is_public_id(value.get("id"))
+        is_public_id(value.get("id"))
         and "filename" not in value
         and isinstance(value.get("text"), str)
         and isinstance(value.get("voice"), str)
-        and _source_label_is_valid(source)
-        and _inbox_path_is_valid(inbox)
+        and _source_label_is_valid(value.get("source"))
+        and stored_inbox_path_is_valid(value.get("inbox"))
     )
 
 
@@ -1269,14 +1257,13 @@ def _snapshot_is_valid(snapshot: object) -> bool:
         and (state != "idle" or current is None)
     ):
         return False
-    active_ids = {
-        *([current["id"]] if isinstance(current, dict) else []),
-        *(item["id"] for item in queue_items),
-    }
-    history_ids = [item["id"] for item in history_items]
+    active_ids = {item["id"] for item in queue_items}
+    if isinstance(current, dict):
+        active_ids.add(current["id"])
+    history_ids = {item["id"] for item in history_items}
     return (
         len(active_ids) == len(queue_items) + (1 if current is not None else 0)
-        and len(set(history_ids)) == len(history_ids)
+        and len(history_ids) == len(history_items)
         and active_ids.isdisjoint(history_ids)
     )
 
@@ -1312,8 +1299,7 @@ def _status_payload(
 def wait_for_mutation_result(
     request_id: str, timeout: float = 60.0
 ) -> dict[str, object]:
-    target = mutation_result_path(request_id)
-    payload = wait_for_mutation_payload(target, request_id, timeout)
+    payload = wait_for_mutation_payload(request_id, timeout)
     if payload is None:
         if mutation_is_claimed(request_id) or mutation_is_unclaimed(request_id):
             raise MutationOutcomeUnconfirmed("mutation result was unconfirmed")
@@ -1352,9 +1338,9 @@ def execute_mutation_request(request: MutationRequest) -> dict[str, object]:
         )
 
 
-def execute_mutation(mutation_payload: object) -> dict[str, object]:
+def execute_mutation(payload: object) -> dict[str, object]:
     """Parse and submit one desktop mutation."""
-    request = parse_cli_mutation(mutation_payload, secrets.token_hex(12))
+    request = parse_cli_mutation(payload, secrets.token_hex(12))
     return execute_mutation_request(request)
 
 
@@ -1362,8 +1348,7 @@ def playback_control_ack(
     paused: bool, audio_state: PlaybackState
 ) -> dict[str, object]:
     """Return a compact acknowledgement of the applied live audio state."""
-    snapshot = _read_authoritative_status()
-    has_work = snapshot.get("current") is not None
+    has_work = _read_authoritative_status().get("current") is not None
     return {
         "version": 1,
         "engine_pid": os.getpid(),

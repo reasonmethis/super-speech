@@ -13,7 +13,6 @@ import pytest
 
 from engine_test_support import (
     CallbackStop,
-    ENGINE_SOURCE,
     build_mutation,
     committed_result,
     configure_runtime,
@@ -25,11 +24,9 @@ from engine_test_support import (
     set_current,
     speechicle_id,
     write_storage_ready,
-    write_upgrade_catalog,
 )
 
 from pauseable_audio import PauseableAudio
-from timeline_storage import TimelineLocation, TimelineMove, TimelinePlan
 
 
 def test_mutation_claim_accepts_replace_that_completed_before_error(
@@ -90,6 +87,27 @@ def test_ambiguous_mutation_claim_stops_before_applying_request(
     assert state.stop.is_set()
     assert archived.exists()
     assert not (engine.BASE / f"MUTATION.result.{request_id}.json").exists()
+
+
+def test_mutation_claim_does_not_skip_a_locked_earlier_request(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_claim_fifo_lock")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    for _ in range(2):
+        request_mutation(engine, "clear")
+    pending = sorted(engine.BASE.glob("MUTATION.*.json"))
+    attempted: list[Path] = []
+
+    def block_claim(source, _destination) -> None:
+        attempted.append(Path(source))
+        raise PermissionError("temporarily locked")
+
+    monkeypatch.setattr(engine.os, "replace", block_claim)
+
+    assert engine.claim_next_mutation_request() is None
+    assert attempted == pending[:1]
 
 
 def test_split_text_pieces_retains_source_ranges_with_unicode_and_spacing() -> None:
