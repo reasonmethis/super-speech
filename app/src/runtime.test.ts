@@ -21,6 +21,7 @@ import {
   runtimeStatusForMutationSnapshot,
   runtimeStateForSnapshot,
   selectableVoiceOptions,
+  statusAfterClearRequest,
   statusAfterTransientRead,
   statusForEngineProcess,
   statusAfterPauseCommand,
@@ -452,6 +453,58 @@ test("reflects pause commands immediately without creating an empty paused state
   assert.equal(
     statusAfterPauseCommand({ ...active, state: "loading", engine_running: false }, true).state,
     "loading",
+  );
+});
+
+test("projects Clear all directly to one valid idle timeline", () => {
+  const current = {
+    id: speechicleId(1),
+    text: "Current",
+    voice: "af_heart",
+    piece: 1,
+    piece_count: 1,
+    piece_start: 0,
+    piece_end: 7,
+    elapsed_seconds: 0,
+  };
+  const firstWaiting = { id: speechicleId(2), text: "First", voice: "af_heart" };
+  const newestWaiting = { id: speechicleId(3), text: "Newest", voice: "af_heart" };
+  const earlier = { id: speechicleId(4), text: "Earlier", voice: "af_heart" };
+  const active: RuntimeStatus = {
+    ...status,
+    state: "playing",
+    engine_running: true,
+    installed: true,
+    current,
+    queue_count: 2,
+    queue: [firstWaiting, newestWaiting],
+    history_count: 8,
+    history: [earlier],
+  };
+
+  const cleared = statusAfterClearRequest(active);
+
+  assert.equal(cleared.state, "idle");
+  assert.equal(cleared.current, null);
+  assert.equal(cleared.queue_count, 0);
+  assert.deepEqual(cleared.queue, []);
+  assert.equal(cleared.history_count, 11);
+  assert.deepEqual(
+    cleared.history.map(({ id }) => id),
+    [newestWaiting.id, firstWaiting.id, current.id, earlier.id],
+  );
+  assert.equal(active.state, "playing");
+  assert.equal(active.current, current);
+  assert.equal(statusAfterClearRequest({ ...active, state: "loading" }).state, "loading");
+  assert.equal(
+    statusAfterClearRequest({
+      ...active,
+      state: "paused",
+      current: null,
+      queue_count: 0,
+      queue: [],
+    }).state,
+    "idle",
   );
 });
 

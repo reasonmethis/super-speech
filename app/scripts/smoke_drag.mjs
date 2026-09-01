@@ -628,6 +628,11 @@ try {
   assert.equal(pausedPlayback.accent, "#4153be");
   assert(pausedPlayback.icon.width >= 47, "The paused symbol must fill more of the main button");
   await clickPlaybackButtonNearEdge(page);
+  assert.equal(
+    await page.locator("body").getAttribute("data-state"),
+    "playing",
+    "Resume must update the presentation in the click handler",
+  );
   await waitFor(
     () => status().state === "playing",
     "The silent fixture did not resume",
@@ -655,6 +660,11 @@ try {
   assert.deepEqual(center(playingPlayback.button), center(playingPlayback.ring));
   assert.deepEqual(center(pausedPlayback.button), center(pausedPlayback.ring));
   await clickPlaybackButtonNearEdge(page);
+  assert.equal(
+    await page.locator("body").getAttribute("data-state"),
+    "paused",
+    "Pause must update the presentation in the click handler",
+  );
   await waitFor(
     () => status().state === "paused",
     "The silent fixture did not pause again",
@@ -1554,13 +1564,48 @@ try {
   assert(clearIds.length > 0, "Clear all requires active speech");
   const clearButton = page.locator("#clear-queue-button");
   await waitFor(() => clearButton.isVisible(), "Clear all was hidden for Current speech");
+  runEngine("resume");
+  await waitFor(
+    async () =>
+      status().state === "playing" &&
+      await page.locator("body").getAttribute("data-state") === "playing",
+    "The Clear all fixture did not resume",
+  );
+  await page.evaluate(() => {
+    globalThis.__clearPresentationStates = [document.body.dataset.state];
+    globalThis.__clearPresentationObserver = new MutationObserver(() => {
+      globalThis.__clearPresentationStates.push(document.body.dataset.state);
+    });
+    globalThis.__clearPresentationObserver.observe(document.body, {
+      attributes: true,
+      attributeFilter: ["data-state"],
+    });
+  });
   await clearButton.click();
+  assert.equal(
+    await page.locator("body").getAttribute("data-state"),
+    "idle",
+    "Clear all must present Ready in the click handler",
+  );
+  assert.equal(
+    await page.locator(".speechicle-item.is-current, .speechicle-item.is-waiting").count(),
+    0,
+    "Clear all must not present Ready with active Speechicles",
+  );
   await waitFor(
     () => status().current === null && status().queue_count === 0 && status().state === "idle",
     "Clear all did not archive Current and Waiting speech",
     30_000,
   );
   assert(clearIds.every((id) => status().history.some((item) => item.id === id)));
+  const clearPresentationStates = await page.evaluate(() => {
+    globalThis.__clearPresentationObserver.disconnect();
+    return globalThis.__clearPresentationStates;
+  });
+  assert(
+    !clearPresentationStates.includes("paused"),
+    `Clear all exposed its internal Pause step: ${clearPresentationStates.join(", ")}`,
+  );
   await waitFor(
     async () => await page.locator("body").getAttribute("data-state") === "idle",
     "The renderer did not become Ready after Clear all",

@@ -1,7 +1,7 @@
 {
   "name": "super-speech-app",
   "private": true,
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "Pause and manage private local Super Speech playback",
   "author": "Dmitriy Vasilyuk",
   "license": "MIT",

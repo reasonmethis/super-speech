@@ -204,6 +204,24 @@ export function statusAfterPauseCommand(
   };
 }
 
+export function statusAfterClearRequest(status: RuntimeStatus): RuntimeStatus {
+  const clearedItems = [
+    ...[...status.queue].reverse(),
+    ...(status.current ? [status.current] : []),
+  ];
+  return {
+    ...status,
+    state: ["playing", "paused", "idle"].includes(status.state)
+      ? "idle"
+      : status.state,
+    current: null,
+    queue_count: 0,
+    queue: [],
+    history_count: status.history_count + clearedItems.length,
+    history: [...clearedItems, ...status.history],
+  };
+}
+
 export type TimelineItemKind = "current" | "waiting" | "history";
 
 export interface TimelineItem extends SpeechicleItem {

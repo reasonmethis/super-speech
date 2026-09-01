@@ -10,7 +10,9 @@ import {
   moveSpeechicleItemBefore,
   playbackPresentation,
   selectableVoiceOptions,
+  statusAfterClearRequest,
   timelineItems,
+  type PendingPlayback,
   type PlaybackPresentation,
   type RuntimeStatus,
   type TimelineItem,
@@ -200,6 +202,7 @@ const suppressedSpeechicleClicks = new WeakSet<HTMLButtonElement>();
 let pendingSpeechicleExpansion: PendingSpeechicleExpansion | null = null;
 let openMenuItemId: string | null = null;
 let openVoiceItemId: string | null = null;
+let pendingPlaybackState: "playing" | "paused" | null = null;
 let revealedCurrentItemId: string | null = null;
 let ringSettlingAnimations: Animation[] = [];
 let playbackExpanded = false;
@@ -217,14 +220,13 @@ function timelineMutationBlocked(): boolean {
   return commandPending || pendingTimelineMutation !== null;
 }
 
-function pendingPlaybackForPresentation(): {
-  item: TimelineItem;
-  state: "playing" | "paused";
-} | null {
+function pendingPlaybackForPresentation(): PendingPlayback | null {
   const pending = pendingTimelineMutation;
-  return pending?.kind === "play"
-    ? { item: pending.item, state: pending.playbackState }
-    : null;
+  const item = pending?.kind === "play" ? pending.item : currentStatus.current;
+  const state = pendingPlaybackState ?? (
+    pending?.kind === "play" ? pending.playbackState : null
+  );
+  return item && state ? { item, state } : null;
 }
 
 function requiredElement<T extends HTMLElement>(id: string): T {
@@ -518,8 +520,11 @@ function render(status: RuntimeStatus): void {
     commandStatus.textContent = "";
   }
   currentStatus = status;
+  const presentationStatus = pendingTimelineMutation?.kind === "clear"
+    ? statusAfterClearRequest(status)
+    : status;
   const presentation = playbackPresentation(
-    status,
+    presentationStatus,
     pendingPlaybackForPresentation(),
   );
   const copy = statusCopy(presentation);
@@ -540,8 +545,8 @@ function render(status: RuntimeStatus): void {
   currentText.classList.toggle("is-hidden", showComposer);
   speechComposer.classList.toggle("is-hidden", !showComposer);
   renderComposerControls();
-  const followedCurrent = status.current?.id === presentation.item?.id
-    ? status.current
+  const followedCurrent = presentationStatus.current?.id === presentation.item?.id
+    ? presentationStatus.current
     : null;
   const canExpand = followedCurrent !== null;
   playbackCopy.dataset.expandable = String(canExpand);
@@ -616,7 +621,7 @@ function render(status: RuntimeStatus): void {
     sourcePill.classList.add("is-hidden");
   }
 
-  const visibleItems = visibleTimelineItems(status);
+  const visibleItems = visibleTimelineItems(presentationStatus);
   const activeCount = visibleItems.filter(({ kind }) => kind !== "history").length;
   const clearPending = pendingTimelineMutation?.kind === "clear";
   const clearFailed = failedTimelineMutation?.type === "clear";
@@ -637,7 +642,10 @@ function render(status: RuntimeStatus): void {
     : clearFailed
       ? "Retry clear all"
       : "Clear all";
-  const hiddenHistoryCount = Math.max(0, status.history_count - status.history.length);
+  const hiddenHistoryCount = Math.max(
+    0,
+    presentationStatus.history_count - presentationStatus.history.length,
+  );
   const projectedHistoryTotal = hiddenHistoryCount +
     visibleItems.filter(({ kind }) => kind === "history").length;
   renderTimeline(visibleItems, projectedHistoryTotal);
@@ -1993,8 +2001,8 @@ async function runPlaybackAction(): Promise<void> {
   }
   commandPending = true;
   commandStatus.textContent = "";
-  render(currentStatus);
   if (action === "setup") {
+    render(currentStatus);
     try {
       await desktopApi?.openSetup();
     } catch (error) {
@@ -2010,10 +2018,11 @@ async function runPlaybackAction(): Promise<void> {
     ? pendingTimelineMutation
     : null;
   const previousPendingState = pendingPlay?.playbackState;
+  pendingPlaybackState = paused ? "paused" : "playing";
   if (pendingPlay) {
-    pendingPlay.playbackState = paused ? "paused" : "playing";
-    render(currentStatus);
+    pendingPlay.playbackState = pendingPlaybackState;
   }
+  render(currentStatus);
   try {
     if (desktopApi) {
       const status = await desktopApi.setPaused(paused);
@@ -2030,6 +2039,7 @@ async function runPlaybackAction(): Promise<void> {
       pendingPlay.playbackState = previousPendingState;
     }
   } finally {
+    pendingPlaybackState = null;
     commandPending = false;
     render(currentStatus);
   }
