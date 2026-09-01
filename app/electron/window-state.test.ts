@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -58,6 +58,29 @@ test("centers defaults and fits them to a small work area", () => {
     restoredWindowBounds(null, [{ x: 10, y: 20, width: 360, height: 580 }]),
     { x: 10, y: 20, width: 360, height: 580 },
   );
+});
+
+test("expands undersized saved bounds to the minimum window size", () => {
+  const undersized: SavedWindowState = {
+    bounds: { x: 100, y: 50, width: 200, height: 300 },
+    maximized: false,
+  };
+  assert.deepEqual(
+    restoredWindowBounds(undersized, [primary]),
+    { x: 100, y: 50, width: 380, height: 620 },
+  );
+});
+
+test("treats missing and malformed saved state as absent", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "super-speech-window-state-invalid-"));
+  const filePath = path.join(directory, "window-state.json");
+  try {
+    assert.equal(readSavedWindowState(filePath), null);
+    await writeFile(filePath, "not JSON", "utf8");
+    assert.equal(readSavedWindowState(filePath), null);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("writes and reads state from one atomic JSON file", async () => {

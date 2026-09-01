@@ -21,6 +21,17 @@ import {
 } from "./managed-skill.ts";
 import { trayPlaybackAction } from "./tray-menu.ts";
 
+async function writeTestTree(
+  root: string,
+  files: Record<string, string>,
+): Promise<void> {
+  for (const [relativePath, content] of Object.entries(files)) {
+    const filePath = path.join(root, relativePath);
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, content, "utf8");
+  }
+}
+
 test("readers see a complete file while atomic writes replace it", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "super-speech-atomic-"));
   const target = path.join(directory, "install.json");
@@ -33,7 +44,6 @@ test("readers see a complete file while atomic writes replace it", async () => {
     while (writing) {
       const content = await readFile(target, "utf8");
       assert(payloads.includes(content));
-      JSON.parse(content);
     }
   })();
 
@@ -71,20 +81,39 @@ test("an atomic write accepts a rename that completed before reporting an error"
   }
 });
 
+test("a failed atomic replacement preserves the target and removes its temporary file", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "super-speech-atomic-failure-"));
+  const target = path.join(directory, "install.json");
+  const original = `${JSON.stringify({ version: "old" })}\n`;
+  await writeFile(target, original, "utf8");
+  try {
+    await assert.rejects(
+      writeTextAtomically(target, "replacement", async () => {
+        const error = new Error("replacement failed");
+        Object.assign(error, { code: "EIO" });
+        throw error;
+      }),
+      /replacement failed/,
+    );
+
+    assert.equal(await readFile(target, "utf8"), original);
+    assert.deepEqual(await readdir(directory), ["install.json"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("managed skill hashing preserves runtime and detects edits anywhere else", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "super-speech-skill-hash-"));
   try {
-    await mkdir(path.join(directory, "engine"));
-    await mkdir(path.join(directory, "runtime"));
-    await mkdir(path.join(directory, "engine", "build"));
-    await mkdir(path.join(directory, "engine", "__pycache__"));
-    await mkdir(path.join(directory, "engine", "super_speech.egg-info"));
-    await writeFile(path.join(directory, "SKILL.md"), "skill", "utf8");
-    await writeFile(path.join(directory, "engine", "engine.py"), "engine", "utf8");
-    await writeFile(path.join(directory, "runtime", "state.json"), "one", "utf8");
-    await writeFile(path.join(directory, "engine", "build", "engine.exe"), "build", "utf8");
-    await writeFile(path.join(directory, "engine", "__pycache__", "engine.pyc"), "cache", "utf8");
-    await writeFile(path.join(directory, "engine", "super_speech.egg-info", "PKG-INFO"), "info", "utf8");
+    await writeTestTree(directory, {
+      "SKILL.md": "skill",
+      "engine/engine.py": "engine",
+      "runtime/state.json": "one",
+      "engine/build/engine.exe": "build",
+      "engine/__pycache__/engine.pyc": "cache",
+      "engine/super_speech.egg-info/PKG-INFO": "info",
+    });
     const original = managedSkillTreeHash(directory);
 
     await writeFile(path.join(directory, "runtime", "state.json"), "two", "utf8");
@@ -106,15 +135,16 @@ test("managed skill updates remove retired files but preserve its private runtim
   const source = path.join(root, "source");
   const target = path.join(root, "target");
   try {
-    await mkdir(path.join(previous, "engine"), { recursive: true });
-    await writeFile(path.join(previous, "SKILL.md"), "old", "utf8");
-    await writeFile(path.join(previous, "engine", "retired.py"), "retired", "utf8");
+    await writeTestTree(previous, {
+      "SKILL.md": "old",
+      "engine/retired.py": "retired",
+    });
     await cp(previous, target, { recursive: true });
-    await mkdir(path.join(target, "runtime"));
-    await writeFile(path.join(target, "runtime", "queue.json"), "saved", "utf8");
-    await mkdir(path.join(source, "engine"), { recursive: true });
-    await writeFile(path.join(source, "SKILL.md"), "new", "utf8");
-    await writeFile(path.join(source, "engine", "current.py"), "current", "utf8");
+    await writeTestTree(target, { "runtime/queue.json": "saved" });
+    await writeTestTree(source, {
+      "SKILL.md": "new",
+      "engine/current.py": "current",
+    });
 
     const result = syncManagedSkillTree(
       source,
@@ -139,16 +169,11 @@ test("managed skill updates discard an interrupted staging tree before retrying"
   const target = path.join(root, "target");
   const staging = `${target}.super-speech-managed-staging`;
   try {
-    await mkdir(previous);
-    await writeFile(path.join(previous, "SKILL.md"), "old", "utf8");
+    await writeTestTree(previous, { "SKILL.md": "old" });
     await cp(previous, target, { recursive: true });
-    await mkdir(path.join(target, "runtime"));
-    await writeFile(path.join(target, "runtime", "queue.json"), "saved", "utf8");
-    await mkdir(source);
-    await writeFile(path.join(source, "SKILL.md"), "new", "utf8");
-
-    await mkdir(staging);
-    await writeFile(path.join(staging, "SKILL.md"), "partial", "utf8");
+    await writeTestTree(target, { "runtime/queue.json": "saved" });
+    await writeTestTree(source, { "SKILL.md": "new" });
+    await writeTestTree(staging, { "SKILL.md": "partial" });
 
     const result = syncManagedSkillTree(
       source,
@@ -176,17 +201,19 @@ test("managed skill updates finish an interrupted directory cutover", async () =
   const backup = `${target}.super-speech-managed-backup`;
   const staging = `${target}.super-speech-managed-staging`;
   try {
-    await mkdir(path.join(previous, "engine"), { recursive: true });
-    await writeFile(path.join(previous, "SKILL.md"), "old", "utf8");
-    await writeFile(path.join(previous, "engine", "retired.py"), "retired", "utf8");
+    await writeTestTree(previous, {
+      "SKILL.md": "old",
+      "engine/retired.py": "retired",
+    });
     await cp(previous, target, { recursive: true });
-    await mkdir(path.join(target, "runtime"));
-    await writeFile(path.join(target, "runtime", "queue.json"), "saved", "utf8");
-    await mkdir(path.join(target, "engine", "build"));
-    await writeFile(path.join(target, "engine", "build", "engine.exe"), "built", "utf8");
-    await mkdir(path.join(source, "engine"), { recursive: true });
-    await writeFile(path.join(source, "SKILL.md"), "new", "utf8");
-    await writeFile(path.join(source, "engine", "current.py"), "current", "utf8");
+    await writeTestTree(target, {
+      "runtime/queue.json": "saved",
+      "engine/build/engine.exe": "built",
+    });
+    await writeTestTree(source, {
+      "SKILL.md": "new",
+      "engine/current.py": "current",
+    });
 
     await cp(source, staging, { recursive: true });
     await rename(target, backup);
@@ -218,15 +245,14 @@ test("managed skill recovery preserves edits made after an interrupted cutover",
   const target = path.join(root, "target");
   const backup = `${target}.super-speech-managed-backup`;
   try {
-    await mkdir(previous);
-    await writeFile(path.join(previous, "SKILL.md"), "old", "utf8");
-    await mkdir(source);
-    await writeFile(path.join(source, "SKILL.md"), "new", "utf8");
+    await writeTestTree(previous, { "SKILL.md": "old" });
+    await writeTestTree(source, { "SKILL.md": "new" });
     await cp(previous, backup, { recursive: true });
     await cp(source, target, { recursive: true });
-    await mkdir(path.join(target, "runtime"));
-    await writeFile(path.join(target, "runtime", "queue.json"), "saved", "utf8");
-    await writeFile(path.join(target, "SKILL.md"), "new with a local edit", "utf8");
+    await writeTestTree(target, {
+      "runtime/queue.json": "saved",
+      "SKILL.md": "new with a local edit",
+    });
 
     assert.throws(
       () => syncManagedSkillTree(source, target, managedSkillTreeHash(previous)),
@@ -252,18 +278,15 @@ test("managed skill updates roll back an incomplete cutover before retrying", as
   const backup = `${target}.super-speech-managed-backup`;
   const staging = `${target}.super-speech-managed-staging`;
   try {
-    await mkdir(previous);
-    await writeFile(path.join(previous, "SKILL.md"), "old", "utf8");
+    await writeTestTree(previous, { "SKILL.md": "old" });
     await cp(previous, target, { recursive: true });
-    await mkdir(path.join(target, "runtime"));
-    await writeFile(path.join(target, "runtime", "queue.json"), "saved", "utf8");
-    await mkdir(source);
-    await writeFile(path.join(source, "SKILL.md"), "new", "utf8");
+    await writeTestTree(target, { "runtime/queue.json": "saved" });
+    await writeTestTree(source, { "SKILL.md": "new" });
 
     await cp(source, staging, { recursive: true });
     await rename(target, backup);
     await rename(path.join(backup, "runtime"), path.join(staging, "runtime"));
-    await writeFile(path.join(staging, "SKILL.md"), "incomplete", "utf8");
+    await writeTestTree(staging, { "SKILL.md": "incomplete" });
 
     const result = syncManagedSkillTree(
       source,
@@ -288,12 +311,14 @@ test("managed skill updates preserve edits outside SKILL.md", async () => {
   const source = path.join(root, "source");
   const target = path.join(root, "target");
   try {
-    await mkdir(path.join(source, "engine"), { recursive: true });
-    await writeFile(path.join(source, "SKILL.md"), "new", "utf8");
-    await writeFile(path.join(source, "engine", "engine.py"), "new engine", "utf8");
-    await mkdir(path.join(target, "engine"), { recursive: true });
-    await writeFile(path.join(target, "SKILL.md"), "old", "utf8");
-    await writeFile(path.join(target, "engine", "engine.py"), "local edit", "utf8");
+    await writeTestTree(source, {
+      "SKILL.md": "new",
+      "engine/engine.py": "new engine",
+    });
+    await writeTestTree(target, {
+      "SKILL.md": "old",
+      "engine/engine.py": "local edit",
+    });
 
     const result = syncManagedSkillTree(source, target, "not-the-current-hash");
 
@@ -310,10 +335,8 @@ test("legacy skill hashes never authorize replacing a managed tree", async () =>
   const source = path.join(root, "source");
   const target = path.join(root, "target");
   try {
-    await mkdir(source);
-    await mkdir(target);
-    await writeFile(path.join(source, "SKILL.md"), "new", "utf8");
-    await writeFile(path.join(target, "SKILL.md"), "old", "utf8");
+    await writeTestTree(source, { "SKILL.md": "new" });
+    await writeTestTree(target, { "SKILL.md": "old" });
 
     const legacyHash = "legacy-SKILL-md-only-hash";
     assert.equal(
@@ -357,8 +380,7 @@ test("managed skill installation creates a missing skills directory", async () =
   const source = path.join(root, "source");
   const target = path.join(root, "agent", "skills", "super-speech");
   try {
-    await mkdir(source);
-    await writeFile(path.join(source, "SKILL.md"), "skill", "utf8");
+    await writeTestTree(source, { "SKILL.md": "skill" });
 
     const result = syncManagedSkillTree(source, target, null);
 

@@ -11,7 +11,7 @@ import { AGENT_MESSAGE_TEXT_MAX } from "../src/runtime.ts";
 
 const SPEECHICLE_ID = `sp_${"1".repeat(32)}`;
 
-test("agent replies append complete self-identifying JSON Lines messages", async () => {
+test("appends complete self-identifying JSON Lines messages", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "super-speech-inbox-"));
   const inbox = path.join(directory, "agent-inbox.jsonl");
   try {
@@ -28,6 +28,9 @@ test("agent replies append complete self-identifying JSON Lines messages", async
     const [first, second] = lines.map((line) => JSON.parse(line) as AgentInboxMessage);
 
     assert.equal(lines.length, 2);
+    assert.equal(first.version, 1);
+    assert.equal(first.kind, "user_message");
+    assert.equal(first.speechicle_id, SPEECHICLE_ID);
     assert.equal(first.text, "Please check the retry path.");
     assert.equal(first.source, "Codex UI task");
     assert.equal(second.source, undefined);
@@ -39,26 +42,45 @@ test("agent replies append complete self-identifying JSON Lines messages", async
   }
 });
 
-test("agent replies reject invalid destinations and message bodies", async () => {
-  await assert.rejects(
-    appendAgentInboxMessage("relative.jsonl", {
-      speechicleId: SPEECHICLE_ID,
-      text: "Message",
-    }),
-    /Invalid agent inbox path/,
-  );
-  await assert.rejects(
-    appendAgentInboxMessage(path.resolve("missing-parent", "inbox.jsonl"), {
+test("rejects unsafe inbox paths before opening them", async () => {
+  const message = {
+    speechicleId: SPEECHICLE_ID,
+    text: "Message",
+  };
+  const absolutePath = path.resolve("inbox.jsonl");
+  const driveRoot = path.parse(absolutePath).root;
+  for (const inboxPath of [
+    "relative.jsonl",
+    `${absolutePath} `,
+    `${absolutePath}\n`,
+    path.join(driveRoot, "x".repeat(4_096)),
+  ]) {
+    await assert.rejects(
+      appendAgentInboxMessage(inboxPath, message),
+      /Invalid agent inbox path/,
+    );
+  }
+});
+
+test("rejects invalid message bodies before opening the inbox", async () => {
+  const inbox = path.resolve("missing-parent", "inbox.jsonl");
+  for (const message of [
+    {
       speechicleId: "not-a-speechicle",
       text: "Message",
-    }),
-    /Invalid agent message/,
-  );
-  await assert.rejects(
-    appendAgentInboxMessage(path.resolve("missing-parent", "inbox.jsonl"), {
+    },
+    {
+      speechicleId: SPEECHICLE_ID,
+      text: " \n\t ",
+    },
+    {
       speechicleId: SPEECHICLE_ID,
       text: "x".repeat(AGENT_MESSAGE_TEXT_MAX + 1),
-    }),
-    /Invalid agent message/,
-  );
+    },
+  ]) {
+    await assert.rejects(
+      appendAgentInboxMessage(inbox, message),
+      /Invalid agent message/,
+    );
+  }
 });
