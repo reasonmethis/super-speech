@@ -1490,7 +1490,9 @@ def test_speak_command_starts_engine_before_queueing(
         engine, "wait_for_queue_acceptance", lambda: calls.append("accept")
     )
 
-    assert engine.cli(["speak", "Hello there", "--gap-ms", "300"]) == 0
+    assert engine.cli(
+        ["speak", "Hello there", "--voice", r"af\_heart", "--gap-ms", "300"]
+    ) == 0
     assert calls == ["start", ("Hello there", "af_heart", 300, None, None), "accept"]
     assert capsys.readouterr().out.strip() == public_id
 

@@ -44,7 +44,7 @@ def test_play_command_starts_engine_then_publishes_the_requested_id(
         or {"outcome": "committed", "request_id": request_id},
     )
 
-    assert engine.cli(["play", public_id, "--voice", "af_heart"]) == 0
+    assert engine.cli(["play", public_id, "--voice", r"af\_heart"]) == 0
     assert calls == [
         "start",
         (public_id, "af_heart"),

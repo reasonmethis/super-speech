@@ -143,7 +143,7 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
-ENGINE_VERSION = "0.7.1"
+ENGINE_VERSION = "0.7.2"
 STATUS_VERSION = 14
 STARTUP_TIMEOUT = 120.0
 
@@ -480,6 +480,11 @@ def enqueue_text(
         normalize_source_label(source),
         normalize_inbox_path(inbox),
     )
+
+
+def _normalize_cli_voice(voice: str) -> str:
+    # Shell commands copied from Markdown can retain escaped underscores
+    return voice.replace(r"\_", "_")
 
 
 def history_snapshot() -> tuple[int, list[dict[str, object]]]:
@@ -3060,7 +3065,12 @@ def cli(argv: list[str] | None = None) -> int:
     commands.add_parser("serve", help="run the speech engine")
     speak = commands.add_parser("speak", help="start the engine and queue one chunk")
     speak.add_argument("text", help="text to speak")
-    speak.add_argument("--voice", default="af_heart", help="Kokoro voice ID")
+    speak.add_argument(
+        "--voice",
+        default="af_heart",
+        type=_normalize_cli_voice,
+        help="Kokoro voice ID",
+    )
     speak.add_argument("--gap-ms", type=int, help="pre-speech gap from 0 to 1500 ms")
     speak.add_argument("--source", help="short agent or session label")
     speak.add_argument("--inbox", help="file that receives replies from the user")
@@ -3080,7 +3090,11 @@ def cli(argv: list[str] | None = None) -> int:
     commands.add_parser("resume", help="resume from the current audio sample")
     play = commands.add_parser("play", help="play a queued or recent chunk by ID")
     play.add_argument("chunk_id", help="chunk ID from status output")
-    play.add_argument("--voice", help="play the same text with another Kokoro voice")
+    play.add_argument(
+        "--voice",
+        type=_normalize_cli_voice,
+        help="play the same text with another Kokoro voice",
+    )
     move = commands.add_parser("move", help="move a waiting chunk before another ID")
     move.add_argument("chunk_id", help="waiting chunk ID from status output")
     move.add_argument(
