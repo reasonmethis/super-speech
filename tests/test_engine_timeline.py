@@ -1053,7 +1053,7 @@ def test_clear_archives_a_paused_current_and_publishes_idle(tmp_path: Path) -> N
     engine.PAUSE.touch()
 
     assert engine.do_clear(queue.Queue(), state)
-    engine.publish_status("idle", state, force=True)
+    engine.publish_status(state, force=True)
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
     assert status["state"] == "idle"
@@ -1386,7 +1386,7 @@ def test_timeline_revision_changes_only_with_the_timeline_and_survives_restart(
     for path in (first, second, third):
         path.write_text(path.stem, encoding="utf-8")
     state = engine.State()
-    initial = engine.publish_status("playing", state, force=True)
+    initial = engine.publish_status(state, force=True)
     assert initial is not None
     assert initial["timeline_revision"] == 0
 
@@ -1399,7 +1399,7 @@ def test_timeline_revision_changes_only_with_the_timeline_and_survives_restart(
         len(state.current_projection.text),
     )
     engine.PAUSE.touch()
-    progress = engine.publish_status("paused", state, force=True)
+    progress = engine.publish_status(state, force=True)
     assert progress is not None
     assert progress["timeline_revision"] == 0
 
@@ -1425,6 +1425,6 @@ def test_timeline_revision_changes_only_with_the_timeline_and_survives_restart(
 
     revision, fingerprint = engine.load_timeline_revision_seed()
     restarted = engine.State(revision, fingerprint)
-    after_restart = engine.publish_status("playing", restarted, force=True)
+    after_restart = engine.publish_status(restarted, force=True)
     assert after_restart is not None
     assert after_restart["timeline_revision"] == 2

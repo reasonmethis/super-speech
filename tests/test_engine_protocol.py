@@ -98,10 +98,10 @@ def test_unreadable_current_has_one_empty_piece_status_shape(
 
     monkeypatch.setattr(Path, "read_text", read_text)
 
-    projected = engine.publish_status("playing", engine.State(), force=True)
+    projected = engine.publish_status(engine.State(), force=True)
     stopped_state = engine.State()
     stopped_state.stop.set()
-    direct = engine.publish_status("playing", stopped_state, force=True)
+    direct = engine.publish_status(stopped_state, force=True)
     stopped = engine._stopped_status_payload()
 
     assert projected is not None
@@ -223,7 +223,7 @@ def test_public_status_contains_no_storage_filenames(tmp_path: Path) -> None:
     waiting.write_text("Waiting", encoding="utf-8")
     archived.write_text("History", encoding="utf-8")
 
-    engine.publish_status("idle", engine.State(), force=True)
+    engine.publish_status(engine.State(), force=True)
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
     assert status["version"] == engine.STATUS_VERSION

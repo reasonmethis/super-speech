@@ -13,6 +13,7 @@ import pytest
 
 from engine_test_support import (
     CallbackStop,
+    buffered_piece,
     build_mutation,
     committed_result,
     configure_runtime,
@@ -223,7 +224,7 @@ def test_status_exposes_pause_current_chunk_and_queue(
         piece_end=len("Current words."),
     )
 
-    engine.publish_status("playing", state, force=True)
+    engine.publish_status(state, force=True)
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
     assert status["state"] == "paused"
@@ -254,7 +255,7 @@ def test_status_stays_playing_while_the_current_item_waits_for_its_next_piece(
     state = engine.State()
     set_current(engine, state, current, piece=1, piece_end=len("Two sentences."))
 
-    engine.publish_status("idle", state, force=True)
+    engine.publish_status(state, force=True)
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
     assert status["state"] == "playing"
@@ -348,17 +349,11 @@ def test_engine_stream_failure_leaves_current_item_visible_in_stopped_queue(
         with state.lock:
             _, generation = engine._record_claim(state, queued)
         buf.put(
-            (
+            buffered_piece(
+                engine,
                 queued,
                 np.ones(4, dtype=np.float32),
-                1000,
-                True,
-                True,
-                1,
-                "Keep visible",
-                0,
-                len("Keep visible"),
-                generation,
+                generation=generation,
             )
         )
         state.stop.wait()
@@ -399,7 +394,7 @@ def test_status_stays_playing_while_queued_audio_is_being_prepared(
     queued = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     queued.write_text("Still being prepared", encoding="utf-8")
 
-    engine.publish_status("idle", engine.State(), force=True)
+    engine.publish_status(engine.State(), force=True)
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
     assert status["state"] == "playing"
@@ -410,7 +405,7 @@ def test_status_stays_playing_while_queued_audio_is_being_prepared(
     assert status["queue"] == []
 
     queued.unlink()
-    engine.publish_status("idle", engine.State(), force=True)
+    engine.publish_status(engine.State(), force=True)
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
     assert status["state"] == "idle"
@@ -433,7 +428,7 @@ def test_status_uses_queue_first_when_cached_progress_cannot_apply(
         set_current(engine, state, second, piece=1)
     state.stop.set()
 
-    status = engine.publish_status("idle", state, force=True)
+    status = engine.publish_status(state, force=True)
 
     assert status is not None
     assert status["current"]["id"] == speechicle_id(engine, first)
@@ -455,7 +450,7 @@ def test_status_replaces_progress_that_is_not_for_queue_first(tmp_path: Path) ->
     set_current(engine, state, second, piece=1)
     state.saw_stop = True
 
-    assert engine.publish_status("idle", state, force=True) is not None
+    assert engine.publish_status(state, force=True) is not None
 
     assert state.current_projection is not None
     assert state.current_projection.filename == first.name
@@ -469,7 +464,7 @@ def test_status_cannot_be_paused_without_current_or_waiting_speech(
     configure_runtime(engine, tmp_path)
     engine.PAUSE.touch()
 
-    engine.publish_status("paused", engine.State(), force=True)
+    engine.publish_status(engine.State(), force=True)
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
     assert status["state"] == "idle"
@@ -494,7 +489,7 @@ def test_status_count_matches_the_items_in_the_same_snapshot(
         return original_read_text(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", read_text)
-    engine.publish_status("idle", engine.State(), force=True)
+    engine.publish_status(engine.State(), force=True)
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
     assert status["current"]["id"] == speechicle_id(engine, readable)
@@ -554,14 +549,14 @@ def test_persistent_status_publication_failure_stops_the_engine(
 
     monkeypatch.setattr(engine.os, "replace", fail_replace)
 
-    engine.publish_status("idle", state, force=True)
+    engine.publish_status(state, force=True)
 
     assert state.stop.is_set()
     assert engine.STATUS_FAILURE.exists()
 
     monkeypatch.setattr(engine.os, "replace", real_replace)
     state.stop.clear()
-    engine.publish_status("idle", state, force=True)
+    engine.publish_status(state, force=True)
 
     assert not engine.STATUS_FAILURE.exists()
 
@@ -584,8 +579,8 @@ def test_status_publication_uses_a_fresh_temporary_file_after_failure(
 
     monkeypatch.setattr(engine.os, "replace", replace)
 
-    engine.publish_status("idle", state, force=True)
-    engine.publish_status("idle", state, force=True)
+    engine.publish_status(state, force=True)
+    engine.publish_status(state, force=True)
 
     assert len(temporary_paths) == 2
     assert temporary_paths[0] != temporary_paths[1]
@@ -610,7 +605,7 @@ def test_backward_wall_clock_cannot_throttle_or_regress_status(
     monkeypatch.setattr(engine.time, "monotonic", lambda: next(monotonic_times))
     monkeypatch.setattr(engine.time, "time", lambda: next(wall_times))
 
-    initial = engine.publish_status("playing", state, force=True)
+    initial = engine.publish_status(state, force=True)
     assert initial is not None
     assert engine.update_current_piece(
         state,
@@ -620,8 +615,8 @@ def test_backward_wall_clock_cannot_throttle_or_regress_status(
         len("Current progress"),
     )
 
-    assert engine.publish_status("playing", state) is None
-    progress = engine.publish_status("playing", state)
+    assert engine.publish_status(state) is None
+    progress = engine.publish_status(state)
 
     assert progress is not None
     assert progress["current"]["piece"] == 1
@@ -762,9 +757,9 @@ def test_moving_a_waiting_chunk_resets_banked_audio_but_keeps_current(
     for path in (current, second, third):
         path.write_text(path.stem, encoding="utf-8")
     buffered: queue.Queue = queue.Queue()
-    buffered.put((current, "current piece"))
-    buffered.put((second, "stale second"))
-    buffered.put((third, "stale third"))
+    buffered.put(buffered_piece(engine, current, "current piece"))
+    buffered.put(buffered_piece(engine, second, "stale second"))
+    buffered.put(buffered_piece(engine, third, "stale third"))
     state = engine.State()
     set_current(engine, state, current)
     generations: dict[str, int] = {}
@@ -788,7 +783,9 @@ def test_moving_a_waiting_chunk_resets_banked_audio_but_keeps_current(
         third.stem,
         second.stem,
     ]
-    assert buffered.get_nowait() == (current, "current piece")
+    kept = buffered.get_nowait()
+    assert kept.path == current
+    assert kept.audio == "current piece"
     assert buffered.empty()
     assert state.claims == {current.name: generations[current.name]}
     assert engine.claim_next_queued_chunk(state) == third
@@ -804,15 +801,17 @@ def test_reset_waiting_buffer_keeps_queue_first_claim_without_cached_progress(
     current.write_text("Current", encoding="utf-8")
     waiting.write_text("Waiting", encoding="utf-8")
     buffered: queue.Queue = queue.Queue()
-    buffered.put((current, "current piece"))
-    buffered.put((waiting, "waiting piece"))
+    buffered.put(buffered_piece(engine, current, "current piece"))
+    buffered.put(buffered_piece(engine, waiting, "waiting piece"))
     state = engine.State()
     _, current_generation = engine._record_claim(state, current)
     engine._record_claim(state, waiting)
 
     assert engine._reset_waiting_buffer(buffered, state, current.name) == 1
 
-    assert buffered.get_nowait() == (current, "current piece")
+    kept = buffered.get_nowait()
+    assert kept.path == current
+    assert kept.audio == "current piece"
     assert buffered.empty()
     assert state.claims == {current.name: current_generation}
 
@@ -1011,10 +1010,17 @@ def test_waiting_mutation_preserves_mid_speechicle_piece_stream(
         path.write_text(path.stem, encoding="utf-8")
     monkeypatch.setattr(engine, "SPLIT_CHARS", 5)
     current.write_text("One. Two. Three. Four. Five.", encoding="utf-8")
-    held_piece = (current, "piece 3")
-    remaining_pieces = [(current, "piece 4"), (current, "piece 5")]
+    held_piece = buffered_piece(engine, current, "piece 3", piece=3)
+    remaining_pieces = [
+        buffered_piece(engine, current, "piece 4", first=False, piece=4),
+        buffered_piece(engine, current, "piece 5", first=False, piece=5),
+    ]
     buffered: queue.Queue = queue.Queue()
-    for entry in [*remaining_pieces, (waiting, "stale"), (moved, "stale")]:
+    for entry in [
+        *remaining_pieces,
+        buffered_piece(engine, waiting, "stale"),
+        buffered_piece(engine, moved, "stale"),
+    ]:
         buffered.put(entry)
     state = engine.State()
     set_current(engine, state, current, piece=2, piece_start=5, piece_end=9)
@@ -1035,12 +1041,12 @@ def test_waiting_mutation_preserves_mid_speechicle_piece_stream(
         )
 
     assert (
-        engine.process_mutation_requests(buffered, state, held_piece[0].name)
+        engine.process_mutation_requests(buffered, state, held_piece.path.name)
         == "queue_changed"
     )
 
     committed_result(engine, request_id)
-    assert held_piece == (current, "piece 3")
+    assert held_piece.audio == "piece 3"
     assert [buffered.get_nowait(), buffered.get_nowait()] == remaining_pieces
     assert buffered.empty()
     assert state.current_projection is not None
@@ -1063,9 +1069,9 @@ def test_archiving_one_waiting_chunk_preserves_current_and_remaining_queue(
     for path in (current, archived, remaining):
         path.write_text(path.stem, encoding="utf-8")
     buffered: queue.Queue = queue.Queue()
-    buffered.put((current, "current piece"))
-    buffered.put((archived, "stale archived"))
-    buffered.put((remaining, "stale remaining"))
+    buffered.put(buffered_piece(engine, current, "current piece"))
+    buffered.put(buffered_piece(engine, archived, "stale archived"))
+    buffered.put(buffered_piece(engine, remaining, "stale remaining"))
     state = engine.State()
     set_current(engine, state, current)
     for path in (current, archived, remaining):
@@ -1083,7 +1089,9 @@ def test_archiving_one_waiting_chunk_preserves_current_and_remaining_queue(
         current.stem,
         remaining.stem,
     ]
-    assert buffered.get_nowait() == (current, "current piece")
+    kept = buffered.get_nowait()
+    assert kept.path == current
+    assert kept.audio == "current piece"
     assert set(state.claims) == {current.name}
 
 
@@ -1233,6 +1241,40 @@ def test_waiting_move_publishes_a_committed_result(
     ]
 
 
+def test_waiting_move_before_itself_does_not_reset_buffered_audio(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_queue_noop_move")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    current = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    waiting = engine.QUEUE / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
+    current.write_text("Current", encoding="utf-8")
+    waiting.write_text("Waiting", encoding="utf-8")
+    buffered: queue.Queue = queue.Queue()
+    buffered.put(buffered_piece(engine, current, "current piece"))
+    buffered.put(buffered_piece(engine, waiting, "waiting piece"))
+    state = engine.State()
+    engine._record_claim(state, current)
+    engine._record_claim(state, waiting)
+    waiting_id = speechicle_id(engine, waiting)
+    request_id = request_mutation(
+        engine,
+        "move",
+        section="waiting",
+        id=waiting_id,
+        before_id=waiting_id,
+    )
+
+    assert engine.process_mutation_requests(buffered, state) is None
+    committed_result(engine, request_id)
+    assert engine.queue_files_in_order() == [current, waiting]
+    assert [buffered.get_nowait().audio, buffered.get_nowait().audio] == [
+        "current piece",
+        "waiting piece",
+    ]
+
+
 def test_timed_out_unclaimed_queue_request_cannot_apply_later(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1324,7 +1366,7 @@ def test_result_published_at_the_timeout_boundary_is_still_observed(
     request_id = request_mutation(engine, "delete", id=f"sp_{'1' * 32}")
     request = next(engine.BASE.glob(f"MUTATION.*.{request_id}.json"))
     state = engine.State()
-    snapshot = engine.publish_status("idle", state, force=True)
+    snapshot = engine.publish_status(state, force=True)
     assert snapshot is not None
     real_wait = engine.wait_for_json_payload
     calls = 0
@@ -1372,7 +1414,7 @@ def test_mutation_result_retries_a_transient_windows_read_error(
     configure_runtime(engine, tmp_path)
     request_id = "a" * 24
     result_path = engine.mutation_result_path(request_id)
-    snapshot = engine.publish_status("idle", engine.State(), force=True)
+    snapshot = engine.publish_status(engine.State(), force=True)
     assert snapshot is not None
     result_path.write_text(
         json.dumps(
@@ -2137,7 +2179,7 @@ def test_startup_rejects_an_abandoned_claim_without_leaving_its_caller_waiting(
     )
 
     state = engine.State()
-    engine.publish_status("idle", state, force=True)
+    engine.publish_status(state, force=True)
     engine.settle_stale_mutation_claims(state)
 
     result = engine.wait_for_mutation_result(request_id, timeout=0.1)
@@ -2353,7 +2395,7 @@ def test_status_exposes_bounded_recent_history(tmp_path: Path) -> None:
             f"History {number}", encoding="utf-8"
         )
 
-    engine.publish_status("idle", engine.State(), force=True)
+    engine.publish_status(engine.State(), force=True)
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
     assert status["version"] == engine.STATUS_VERSION

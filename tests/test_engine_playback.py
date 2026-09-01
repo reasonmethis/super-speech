@@ -63,7 +63,7 @@ def test_play_command_keeps_stdout_as_json_when_result_cleanup_is_locked(
     request_id = "a" * 24
     result_path = engine.mutation_result_path(request_id)
     public_id = f"sp_{'7' * 32}"
-    snapshot = engine.publish_status("idle", engine.State(), force=True)
+    snapshot = engine.publish_status(engine.State(), force=True)
     assert snapshot is not None
     expected_result = {
         "outcome": "committed",
@@ -496,7 +496,7 @@ def test_history_selection_moves_only_the_playback_boundary(
         ]
 
     state = engine.State()
-    engine.publish_status("idle", state, force=True)
+    engine.publish_status(state, force=True)
     original_order = visible_ids()
     selected = history[history_index]
 
@@ -516,7 +516,7 @@ def test_history_selection_moves_only_the_playback_boundary(
     assert visible_ids() == original_order
 
     restarted = engine.State()
-    engine.publish_status("idle", restarted, force=True)
+    engine.publish_status(restarted, force=True)
     assert visible_ids() == original_order
     assert json.loads(engine.STATUS.read_text(encoding="utf-8"))["current"][
         "id"
@@ -524,7 +524,7 @@ def test_history_selection_moves_only_the_playback_boundary(
 
     selected_in_queue = engine.QUEUE / selected.name
     assert engine.finish_chunk_playback(selected_in_queue, "done", True, restarted)
-    engine.publish_status("idle", restarted, force=True)
+    engine.publish_status(restarted, force=True)
     assert visible_ids() == original_order
 
 
@@ -935,7 +935,7 @@ def test_history_voice_change_keeps_the_row_position(
         path.write_text(path.stem, encoding="utf-8")
     engine.timeline.save_history_order(history)
     state = engine.State()
-    engine.publish_status("idle", state, force=True)
+    engine.publish_status(state, force=True)
     before = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
     request_id = request_mutation(

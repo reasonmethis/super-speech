@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import sys
 from pathlib import Path
 
 ENGINE_SOURCE = Path(__file__).parents[1] / "skills" / "super-speech" / "engine"
-sys.path.insert(0, str(ENGINE_SOURCE))
 
 from speechicle_identity import IdentityCatalog, write_catalog
 
@@ -78,6 +76,31 @@ def set_current(
         path.name,
         current_text,
         active_piece,
+    )
+
+
+def buffered_piece(
+    engine,
+    path: Path,
+    audio: object,
+    *,
+    generation: int = 0,
+    first: bool = True,
+    last: bool = True,
+    piece: int = 1,
+) -> object:
+    text = path.read_text(encoding="utf-8")
+    return engine.BufferedPiece(
+        path=path,
+        audio=audio,
+        sample_rate=1000,
+        is_first_piece=first,
+        is_last_piece=last,
+        piece_number=piece,
+        speechicle_text=text,
+        piece_start=0,
+        piece_end=len(text),
+        claim_generation=generation,
     )
 
 

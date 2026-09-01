@@ -52,7 +52,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import NamedTuple, assert_never
+from typing import Literal, NamedTuple, assert_never
 
 from engine_control import EngineControlServer, LivePlaybackControl, PlaybackState
 from file_lock import InterprocessFileLock
@@ -1420,8 +1420,8 @@ def prune_mutation_results(max_age: float = 300.0) -> None:
 
 
 def warmup(kokoro) -> None:
-    """Synthesize a throwaway phrase and discard it to pay the one-time
-    first-inference cost up front, so the first real chunk renders fast."""
+    """Attempt a throwaway synthesis to pay the one-time
+    first-inference cost up front, so the first Speechicle renders fast."""
     heartbeat(force=True)
     t0 = time.time()
     try:
@@ -1468,6 +1468,25 @@ class CurrentProjection:
             raise ValueError("active piece exceeds Current text")
 
 
+class BufferedPiece(NamedTuple):
+    """One synthesized piece waiting for the player.
+
+    `claim_generation` is the version assigned when synthesis starts. The
+    player accepts the piece only while that version is active for its Speechicle.
+    """
+
+    path: Path
+    audio: object
+    sample_rate: int
+    is_first_piece: bool
+    is_last_piece: bool
+    piece_number: int
+    speechicle_text: str
+    piece_start: int
+    piece_end: int
+    claim_generation: int
+
+
 def _current_status_item(
     path: Path,
     projection: CurrentProjection,
@@ -1502,7 +1521,7 @@ class State:
         self.current_projection: CurrentProjection | None = None
         self.read_failures: dict[str, float] = {}
         self.stop = threading.Event()    # tell the worker to exit
-        self.saw_stop = False            # latched STOP - finish current chunk, then exit
+        self.saw_stop = False            # graceful Stop; new speech or Play may cancel it
         self.timeline_revision = timeline_revision
         self.timeline_fingerprint = timeline_fingerprint
 
@@ -1768,10 +1787,13 @@ def publish_startup_status(timeline_revision: int) -> dict[str, object]:
     return payload
 
 
+LifecycleState = Literal["loading", "setup_required", "stopped", "clearing"]
+
+
 def publish_status(
-    playback_state: str,
     st: State,
     *,
+    lifecycle_state: LifecycleState | None = None,
     playback: PauseableAudio | None = None,
     sample_rate: int | None = None,
     force: bool = False,
@@ -1844,14 +1866,16 @@ def publish_status(
         )
 
     has_work = current is not None
-    if playback_state == "clearing":
-        playback_state = "clearing" if has_work else "idle"
-    elif playback_state not in {"loading", "setup_required", "stopped"}:
-        playback_state = (
+    if lifecycle_state == "clearing":
+        state = "clearing" if has_work else "idle"
+    elif lifecycle_state is None:
+        state = (
             "paused" if has_work and playback_control.pause_requested()
             else "playing" if has_work
             else "idle"
         )
+    else:
+        state = lifecycle_state
     try:
         history_count, history_items = history_snapshot()
     except RuntimeError as error:
@@ -1867,7 +1891,7 @@ def publish_status(
 
     payload = _status_payload(
         timeline_revision=timeline_revision,
-        state=playback_state,
+        state=state,
         updated_at=updated_at,
         engine_pid=os.getpid(),
         current=current,
@@ -1909,7 +1933,7 @@ def publish_status(
     return None
 
 
-def _discard_buffer(buf: "queue.Queue") -> int:
+def _discard_buffer(buf: "queue.Queue[BufferedPiece]") -> int:
     discarded = 0
     while True:
         try:
@@ -1920,21 +1944,21 @@ def _discard_buffer(buf: "queue.Queue") -> int:
 
 
 def _reset_waiting_buffer(
-    buf: "queue.Queue",
+    buf: "queue.Queue[BufferedPiece]",
     st: State,
     current_name: str,
 ) -> int:
     """Drop rendered Waiting audio while preserving captured Current pieces."""
     with st.lock:
         current_generation = st.claims.get(current_name)
-        kept = []
+        kept: list[BufferedPiece] = []
         discarded = 0
         while True:
             try:
                 entry = buf.get_nowait()
             except queue.Empty:
                 break
-            if entry[0].name == current_name:
+            if entry.path.name == current_name:
                 kept.append(entry)
             else:
                 discarded += 1
@@ -1949,10 +1973,10 @@ def _reset_waiting_buffer(
 
 
 def apply_play_mutation(
-    buf: "queue.Queue",
+    buf: "queue.Queue[BufferedPiece]",
     st: State,
     request: PlayMutation,
-) -> str | None:
+) -> Literal["select"] | None:
     """Select one ID while excluding worker claims from the transaction."""
     with st.lock:
         chunk_id = request.id
@@ -1991,7 +2015,7 @@ def apply_play_mutation(
             raise MutationOutcomeUnconfirmed("play changed the stable Speechicle ID")
         if selection.origin != "history":
             log(
-                f"PLAY selected {target.name}; archived {selection.moved_count} older chunk(s); "
+                f"PLAY selected {target.name}; archived {selection.moved_count} older Speechicle(s); "
                 f"discarded {discarded} banked piece(s)"
             )
         else:
@@ -2015,7 +2039,7 @@ def apply_enqueue_mutation(request: EnqueueMutation) -> Path:
     )
 
 
-def do_clear(buf: "queue.Queue", st: State) -> bool:
+def do_clear(buf: "queue.Queue[BufferedPiece]", st: State) -> bool:
     """Stop and archive Current plus every Waiting row as one transaction."""
     with st.lock:
         if st.stop.is_set():
@@ -2071,7 +2095,7 @@ def apply_history_move_mutation(request: MoveMutation) -> None:
 
 
 def _finish_waiting_mutation(
-    buf: "queue.Queue",
+    buf: "queue.Queue[BufferedPiece]",
     st: State,
     current_name: str,
 ) -> int:
@@ -2084,7 +2108,7 @@ def _finish_waiting_mutation(
 
 
 def apply_archive_mutation(
-    buf: "queue.Queue",
+    buf: "queue.Queue[BufferedPiece]",
     st: State,
     request: ArchiveMutation,
 ) -> None:
@@ -2092,25 +2116,26 @@ def apply_archive_mutation(
     ordered, source = timeline.waiting_source(request.id)
     current_name = ordered[0].name
     if not archive(source):
-        raise RuntimeError(f"could not archive waiting chunk: {request.id}")
+        raise RuntimeError(f"could not archive Waiting Speechicle: {request.id}")
     discarded = _finish_waiting_mutation(buf, st, current_name)
     log(f"QUEUE archive {source.name}; discarded {discarded} banked piece(s)")
 
 
 def apply_waiting_move_mutation(
-    buf: "queue.Queue",
+    buf: "queue.Queue[BufferedPiece]",
     st: State,
     request: MoveMutation,
-) -> None:
+) -> bool:
     """Move one Waiting row without changing Current."""
     current_path, source = timeline.reorder_waiting(request.id, request.before_id)
     if request.before_id == request.id:
-        return
+        return False
     discarded = _finish_waiting_mutation(buf, st, current_path.name)
     log(
         f"QUEUE move {source.name} before {request.before_id or 'end'}; "
         f"discarded {discarded} banked piece(s)"
     )
+    return True
 
 
 def _publish_mutation_outcome(
@@ -2121,13 +2146,14 @@ def _publish_mutation_outcome(
     *,
     result_id: str | None = None,
     error: str | None = None,
-    playback_state: str | None = None,
+    lifecycle_state: LifecycleState | None = None,
 ) -> bool:
     """Publish the authoritative status before its matching mutation result."""
+    if lifecycle_state is None and outcome == "unconfirmed" and st.stop.is_set():
+        lifecycle_state = "stopped"
     snapshot = publish_status(
-        playback_state
-        or ("stopped" if outcome == "unconfirmed" and st.stop.is_set() else "idle"),
         st,
+        lifecycle_state=lifecycle_state,
         force=True,
     )
     if snapshot is None:
@@ -2147,14 +2173,22 @@ def _publish_mutation_outcome(
     return published
 
 
+MutationEffect = Literal["queue_changed", "select", "clear"]
+
+
 def process_mutation_requests(
-    buf: "queue.Queue",
+    buf: "queue.Queue[BufferedPiece]",
     st: State,
     held_chunk_name: str | None = None,
-) -> str | None:
-    """Apply mutations and publish their snapshots in one total FIFO order."""
+) -> MutationEffect | None:
+    """Apply claimable mutations in order and return their playback effect.
+
+    A Play that restarts playback returns `select`; Clear returns `clear`. The
+    later of those commands replaces the earlier result. With neither, a Queue
+    change returns `queue_changed`; no relevant change returns `None`.
+    """
     prune_mutation_results()
-    effect: str | None = None
+    effect: MutationEffect | None = None
     while not st.stop.is_set():
         try:
             claimed = claim_next_mutation_request()
@@ -2222,7 +2256,7 @@ def process_mutation_requests(
                 clear_committed = False
                 playback_control.start_clearing(request.request_id)
                 try:
-                    publish_status("clearing", st, force=True)
+                    publish_status(st, lifecycle_state="clearing", force=True)
                     if not do_clear(buf, st):
                         raise MutationOutcomeUnconfirmed(
                             "clear result was unconfirmed"
@@ -2238,8 +2272,9 @@ def process_mutation_requests(
                 if request.section == "history":
                     apply_history_move_mutation(request)
                 else:
-                    apply_waiting_move_mutation(buf, st, request)
-                    effect = effect or "queue_changed"
+                    queue_changed = apply_waiting_move_mutation(buf, st, request)
+                    if queue_changed:
+                        effect = effect or "queue_changed"
             elif isinstance(request, ArchiveMutation):
                 apply_archive_mutation(buf, st, request)
                 effect = effect or "queue_changed"
@@ -2320,7 +2355,7 @@ def reject_pending_requests(reason: str, st: State) -> None:
             request_id,
             "rejected",
             error=rejection,
-            playback_state="stopped",
+            lifecycle_state="stopped",
         ):
             return
 
@@ -2384,8 +2419,8 @@ def claim_next_queued_chunk(st: State) -> Path | None:
     return claim[0] if claim is not None else None
 
 
-def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
-    """Synthesize claimed chunks into a bounded queue of playback pieces."""
+def synth_worker(kokoro, buf: "queue.Queue[BufferedPiece]", st: State) -> None:
+    """Synthesize claimed Speechicles into a bounded queue of playback pieces."""
     while not st.stop.is_set():
         if consume(WARMUP):
             warmup(kokoro)
@@ -2451,8 +2486,7 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
                         else:
                             st.stop.set()
                     break
-                # Mid-chunk failure: deliver an empty terminal piece so the
-                # consumer still archives and releases the chunk.
+                # An empty last piece tells the player to finish after earlier audio
                 audio = audio[:0]
                 terminal_failure = True
             else:
@@ -2460,17 +2494,17 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
                     f"synth {nxt.name}[{idx+1}/{len(pieces)}] voice={voice} "
                     f"chars={len(piece.text)} synth={time.time()-t0:.1f}s audio={len(audio)/sr:.1f}s"
                 )
-            entry = (
-                nxt,
-                audio,
-                sr,
-                idx == 0,
-                terminal_failure or idx == len(pieces) - 1,
-                idx + 1,
-                text,
-                piece.start,
-                piece.end,
-                generation,
+            entry = BufferedPiece(
+                path=nxt,
+                audio=audio,
+                sample_rate=sr,
+                is_first_piece=idx == 0,
+                is_last_piece=terminal_failure or idx == len(pieces) - 1,
+                piece_number=idx + 1,
+                speechicle_text=text,
+                piece_start=piece.start,
+                piece_end=piece.end,
+                claim_generation=generation,
             )
             while not st.stop.is_set():
                 with st.lock:
@@ -2489,7 +2523,11 @@ def synth_worker(kokoro, buf: "queue.Queue", st: State) -> None:
                 break
 
 
-def gap_wait(seconds: float, buf: "queue.Queue", st: State) -> str | None:
+def gap_wait(
+    seconds: float,
+    buf: "queue.Queue[BufferedPiece]",
+    st: State,
+) -> str | None:
     """Wait for an audible gap without counting time spent paused."""
     try:
         ordered_queue = queue_files_in_order()
@@ -2523,10 +2561,10 @@ def gap_wait(seconds: float, buf: "queue.Queue", st: State) -> str | None:
             return "skip"
         now = time.monotonic()
         if playback_control.pause_requested():
-            publish_status("paused", st)
+            publish_status(st)
         else:
             remaining -= now - last_tick
-            publish_status("idle", st)
+            publish_status(st)
         last_tick = now
         time.sleep(SIGNAL_TICK)
     return None
@@ -2535,7 +2573,16 @@ def gap_wait(seconds: float, buf: "queue.Queue", st: State) -> str | None:
 _prev_audio_end: float | None = None
 
 
-def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: State) -> str:
+def play_one(
+    sd,
+    np,
+    path: Path,
+    audio,
+    sr,
+    kind: str,
+    buf: "queue.Queue[BufferedPiece]",
+    st: State,
+) -> str:
     """Play one rendered piece while honoring pause and control signals."""
     global _prev_audio_end
     if st.stop.is_set():
@@ -2556,7 +2603,6 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
     )
     stream.start()
     publish_status(
-        "paused" if paused else "playing",
         st,
         playback=playback,
         sample_rate=sr,
@@ -2586,7 +2632,6 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
             if playback_state_changed:
                 log(f"{'PAUSE' if paused else 'RESUME'} {path.name}")
                 publish_status(
-                    "paused" if paused else "playing",
                     st,
                     playback=playback,
                     sample_rate=sr,
@@ -2611,7 +2656,6 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
                 break
 
             publish_status(
-                "paused" if playback.paused else "playing",
                 st,
                 playback=playback,
                 sample_rate=sr,
@@ -2638,7 +2682,11 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
 
 
 def finish_chunk_playback(path: Path, outcome: str, last: bool, st: State) -> bool:
-    """Release a completed or interrupted chunk and report whether state changed."""
+    """Settle a Speechicle after a piece finishes or playback stops early.
+
+    Return `False` when normal playback should continue with another piece.
+    Return `True` after every final, skipped, interrupted, or failed outcome.
+    """
     if outcome == "done" and not last:
         return False
     released = outcome in {"select", "clear", "fatal"} or archive(path)
@@ -2680,23 +2728,21 @@ def run_engine_loop(
     QUEUE.mkdir(parents=True, exist_ok=True)
     SPOKEN.mkdir(parents=True, exist_ok=True)
     st = State(timeline_revision, timeline_fingerprint_seed)
-    publish_status("loading", st, force=True)
+    publish_status(st, lifecycle_state="loading", force=True)
     settle_stale_mutation_claims(st)
     if not MODEL_PATH.exists() or not VOICES_PATH.exists():
-        publish_status("setup_required", st, force=True)
+        publish_status(st, lifecycle_state="setup_required", force=True)
         sys.stderr.write(f"missing kokoro files at {MODEL_DIR}\n")
         sys.exit(1)
 
     import numpy as np
     import sounddevice as sd
-    # Warm up PortAudio so the first real sd.play() doesn't pay device-open latency.
+    # Try to reduce cold audio startup by opening one throwaway stream
     sd.play(np.zeros(int(0.1 * 24000), dtype=np.float32), 24000)
     sd.wait()
     log("loading kokoro model...")
     from kokoro_onnx import Kokoro
-    # Cap ONNX intra-op threads below the core count: leaves headroom for the
-    # audio callback under synth bursts AND measures faster than the
-    # oversubscribed default (3.9x vs 3.1x realtime on this 8-core box).
+    # Cap ONNX below the detected CPU count; audio runs concurrently
     try:
         import onnxruntime as ort
         opts = ort.SessionOptions()
@@ -2720,15 +2766,13 @@ def run_engine_loop(
         f"{', SILENT' if SILENT else ''})"
     )
 
-    # Pay the one-time first-inference cost now (before the worker starts, so
-    # there is no concurrent kokoro call), then clear any pre-launch WARMUP.
     warmup(kokoro)
     consume(WARMUP)
 
-    buf: "queue.Queue" = queue.Queue(maxsize=BUFFER_MAX)
+    buf: "queue.Queue[BufferedPiece]" = queue.Queue(maxsize=BUFFER_MAX)
     worker = threading.Thread(target=synth_worker, args=(kokoro, buf, st), daemon=True)
     worker.start()
-    publish_status("idle", st, force=True)
+    publish_status(st, force=True)
 
     session_first = True
     try:
@@ -2768,27 +2812,16 @@ def run_engine_loop(
                 current_path = QUEUE / current_name if current_name else None
                 if current_path is not None and current_path.exists():
                     finish_chunk_playback(current_path, "skip", True, st)
-                    publish_status("idle", st, force=True)
+                    publish_status(st, force=True)
                     log(f"SKIP before playback {current_path.name}")
                     continue
                 log("SKIP ignored (no Current)")
 
             try:
-                (
-                    path,
-                    audio,
-                    sr,
-                    first,
-                    last,
-                    piece,
-                    text,
-                    piece_start,
-                    piece_end,
-                    claim_generation,
-                ) = buf.get(timeout=POLL_INTERVAL)
+                buffered = buf.get(timeout=POLL_INTERVAL)
             except queue.Empty:
                 heartbeat()
-                publish_status("idle", st)
+                publish_status(st)
                 continue
 
             if st.stop.is_set():
@@ -2796,19 +2829,30 @@ def run_engine_loop(
                 return
 
             # Drop pieces invalidated while the worker was handing them off
-            if buffered_piece_is_stale(st, path.name, claim_generation):
-                continue
-
-            mutation_effect = process_mutation_requests(buf, st, path.name)
-            if mutation_effect is not None and (
-                mutation_effect != "queue_changed"
-                or buffered_piece_is_stale(st, path.name, claim_generation)
+            if buffered_piece_is_stale(
+                st,
+                buffered.path.name,
+                buffered.claim_generation,
             ):
                 continue
 
-            skip_initial_gap = first and consume_initial_gap_skip(st, path.name)
-            if first and not session_first and not skip_initial_gap:
-                g = gap_from_name(path.name)
+            mutation_effect = process_mutation_requests(buf, st, buffered.path.name)
+            if mutation_effect is not None and (
+                mutation_effect != "queue_changed"
+                or buffered_piece_is_stale(
+                    st,
+                    buffered.path.name,
+                    buffered.claim_generation,
+                )
+            ):
+                continue
+
+            skip_initial_gap = buffered.is_first_piece and consume_initial_gap_skip(
+                st,
+                buffered.path.name,
+            )
+            if buffered.is_first_piece and not session_first and not skip_initial_gap:
+                g = gap_from_name(buffered.path.name)
                 outcome = gap_wait(g if g is not None else CHUNK_GAP_S, buf, st)
                 if outcome == "interrupt":
                     log("INTERRUPT (gap); exiting")
@@ -2817,52 +2861,69 @@ def run_engine_loop(
                     log("engine stopping during the inter-chunk gap")
                     return
                 if outcome == "select":
-                    invalidate_claim(st, path.name)
+                    invalidate_claim(st, buffered.path.name)
                     continue
                 if outcome == "stop":
-                    invalidate_claim(st, path.name)
+                    invalidate_claim(st, buffered.path.name)
                     log("STOP (gap); exiting")
                     return
                 if outcome in {"clear", "queue_changed"}:
                     continue
                 if outcome == "skip":
-                    finish_chunk_playback(path, "skip", True, st)
+                    finish_chunk_playback(buffered.path, "skip", True, st)
                     continue
             if st.stop.is_set():
                 log("engine stopping before another chunk starts")
                 return
             session_first = False
 
-            if first:
-                if not start_current_playback(st, path.name, text):
-                    invalidate_claim(st, path.name)
+            if buffered.is_first_piece:
+                if not start_current_playback(
+                    st,
+                    buffered.path.name,
+                    buffered.speechicle_text,
+                ):
+                    invalidate_claim(st, buffered.path.name)
                     continue
             if not update_current_piece(
                 st,
-                path.name,
-                piece,
-                piece_start,
-                piece_end,
+                buffered.path.name,
+                buffered.piece_number,
+                buffered.piece_start,
+                buffered.piece_end,
             ):
-                invalidate_claim(st, path.name)
+                invalidate_claim(st, buffered.path.name)
                 continue
-            if first:
-                log(f"play {path.name}")
-            publish_status("playing", st, force=True)
-            outcome = play_one(sd, np, path, audio, sr,
-                               "chunk" if first else "piece", buf, st)
+            if buffered.is_first_piece:
+                log(f"play {buffered.path.name}")
+            publish_status(st, force=True)
+            outcome = play_one(
+                sd,
+                np,
+                buffered.path,
+                buffered.audio,
+                buffered.sample_rate,
+                "speechicle" if buffered.is_first_piece else "piece",
+                buf,
+                st,
+            )
 
-            finished = finish_chunk_playback(path, outcome, last, st)
+            finished = finish_chunk_playback(
+                buffered.path,
+                outcome,
+                buffered.is_last_piece,
+                st,
+            )
             if st.stop.is_set():
                 log("engine stopping after a storage failure")
                 return
             if finished:
-                publish_status("idle", st, force=True)
+                publish_status(st, force=True)
 
             if outcome == "interrupt":
                 log("exiting on interrupt")
                 return
-            if st.saw_stop and (last or outcome == "skip"):
+            if st.saw_stop and (buffered.is_last_piece or outcome == "skip"):
                 if consume_continue(st):
                     log("STOP canceled by newly queued speech")
                 else:
@@ -2877,7 +2938,7 @@ def run_engine_loop(
         with st.lock:
             current_name = st.current_projection.filename if st.current_projection is not None else None
             clear_current_playback(st, current_name)
-        publish_status("stopped", st, force=True)
+        publish_status(st, lifecycle_state="stopped", force=True)
         try:
             HEARTBEAT.unlink()
         except OSError:
@@ -3062,7 +3123,9 @@ def cli(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("serve", help="run the speech engine")
-    speak = commands.add_parser("speak", help="start the engine and queue one chunk")
+    speak = commands.add_parser(
+        "speak", help="start the engine and queue one Speechicle"
+    )
     speak.add_argument("text", help="text to speak")
     speak.add_argument(
         "--voice",
@@ -3087,42 +3150,52 @@ def cli(argv: list[str] | None = None) -> int:
     commands.add_parser("status", help="print the current runtime status")
     commands.add_parser("pause", help="pause at the current audio sample")
     commands.add_parser("resume", help="resume from the current audio sample")
-    play = commands.add_parser("play", help="play a queued or recent chunk by ID")
-    play.add_argument("chunk_id", help="chunk ID from status output")
+    play = commands.add_parser(
+        "play", help="play a queued or recent Speechicle by ID"
+    )
+    play.add_argument("speechicle_id", help="Speechicle ID from status output")
     play.add_argument(
         "--voice",
         type=_normalize_cli_voice,
         help="play the same text with another Kokoro voice",
     )
-    move = commands.add_parser("move", help="move a waiting chunk before another ID")
-    move.add_argument("chunk_id", help="waiting chunk ID from status output")
+    move = commands.add_parser(
+        "move", help="move a Waiting Speechicle before another ID"
+    )
+    move.add_argument("speechicle_id", help="Waiting Speechicle ID from status output")
     move.add_argument(
         "before_id",
         nargs="?",
-        help="waiting chunk ID to insert before; omit to move to the end",
+        help="Waiting Speechicle ID to insert before; omit to move to the end",
     )
     move_history = commands.add_parser(
-        "move-history", help="reorder one recent History chunk"
+        "move-history", help="reorder one recent History Speechicle"
     )
-    move_history.add_argument("chunk_id", help="History chunk ID from status output")
+    move_history.add_argument(
+        "speechicle_id", help="History Speechicle ID from status output"
+    )
     move_history.add_argument(
         "before_id",
         nargs="?",
-        help="History chunk ID to insert before; omit to move it last on screen",
+        help="History Speechicle ID to insert before; omit to move it last on screen",
     )
     archive_command = commands.add_parser(
-        "archive", help="move one waiting chunk to History"
+        "archive", help="move one Waiting Speechicle to History"
     )
-    archive_command.add_argument("chunk_id", help="waiting chunk ID from status output")
+    archive_command.add_argument(
+        "speechicle_id", help="Waiting Speechicle ID from status output"
+    )
     delete_command = commands.add_parser(
-        "delete", help="permanently delete one History chunk"
+        "delete", help="permanently delete one History Speechicle"
     )
-    delete_command.add_argument("chunk_id", help="History chunk ID from status output")
+    delete_command.add_argument(
+        "speechicle_id", help="History Speechicle ID from status output"
+    )
     mutate = commands.add_parser("mutate", help=argparse.SUPPRESS)
     mutate.add_argument("mutation_json", help=argparse.SUPPRESS)
-    commands.add_parser("skip", help="skip the current chunk")
+    commands.add_parser("skip", help="skip the current Speechicle")
     commands.add_parser("clear", help="move Current and Waiting speech to History")
-    commands.add_parser("stop", help="finish the current chunk and stop")
+    commands.add_parser("stop", help="finish the current Speechicle and stop")
     commands.add_parser("interrupt", help="stop playback and the engine immediately")
 
     args = parser.parse_args(argv)
@@ -3166,19 +3239,22 @@ def cli(argv: list[str] | None = None) -> int:
             start_engine()
             if args.command == "play":
                 request = build_mutation_request(
-                    "play", id=args.chunk_id, voice=args.voice
+                    "play", id=args.speechicle_id, voice=args.voice
                 )
             elif args.command in {"move", "move-history"}:
                 request = build_mutation_request(
                     "move",
                     section="history" if args.command == "move-history" else "waiting",
-                    id=args.chunk_id,
+                    id=args.speechicle_id,
                     before_id=args.before_id,
                 )
             elif args.command == "clear":
                 request = build_mutation_request("clear")
             else:
-                request = build_mutation_request(args.command, id=args.chunk_id)
+                request = build_mutation_request(
+                    args.command,
+                    id=args.speechicle_id,
+                )
             print(
                 json.dumps(
                     wait_for_mutation_result(request_mutation(request)),
