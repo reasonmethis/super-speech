@@ -164,7 +164,7 @@ interface TimelineMutationFailure {
   type: TimelineMutation["type"];
 }
 
-type DraggableKind = "waiting" | "history";
+type DraggableKind = Exclude<TimelineItem["kind"], "current">;
 
 interface TimelinePointerDrag {
   state: TimelineDragState;
@@ -250,15 +250,8 @@ function formatVoice(voice: string): string {
 function populateVoiceSelect(
   select: HTMLSelectElement,
   selectedVoice: string,
-  prompt?: string,
 ): void {
   select.replaceChildren();
-  if (prompt) {
-    const option = document.createElement("option");
-    option.value = "";
-    option.textContent = prompt;
-    select.append(option);
-  }
   const groups = new Map<string, HTMLOptGroupElement>();
   for (const [id, label, group] of selectableVoiceOptions(allowExtraVoices, selectedVoice)) {
     let options = groups.get(group);
@@ -271,8 +264,7 @@ function populateVoiceSelect(
     const option = document.createElement("option");
     option.value = id;
     option.textContent = label;
-    option.selected = !prompt && id === selectedVoice;
-    option.disabled = Boolean(prompt) && id === selectedVoice;
+    option.selected = id === selectedVoice;
     options.append(option);
   }
 }
@@ -308,7 +300,6 @@ function timelineAction(
       move: "Moving...",
       archive: "Moving...",
       delete: "Deleting...",
-      clear: "Clearing...",
     };
     return pendingLabels[pending.mutation.type] ?? "Working...";
   }
@@ -357,11 +348,7 @@ function speechicleActionLabel(
   return `${expanded ? "Collapse" : "Expand"} full text for ${reference}`;
 }
 
-function statusCopy(presentation: PlaybackPresentation): {
-  label: string;
-  title?: string;
-  body?: string;
-} {
+function statusCopy(presentation: PlaybackPresentation) {
   if (presentation.state === "setup_required") {
     return {
       label: "Install incomplete",
@@ -383,23 +370,17 @@ function statusCopy(presentation: PlaybackPresentation): {
       body: "Kokoro is loading locally. This normally takes a few seconds.",
     };
   }
-  if (presentation.state === "paused") {
+  if (
+    presentation.state === "paused" ||
+    presentation.state === "clearing" ||
+    presentation.state === "playing"
+  ) {
     return {
-      label: "Paused",
-      title: formatVoice(presentation.item.voice),
-      body: presentation.item.text,
-    };
-  }
-  if (presentation.state === "clearing") {
-    return {
-      label: "Clearing",
-      title: formatVoice(presentation.item.voice),
-      body: presentation.item.text,
-    };
-  }
-  if (presentation.state === "playing") {
-    return {
-      label: "Speaking",
+      label: presentation.state === "playing"
+        ? "Speaking"
+        : presentation.state === "paused"
+          ? "Paused"
+          : "Clearing",
       title: formatVoice(presentation.item.voice),
       body: presentation.item.text,
     };
@@ -421,11 +402,6 @@ function setPlaybackExpanded(expanded: boolean): void {
   for (const element of playbackBackground) {
     element.inert = playbackExpanded;
   }
-  if (playbackCopy.dataset.expandable === "true") {
-    playbackCopy.setAttribute("aria-expanded", String(playbackExpanded));
-  } else {
-    playbackCopy.removeAttribute("aria-expanded");
-  }
 }
 
 function renderCurrentSpeechText(
@@ -433,7 +409,6 @@ function renderCurrentSpeechText(
   current: RuntimeStatus["current"],
 ): void {
   const segments = current ? currentPieceSegments(current) : null;
-  currentText.replaceChildren();
   if (!playbackExpanded) {
     currentText.textContent = segments?.current ?? fallback;
     return;
@@ -442,11 +417,14 @@ function renderCurrentSpeechText(
     currentText.textContent = fallback;
     return;
   }
-  currentText.append(document.createTextNode(segments.before));
   const active = document.createElement("mark");
   active.className = "current-piece";
   active.textContent = segments.current;
-  currentText.append(active, document.createTextNode(segments.after));
+  currentText.replaceChildren(
+    document.createTextNode(segments.before),
+    active,
+    document.createTextNode(segments.after),
+  );
   const pieceKey = `${current.id}:${current.piece}`;
   if (pieceKey !== lastFollowedPieceKey) {
     lastFollowedPieceKey = pieceKey;
@@ -538,7 +516,6 @@ function render(status: RuntimeStatus): void {
   );
   const copy = statusCopy(presentation);
   const action = playbackAction(presentation.state);
-  const showPlaybackCopy = copy.title !== undefined;
   const canCompose = presentation.state === "idle";
   if (!canCompose) {
     composerOpen = false;
@@ -549,8 +526,7 @@ function render(status: RuntimeStatus): void {
 
   statusDot.className = `status-dot state-${presentation.state}`;
   statusLabel.textContent = commandStatus.textContent || copy.label;
-  playbackCopy.classList.toggle("is-hidden", !showPlaybackCopy);
-  playbackTitle.textContent = copy.title ?? "";
+  playbackTitle.textContent = copy.title;
   currentText.classList.toggle("is-hidden", showComposer);
   speechComposer.classList.toggle("is-hidden", !showComposer);
   renderComposerControls();
@@ -594,7 +570,7 @@ function render(status: RuntimeStatus): void {
     currentText.removeAttribute("role");
     currentText.removeAttribute("aria-label");
   }
-  renderCurrentSpeechText(copy.body ?? "", followedCurrent);
+  renderCurrentSpeechText(copy.body, followedCurrent);
 
   const actionLabels: Record<PlaybackAction, string> = {
     pause: "Pause speech",
@@ -624,18 +600,15 @@ function render(status: RuntimeStatus): void {
 
   const current = presentation.item;
   metadataRow.classList.toggle("is-hidden", !current);
+  voicePill.classList.toggle("is-hidden", !current);
+  sourcePill.classList.toggle("is-hidden", !current?.source);
   if (current) {
     voiceLabel.textContent = formatVoice(current.voice);
-    voicePill.classList.remove("is-hidden");
     sourceLabel.textContent = current.source ?? "";
-    sourcePill.classList.toggle("is-hidden", !current.source);
-  } else {
-    voicePill.classList.add("is-hidden");
-    sourcePill.classList.add("is-hidden");
   }
 
   const visibleItems = visibleTimelineItems(status);
-  const activeCount = visibleItems.filter(({ kind }) => kind !== "history").length;
+  const activeCount = status.queue.length + (status.current ? 1 : 0);
   const clearPending = pendingTimelineMutation?.kind === "clear";
   const clearFailed = failedTimelineMutation?.type === "clear";
   clearQueueButton.classList.toggle("is-hidden", activeCount === 0);
@@ -655,13 +628,7 @@ function render(status: RuntimeStatus): void {
     : clearFailed
       ? "Retry clear all"
       : "Clear all";
-  const hiddenHistoryCount = Math.max(
-    0,
-    status.history_count - status.history.length,
-  );
-  const projectedHistoryTotal = hiddenHistoryCount +
-    visibleItems.filter(({ kind }) => kind === "history").length;
-  renderTimeline(visibleItems, projectedHistoryTotal);
+  renderTimeline(visibleItems, status.history_count);
 }
 
 function clearHistoryDropIndicator(): void {

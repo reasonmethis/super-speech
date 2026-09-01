@@ -587,14 +587,6 @@ body[data-state="loading"] .playback-copy {
   padding-top: 36px;
 }
 
-.section-kicker {
-  margin: 0 0 6px;
-  color: var(--accent-bright);
-  font-size: 10px;
-  font-weight: 750;
-  letter-spacing: 0.16em;
-}
-
 .playback-copy h2 {
   margin: 0;
   font-size: 25px;
@@ -757,12 +749,6 @@ body[data-state="loading"] .playback-copy {
   margin-bottom: 11px;
 }
 
-.section-kicker {
-  margin-bottom: 3px;
-  color: var(--text-muted);
-  font-size: 8px;
-}
-
 .section-heading h2 {
   margin: 0;
   font-size: 16px;
@@ -782,9 +768,7 @@ body[data-state="loading"] .playback-copy {
 }
 
 .clear-queue-button:hover {
-  border-color: var(--line);
   color: var(--text);
-  background: var(--control-bg);
 }
 
 .clear-queue-button:focus-visible {
@@ -792,11 +776,7 @@ body[data-state="loading"] .playback-copy {
   outline-offset: 1px;
 }
 
-.clear-queue-button:disabled {
-  cursor: default;
-  opacity: 0.7;
-}
-
+.clear-queue-button:disabled,
 .clear-queue-button[aria-disabled="true"] {
   cursor: default;
   opacity: 0.7;
