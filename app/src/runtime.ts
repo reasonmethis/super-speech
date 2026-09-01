@@ -1,11 +1,14 @@
-export type RuntimeState =
-  | "clearing"
-  | "loading"
-  | "playing"
-  | "paused"
-  | "idle"
-  | "setup_required"
-  | "stopped";
+const RUNTIME_STATES = [
+  "clearing",
+  "loading",
+  "playing",
+  "paused",
+  "idle",
+  "setup_required",
+  "stopped",
+] as const;
+
+export type RuntimeState = (typeof RUNTIME_STATES)[number];
 
 export const ENGINE_STATUS_VERSION = 16 as const;
 export const AGENT_MESSAGE_TEXT_MAX = 4_000;
@@ -85,15 +88,7 @@ export interface CurrentItem extends SpeechicleItem {
   elapsed_seconds: number;
 }
 
-export interface CurrentPieceSegments {
-  before: string;
-  current: string;
-  after: string;
-}
-
-export function currentPieceSegments(
-  item: CurrentItem,
-): CurrentPieceSegments | null {
+export function currentPieceSegments(item: CurrentItem) {
   if (item.piece_start === null || item.piece_end === null) {
     return null;
   }
@@ -209,44 +204,30 @@ export function playbackPresentation(
   status: EngineStatus,
   pendingPlayback: PendingPlayback | null,
 ): PlaybackPresentation {
-  const selectedItem = pendingPlayback?.item ?? null;
   if (status.state === "setup_required") {
     return { state: "setup_required", item: null };
   }
-  if (status.state === "stopped" && !selectedItem) {
+  if (pendingPlayback) {
+    return pendingPlayback;
+  }
+  if (status.state === "stopped") {
     return { state: "stopped", item: null };
   }
 
-  const activeItem = selectedItem ?? status.current;
-  if (!activeItem) {
+  if (!status.current) {
     return status.state === "loading"
       ? { state: "loading", item: null }
       : { state: "idle", item: null };
   }
-  if (pendingPlayback) {
-    return { state: pendingPlayback.state, item: pendingPlayback.item };
+  if (
+    status.state === "paused" ||
+    status.state === "clearing" ||
+    status.state === "loading"
+  ) {
+    return { state: status.state, item: status.current };
   }
-  if (status.state === "paused") {
-    return { state: "paused", item: activeItem };
-  }
-  if (status.state === "clearing") {
-    return { state: "clearing", item: activeItem };
-  }
-  if (status.state === "loading") {
-    return { state: "loading", item: activeItem };
-  }
-  return { state: "playing", item: activeItem };
+  return { state: "playing", item: status.current };
 }
-
-const RUNTIME_STATES = new Set<RuntimeState>([
-  "clearing",
-  "loading",
-  "playing",
-  "paused",
-  "idle",
-  "setup_required",
-  "stopped",
-]);
 
 function isSpeechicleItem(value: unknown): value is SpeechicleItem {
   if (!value || typeof value !== "object") {
@@ -267,13 +248,11 @@ function isCurrentItem(value: unknown): value is CurrentItem {
   if (!isSpeechicleItem(value)) {
     return false;
   }
-  const item = value as Partial<CurrentItem>;
+  const item = value as CurrentItem;
   if (
     !Number.isInteger(item.piece) ||
     !Number.isInteger(item.piece_count) ||
-    item.piece_count === undefined ||
     item.piece_count < 1 ||
-    item.piece === undefined ||
     item.piece < 0 ||
     item.piece > item.piece_count ||
     typeof item.elapsed_seconds !== "number"
@@ -285,11 +264,11 @@ function isCurrentItem(value: unknown): value is CurrentItem {
   }
   const start = item.piece_start;
   const end = item.piece_end;
-  const length = Array.from(item.text ?? "").length;
-  return Number.isInteger(start) &&
+  const length = Array.from(item.text).length;
+  return start !== null &&
+    end !== null &&
+    Number.isInteger(start) &&
     Number.isInteger(end) &&
-    start !== null && start !== undefined &&
-    end !== null && end !== undefined &&
     start >= 0 &&
     end > start &&
     end <= length;
@@ -319,7 +298,7 @@ function hasStatusCore(value: Record<string, unknown>): boolean {
     : undefined;
   return (
     typeof value.state === "string" &&
-    RUNTIME_STATES.has(value.state as RuntimeState) &&
+    RUNTIME_STATES.includes(value.state as RuntimeState) &&
     typeof value.updated_at === "number" &&
     Number.isInteger(value.timeline_revision) &&
     (value.timeline_revision as number) >= 0 &&

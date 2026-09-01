@@ -85,11 +85,12 @@ test("ignores status until the new engine has published its process ID", () => {
   assert.equal(statusForEngineProcess(status, undefined), null);
 });
 
-test("does not treat a stale heartbeat as a live engine", () => {
+test("requires a live process and a fresh heartbeat or status", () => {
   const process = { updated_at: 100, engine_pid: 41 };
   assert.equal(engineProcessIsLive(process, true, () => false, 101), false);
   assert.equal(engineProcessIsLive(process, false, () => true, 101), true);
   assert.equal(engineProcessIsLive(process, true, () => true, 1_000), true);
+  assert.equal(engineProcessIsLive(process, false, () => true, 400), false);
 });
 
 test("restarts an owned engine that hangs after becoming ready", () => {
@@ -387,18 +388,12 @@ test("makes active playback states impossible without active speech", () => {
     voice: "af_heart",
   };
 
-  assert.deepEqual(
-    playbackPresentation({ ...status, state: "idle" }, null),
-    { state: "idle", item: null },
-  );
-  assert.deepEqual(
-    playbackPresentation({ ...status, state: "paused" }, null),
-    { state: "idle", item: null },
-  );
-  assert.deepEqual(
-    playbackPresentation({ ...status, state: "playing" }, null),
-    { state: "idle", item: null },
-  );
+  for (const state of ["idle", "clearing", "paused", "playing"] as const) {
+    assert.deepEqual(
+      playbackPresentation({ ...status, state }, null),
+      { state: "idle", item: null },
+    );
+  }
   assert.deepEqual(
     playbackPresentation({
       ...status,
@@ -410,45 +405,26 @@ test("makes active playback states impossible without active speech", () => {
   );
 });
 
-test("an explicit selection starts playing even from a stale paused snapshot", () => {
+test("pending Play and Clear override stale paused and stopped snapshots", () => {
   const selected = {
     id: speechicleId(7),
     text: "Selected",
     voice: "bm_fable",
   };
 
-  assert.deepEqual(
-    playbackPresentation({ ...status, state: "paused" }, { item: selected, state: "playing" }),
-    { state: "playing", item: selected },
-  );
-});
-
-test("a pending Clear presents Clearing before the engine result", () => {
-  const current = {
-    id: speechicleId(7),
-    text: "Current",
-    voice: "af_heart",
-  };
-
-  assert.deepEqual(
-    playbackPresentation(
-      { ...status, state: "paused" },
-      { item: current, state: "clearing" },
-    ),
-    { state: "clearing", item: current },
-  );
-});
-
-test("presents a selection immediately while a stopped engine restarts", () => {
-  const selected = {
-    id: speechicleId(7),
-    text: "Selected",
-    voice: "bm_fable",
-  };
-  assert.deepEqual(
-    playbackPresentation(status, { item: selected, state: "playing" }),
-    { state: "playing", item: selected },
-  );
+  for (
+    const [snapshotState, pendingState] of [
+      ["paused", "playing"],
+      ["paused", "clearing"],
+      ["stopped", "playing"],
+    ] as const
+  ) {
+    const pending = { item: selected, state: pendingState };
+    assert.deepEqual(
+      playbackPresentation({ ...status, state: snapshotState }, pending),
+      pending,
+    );
+  }
 });
 
 test("keeps newest waiting speech above current speech and history", () => {
