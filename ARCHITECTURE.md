@@ -151,10 +151,24 @@ trusting the previous snapshot.
 
 ## Commands and saved timeline changes
 
+Headless callers send commands through the engine CLI. Electron sends desktop
+commands to an authenticated loopback endpoint owned by the already-running
+engine. This avoids starting a Python process for each click while keeping
+command behavior in Python. The endpoint file includes a random token and the
+owning process ID, so Electron rejects stale endpoints after an engine restart.
+
 Pause and Resume use an ordered `PAUSE` marker, so a paused timeline stays
 paused across an engine restart. Skip, Stop, and Interrupt name the engine
 process they belong to, so an old destructive command cannot affect a
 replacement process.
+
+Pause and Resume return only after the live audio object acknowledges the
+applied state. A single ordered background writer then saves the compatibility
+marker, so disk latency is not part of the click-to-audio path. The renderer
+does not predict the result. Clear all silences the audio loop before its saved
+timeline transaction begins, shows Clearing while that transaction is pending,
+and shows Ready only after the engine confirms the commit. The private pause
+step used by Clear is not published as a user action.
 
 Enqueue from the desktop, Play, move, archive, delete, voice change, and clear
 use one kind of saved change file. Requests are stored on disk and handled one
@@ -240,6 +254,8 @@ checked status and sends commands through Electron main.
   section order, allocation, locks, upgrade plans, and crash recovery
 - `skills/super-speech/engine/file_lock.py` provides the small cross-process lock
   used by the engine and timeline storage
+- `skills/super-speech/engine/engine_control.py` owns the authenticated local
+  endpoint and audio-state acknowledgement
 - `skills/super-speech/engine/super_speech_engine.py` owns synthesis, playback,
   commands, engine lifecycle, and status
 - `skills/super-speech/engine/pauseable_audio.py` owns sample-accurate pause and
@@ -254,6 +270,8 @@ checked status and sends commands through Electron main.
   integration, and calls from the renderer
 - `app/electron/agent-inbox.ts` validates and appends user messages without
   accepting a path from the renderer
+- `app/electron/engine-control.ts` validates the endpoint and sends desktop
+  commands to the running engine
 - `app/electron/atomic-file.ts` safely replaces the desktop install manifest
 - `app/electron/managed-skill.ts` preserves or updates app-managed agent skills
 - `app/electron/tray-menu.ts` maps engine state to the tray playback action

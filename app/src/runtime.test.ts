@@ -21,10 +21,8 @@ import {
   runtimeStatusForMutationSnapshot,
   runtimeStateForSnapshot,
   selectableVoiceOptions,
-  statusAfterClearRequest,
   statusAfterTransientRead,
   statusForEngineProcess,
-  statusAfterPauseCommand,
   timelineItems,
   type EngineStatus,
   type RuntimeStatus,
@@ -136,14 +134,7 @@ test("a stopped engine cannot be presented as active because work is queued", ()
 });
 
 test("a supervised restart stays loading before its replacement process is live", () => {
-  const recovering: RuntimeStatus = {
-    ...status,
-    state: "loading",
-    engine_running: false,
-    installed: true,
-  };
   assert.equal(runtimeStateForSnapshot(true, false, "loading"), "loading");
-  assert.deepEqual(statusAfterPauseCommand(recovering, false), recovering);
 });
 
 test("an incompatible external engine cannot leave the app loading forever", () => {
@@ -153,7 +144,7 @@ test("an incompatible external engine cannot leave the app loading forever", () 
 });
 
 test("accepts a complete current-version status", () => {
-  assert.equal(ENGINE_STATUS_VERSION, 14);
+  assert.equal(ENGINE_STATUS_VERSION, 15);
   assert.equal(parseEngineStatus(status), status);
 });
 
@@ -416,95 +407,6 @@ test("makes active playback states impossible without active speech", () => {
       queue: [waiting],
     }, null),
     { state: "idle", item: null },
-  );
-});
-
-test("reflects pause commands immediately without creating an empty paused state", () => {
-  const waiting = {
-    id: speechicleId(2),
-    text: "Waiting",
-    voice: "af_heart",
-  };
-  const active = {
-    ...status,
-    state: "playing" as const,
-    engine_running: true,
-    installed: true,
-    current: {
-      ...waiting,
-      id: speechicleId(1),
-      text: "Current",
-      piece: 0,
-      piece_count: 1,
-      piece_start: null,
-      piece_end: null,
-      elapsed_seconds: 0,
-    },
-    queue_count: 1,
-    queue: [waiting],
-  };
-
-  assert.equal(statusAfterPauseCommand(active, true).state, "paused");
-  assert.equal(statusAfterPauseCommand({ ...active, current: null, queue_count: 0, queue: [] }, true).state, "idle");
-  assert.equal(statusAfterPauseCommand({ ...active, state: "loading" }, true).state, "loading");
-  const stopped = statusAfterPauseCommand({ ...active, engine_running: false }, true);
-  assert.equal(stopped.state, "stopped");
-  assert.equal(stopped.current?.id, active.current.id);
-  assert.equal(
-    statusAfterPauseCommand({ ...active, state: "loading", engine_running: false }, true).state,
-    "loading",
-  );
-});
-
-test("projects Clear all directly to one valid idle timeline", () => {
-  const current = {
-    id: speechicleId(1),
-    text: "Current",
-    voice: "af_heart",
-    piece: 1,
-    piece_count: 1,
-    piece_start: 0,
-    piece_end: 7,
-    elapsed_seconds: 0,
-  };
-  const firstWaiting = { id: speechicleId(2), text: "First", voice: "af_heart" };
-  const newestWaiting = { id: speechicleId(3), text: "Newest", voice: "af_heart" };
-  const earlier = { id: speechicleId(4), text: "Earlier", voice: "af_heart" };
-  const active: RuntimeStatus = {
-    ...status,
-    state: "playing",
-    engine_running: true,
-    installed: true,
-    current,
-    queue_count: 2,
-    queue: [firstWaiting, newestWaiting],
-    history_count: 8,
-    history: [earlier],
-  };
-
-  const cleared = statusAfterClearRequest(active);
-
-  assert.equal(cleared.state, "idle");
-  assert.equal(cleared.current, null);
-  assert.equal(cleared.queue_count, 0);
-  assert.deepEqual(cleared.queue, []);
-  assert.equal(cleared.history_count, 11);
-  assert.deepEqual(
-    cleared.history.map(({ id }) => id),
-    [newestWaiting.id, firstWaiting.id, current.id, earlier.id],
-  );
-  assert.equal(active.state, "playing");
-  assert.equal(active.current, current);
-  assert.equal(statusAfterClearRequest({ ...active, state: "loading" }).state, "loading");
-  assert.equal(
-    statusAfterClearRequest({
-      ...active,
-      state: "paused",
-      current: null,
-      queue_count: 0,
-      queue: [],
-    }).state,
-    "idle",
   );
 });
 

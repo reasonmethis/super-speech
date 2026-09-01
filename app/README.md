@@ -18,14 +18,16 @@ otherwise.
   engine status
 - `electron/atomic-file.ts` replaces the install manifest without exposing a
   half-written file
+- `electron/engine-control.ts` sends authenticated commands to the running
+  engine and validates playback acknowledgements
 - `electron/managed-skill.ts` owns agent-skill hashing and safe updates
 - `electron/tray-menu.ts` maps engine state to the tray playback action
 - `electron/preload.ts` exposes a small approved API to the window
 - `src/runtime.ts` checks engine status and mutation results
 - `src/main.ts` renders the window and handles controls, menus, and gestures
 - `src/timeline-drag-model.ts` contains the drag state machine
-- `src/*.test.ts` and `electron/*.test.ts` cover status, drag, files, and inbox
-  messages without audio
+- `src/*.test.ts` and `electron/*.test.ts` cover status, drag, files, the engine
+  control boundary, and inbox messages without audio
 - `scripts/smoke_engine.py` checks the packaged engine with silent audio
 - `scripts/smoke_drag.mjs` drives real Electron pointer input against an
   isolated silent runtime

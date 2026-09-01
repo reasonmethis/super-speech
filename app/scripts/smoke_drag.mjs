@@ -33,6 +33,8 @@ const environment = {
   SUPER_SPEECH_SKIP_SKILL_INSTALL: "1",
 };
 const archivedVoiceIds = ["af_nicole", "am_adam", "am_eric", "am_fenrir", "am_puck"];
+const controlLatencyLimitMs = 200;
+const clearCommitLimitMs = 3_000;
 
 const windowIcon = readFileSync(path.join(appDirectory, "dist", "icon.svg"), "utf8");
 assert(!windowIcon.includes("<filter"), "The in-app icon must not contain clipped shadows");
@@ -65,7 +67,7 @@ function status() {
     assert.match(row.id, /^sp_[0-9a-f]{32}$/, "Status leaked an invalid Speechicle ID");
     assert(!Object.hasOwn(row, "filename"), "Status leaked an internal filename");
   }
-  assert.equal(snapshot.version, 14, "Pointer smoke requires the current status schema");
+  assert.equal(snapshot.version, 15, "Pointer smoke requires the current status schema");
   assert(Number.isInteger(snapshot.timeline_revision));
   assert(snapshot.timeline_revision >= 0);
   return snapshot;
@@ -144,6 +146,7 @@ async function clickPlaybackButtonNearEdge(page) {
     "Pressing the playback button must not move its hit target away from the pointer",
   );
   await page.mouse.up();
+  return Date.now();
 }
 
 async function assertDragClean(page) {
@@ -627,12 +630,7 @@ try {
   assert(pausedPlayback.title && pausedPlayback.text && pausedPlayback.voice);
   assert.equal(pausedPlayback.accent, "#4153be");
   assert(pausedPlayback.icon.width >= 47, "The paused symbol must fill more of the main button");
-  await clickPlaybackButtonNearEdge(page);
-  assert.equal(
-    await page.locator("body").getAttribute("data-state"),
-    "playing",
-    "Resume must update the presentation in the click handler",
-  );
+  const resumeStartedAt = await clickPlaybackButtonNearEdge(page);
   await waitFor(
     () => status().state === "playing",
     "The silent fixture did not resume",
@@ -640,6 +638,11 @@ try {
   await waitFor(
     async () => await page.locator("body").getAttribute("data-state") === "playing",
     "The Electron window did not render resumed playback",
+  );
+  const resumeLatencyMs = Date.now() - resumeStartedAt;
+  assert(
+    resumeLatencyMs <= controlLatencyLimitMs,
+    `Resume took ${resumeLatencyMs} ms to reach the running engine`,
   );
   const playingPlayback = await playbackSnapshot(page);
   assert.equal(playingPlayback.accent, "#009a91");
@@ -659,12 +662,7 @@ try {
   });
   assert.deepEqual(center(playingPlayback.button), center(playingPlayback.ring));
   assert.deepEqual(center(pausedPlayback.button), center(pausedPlayback.ring));
-  await clickPlaybackButtonNearEdge(page);
-  assert.equal(
-    await page.locator("body").getAttribute("data-state"),
-    "paused",
-    "Pause must update the presentation in the click handler",
-  );
+  const pauseStartedAt = await clickPlaybackButtonNearEdge(page);
   await waitFor(
     () => status().state === "paused",
     "The silent fixture did not pause again",
@@ -672,6 +670,11 @@ try {
   await waitFor(
     async () => await page.locator("body").getAttribute("data-state") === "paused",
     "The Electron window did not return to the paused layout",
+  );
+  const pauseLatencyMs = Date.now() - pauseStartedAt;
+  assert(
+    pauseLatencyMs <= controlLatencyLimitMs,
+    `Pause took ${pauseLatencyMs} ms to stop silent playback`,
   );
   assert(
     await page.locator(".ring-one").evaluate((ring) =>
@@ -1581,21 +1584,25 @@ try {
       attributeFilter: ["data-state"],
     });
   });
-  await clearButton.click();
+  const clearStartedAt = await clearButton.evaluate((button) => {
+    const startedAt = Date.now();
+    button.click();
+    return startedAt;
+  });
   assert.equal(
-    await page.locator("body").getAttribute("data-state"),
-    "idle",
-    "Clear all must present Ready in the click handler",
-  );
-  assert.equal(
-    await page.locator(".speechicle-item.is-current, .speechicle-item.is-waiting").count(),
-    0,
-    "Clear all must not present Ready with active Speechicles",
+    await page.locator("#status-label").textContent(),
+    "Clearing speech",
+    "Clear all must present its real in-progress state",
   );
   await waitFor(
     () => status().current === null && status().queue_count === 0 && status().state === "idle",
     "Clear all did not archive Current and Waiting speech",
     30_000,
+  );
+  const clearLatencyMs = Date.now() - clearStartedAt;
+  assert(
+    clearLatencyMs <= clearCommitLimitMs,
+    `Clear all took ${clearLatencyMs} ms to commit its History transaction`,
   );
   assert(clearIds.every((id) => status().history.some((item) => item.id === id)));
   const clearPresentationStates = await page.evaluate(() => {
@@ -1609,6 +1616,11 @@ try {
   await waitFor(
     async () => await page.locator("body").getAttribute("data-state") === "idle",
     "The renderer did not become Ready after Clear all",
+  );
+  assert.equal(
+    await page.locator(".speechicle-item.is-current, .speechicle-item.is-waiting").count(),
+    0,
+    "Ready must not contain active Speechicles",
   );
   assert.equal(await page.locator("#playback-copy").getAttribute("role"), null);
   assert.equal(await page.locator("#playback-copy").getAttribute("aria-label"), null);

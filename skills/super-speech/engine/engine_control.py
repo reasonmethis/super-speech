@@ -1,0 +1,251 @@
+from __future__ import annotations
+
+import hmac
+import json
+import os
+import secrets
+import threading
+import time
+from collections.abc import Callable
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Literal, Protocol
+
+CONTROL_ENDPOINT_FILENAME = "control.json"
+CONTROL_PROTOCOL_VERSION = 1
+MAX_REQUEST_BYTES = 16 * 1024 * 1024
+
+ControlHandler = Callable[[dict[str, object]], object]
+PlaybackState = Literal["idle", "paused", "playing"]
+
+
+class PauseablePlayback(Protocol):
+    def set_paused(self, paused: bool) -> bool: ...
+
+
+class PlaybackStateTracker:
+    """Let control requests wait for the audio loop's applied state."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._state: PlaybackState = "idle"
+
+    def set(self, state: PlaybackState) -> None:
+        with self._condition:
+            if self._state == state:
+                return
+            self._state = state
+            self._condition.notify_all()
+
+    def wait_for(self, states: set[PlaybackState], timeout: float) -> PlaybackState:
+        deadline = time.monotonic() + timeout
+        with self._condition:
+            while self._state not in states:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("engine did not acknowledge the playback command")
+                self._condition.wait(remaining)
+            return self._state
+
+
+class LivePlaybackControl:
+    """Apply desktop controls to live audio before persisting their markers."""
+
+    def __init__(self, read_persisted_pause: Callable[[], bool]) -> None:
+        self.state = PlaybackStateTracker()
+        self._read_persisted_pause = read_persisted_pause
+        self._lock = threading.Lock()
+        self._playback: PauseablePlayback | None = None
+        self._command: tuple[int, bool] | None = None
+        self._command_sequence = 0
+
+    def pause_requested(self) -> bool:
+        with self._lock:
+            if self._command is not None:
+                return self._command[1]
+        return self._read_persisted_pause()
+
+    def begin_command(self, paused: bool) -> int:
+        """Apply a command to live audio and return its ownership token."""
+        with self._lock:
+            self._command_sequence += 1
+            sequence = self._command_sequence
+            self._command = (sequence, paused)
+            self._set_playback_paused(paused)
+            return sequence
+
+    def end_command(self, sequence: int) -> None:
+        """Return control to the marker if this command still owns playback."""
+        with self._lock:
+            if self._command is None or self._command[0] != sequence:
+                return
+            self._command = None
+            self._set_playback_paused(self._read_persisted_pause())
+
+    def attach(self, playback: PauseablePlayback) -> bool:
+        """Expose one audio stream to live controls and apply current intent."""
+        with self._lock:
+            self._playback = playback
+            paused = (
+                self._command[1]
+                if self._command is not None
+                else self._read_persisted_pause()
+            )
+            playback.set_paused(paused)
+            return paused
+
+    def detach(self, playback: PauseablePlayback) -> None:
+        with self._lock:
+            if self._playback is playback:
+                self._playback = None
+                self.state.set("idle")
+
+    def _set_playback_paused(self, paused: bool) -> None:
+        if self._playback is not None:
+            self._playback.set_paused(paused)
+            self.state.set("paused" if paused else "playing")
+
+
+class _ControlHttpServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    token: str
+    control_handler: ControlHandler
+
+
+class _ControlRequestHandler(BaseHTTPRequestHandler):
+    server: _ControlHttpServer
+
+    def do_POST(self) -> None:
+        if self.path != "/v1/control":
+            self._send(404, {"error": "unknown engine control endpoint"})
+            return
+        supplied_token = self.headers.get("Authorization", "").removeprefix(
+            "Bearer "
+        )
+        if not hmac.compare_digest(supplied_token, self.server.token):
+            self._send(401, {"error": "invalid engine control token"})
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            content_length = 0
+        if content_length <= 0 or content_length > MAX_REQUEST_BYTES:
+            self._send(400, {"error": "invalid engine control request size"})
+            return
+        try:
+            payload = json.loads(self.rfile.read(content_length))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._send(400, {"error": "invalid engine control JSON"})
+            return
+        if not isinstance(payload, dict):
+            self._send(400, {"error": "invalid engine control request"})
+            return
+        try:
+            result = self.server.control_handler(payload)
+        except ValueError as error:
+            self._send(400, {"error": str(error)})
+            return
+        except RuntimeError as error:
+            self._send(409, {"error": str(error)})
+            return
+        self._send(200, {"result": result})
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+    def _send(self, status: int, payload: dict[str, object]) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class EngineControlServer:
+    """Expose one authenticated control endpoint for the running engine."""
+
+    def __init__(
+        self,
+        base: Path,
+        engine_pid: int,
+        control_handler: ControlHandler,
+    ) -> None:
+        self.endpoint_path = base / CONTROL_ENDPOINT_FILENAME
+        self.engine_pid = engine_pid
+        self.control_handler = control_handler
+        self._server: _ControlHttpServer | None = None
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._server is not None:
+            raise RuntimeError("engine control server is already running")
+        token = secrets.token_hex(32)
+        server = _ControlHttpServer(("127.0.0.1", 0), _ControlRequestHandler)
+        server.token = token
+        server.control_handler = self.control_handler
+        thread = threading.Thread(
+            target=server.serve_forever,
+            kwargs={"poll_interval": 0.02},
+            name="super-speech-control",
+            daemon=True,
+        )
+        thread.start()
+        try:
+            self._publish_endpoint(server.server_port, token)
+        except Exception:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=1)
+            raise
+        self._server = server
+        self._thread = thread
+
+    def stop(self) -> None:
+        server = self._server
+        thread = self._thread
+        if server is None:
+            return
+        self._remove_owned_endpoint(server.token)
+        server.shutdown()
+        server.server_close()
+        if thread is not None:
+            thread.join(timeout=1)
+        self._server = None
+        self._thread = None
+
+    def _publish_endpoint(self, port: int, token: str) -> None:
+        self.endpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": CONTROL_PROTOCOL_VERSION,
+            "engine_pid": self.engine_pid,
+            "port": port,
+            "token": token,
+        }
+        temporary = self.endpoint_path.with_name(
+            f".{self.endpoint_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        try:
+            temporary.write_text(
+                json.dumps(payload, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            if os.name != "nt":
+                temporary.chmod(0o600)
+            os.replace(temporary, self.endpoint_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _remove_owned_endpoint(self, token: str) -> None:
+        try:
+            payload = json.loads(self.endpoint_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return
+        if (
+            isinstance(payload, dict)
+            and payload.get("engine_pid") == self.engine_pid
+            and payload.get("token") == token
+        ):
+            self.endpoint_path.unlink(missing_ok=True)

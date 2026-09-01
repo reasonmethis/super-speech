@@ -6,7 +6,7 @@ export type RuntimeState =
   | "setup_required"
   | "stopped";
 
-export const ENGINE_STATUS_VERSION = 14 as const;
+export const ENGINE_STATUS_VERSION = 15 as const;
 export const AGENT_MESSAGE_TEXT_MAX = 4_000;
 
 const SPEECHICLE_ID = /^sp_[0-9a-f]{32}$/;
@@ -185,41 +185,6 @@ export function runtimeStateForSnapshot(
     return "stopped";
   }
   return engineState ?? "loading";
-}
-
-export function statusAfterPauseCommand(
-  status: RuntimeStatus,
-  paused: boolean,
-): RuntimeStatus {
-  if (["loading", "setup_required", "stopped"].includes(status.state)) {
-    return status;
-  }
-  if (!status.engine_running) {
-    return { ...status, state: "stopped" };
-  }
-  const hasWork = status.current !== null;
-  return {
-    ...status,
-    state: hasWork ? (paused ? "paused" : "playing") : "idle",
-  };
-}
-
-export function statusAfterClearRequest(status: RuntimeStatus): RuntimeStatus {
-  const clearedItems = [
-    ...[...status.queue].reverse(),
-    ...(status.current ? [status.current] : []),
-  ];
-  return {
-    ...status,
-    state: ["playing", "paused", "idle"].includes(status.state)
-      ? "idle"
-      : status.state,
-    current: null,
-    queue_count: 0,
-    queue: [],
-    history_count: status.history_count + clearedItems.length,
-    history: [...clearedItems, ...status.history],
-  };
 }
 
 export type TimelineItemKind = "current" | "waiting" | "history";

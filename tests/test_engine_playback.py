@@ -2217,6 +2217,8 @@ def test_clear_silences_playback_before_archiving_finishes(
         request_id = request_mutation(engine, "clear")
         assert clear_started.wait(1)
         playback = playbacks[0]
+        status_during_clear = json.loads(engine.STATUS.read_text(encoding="utf-8"))
+        assert status_during_clear["state"] == "playing"
         position = playback.position
         output = np.empty((4, 1), dtype=np.float32)
         playback.callback(output, 4, None, None)

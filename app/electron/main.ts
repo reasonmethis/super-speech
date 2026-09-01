@@ -38,7 +38,6 @@ import {
   runtimeStateForSnapshot,
   runtimeStatusForMutationSnapshot,
   statusAfterTransientRead,
-  statusAfterPauseCommand,
   statusForEngineProcess,
   type EngineStatus,
   type EngineProcessStatus,
@@ -49,6 +48,7 @@ import {
 } from "../src/runtime";
 import { appendAgentInboxMessage } from "./agent-inbox";
 import { writeTextAtomically } from "./atomic-file";
+import { parsePlaybackControlAck, runEngineControl } from "./engine-control";
 import {
   MANAGED_SKILL_HASH_KIND,
   managedSkillHashForTarget,
@@ -301,7 +301,7 @@ function getStatus(): RuntimeStatus {
     history_count: timeline?.history_count ?? 0,
     history: timeline?.history ?? [],
   };
-  return statusAfterPauseCommand(status, existsSync(path.join(base, "PAUSE")));
+  return status;
 }
 
 function runEngineCommand(...arguments_: string[]): Promise<string> {
@@ -344,11 +344,22 @@ function runtimeMutationResult(
   result: TimelineMutationResult,
 ): TimelineMutationResult<RuntimeStatus> {
   const runtime = getStatus();
-  const snapshot = statusAfterPauseCommand(
-    runtimeStatusForMutationSnapshot(result.snapshot, runtime),
-    existsSync(path.join(runtimeDir(), "PAUSE")),
-  );
+  const snapshot = runtimeStatusForMutationSnapshot(result.snapshot, runtime);
   return { ...result, snapshot };
+}
+
+async function controlEngine(payload: object): Promise<{
+  enginePid: number;
+  result: unknown;
+}> {
+  const status = getStatus();
+  if (!status.engine_running || status.engine_pid === null) {
+    throw new Error("The Super Speech engine is not running");
+  }
+  return {
+    enginePid: status.engine_pid,
+    result: await runEngineControl(runtimeDir(), status.engine_pid, payload),
+  };
 }
 
 async function mutateTimeline(
@@ -358,13 +369,7 @@ async function mutateTimeline(
   if (!mutation) {
     throw new Error("Invalid timeline mutation");
   }
-  const output = await runEngineCommand("mutate", JSON.stringify(mutation));
-  let value: unknown;
-  try {
-    value = JSON.parse(output);
-  } catch {
-    throw new Error("Engine protocol error: timeline mutation returned invalid JSON");
-  }
+  const { result: value } = await controlEngine({ command: "mutate", mutation });
   const result = parseTimelineMutationResult(value);
   if (!result) {
     throw new Error("Engine protocol error: incomplete timeline mutation result");
@@ -804,8 +809,26 @@ function runSmokeTest(): void {
 }
 
 async function setPaused(paused: boolean): Promise<RuntimeStatus> {
-  await runEngineCommand(paused ? "pause" : "resume");
-  const status = statusAfterPauseCommand(getStatus(), paused);
+  const { enginePid, result } = await controlEngine({
+    command: paused ? "pause" : "resume",
+  });
+  const ack = parsePlaybackControlAck(result, enginePid);
+  if (!ack) {
+    throw new Error("Engine protocol error: playback command returned invalid acknowledgement");
+  }
+  const runtime = getStatus();
+  if (runtime.engine_pid !== enginePid) {
+    throw new Error("The Super Speech engine restarted during the playback command");
+  }
+  const status: RuntimeStatus = {
+    ...runtime,
+    state: runtime.current ? ack.state : "idle",
+    updated_at: Math.max(runtime.updated_at, ack.updated_at),
+  };
+  const expectedStates = paused ? ["paused", "idle"] : ["playing", "idle"];
+  if (!expectedStates.includes(status.state)) {
+    throw new Error("The engine did not enter the requested playback state");
+  }
   refreshTrayMenu(status);
   return status;
 }

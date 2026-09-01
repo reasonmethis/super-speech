@@ -14,10 +14,11 @@ Pieces in one Speechicle are prepared and played in order. If the next piece is
 not ready, playback waits at that sentence boundary. The configured gap applies
 only before the first piece.
 
-The CLI is the public control surface. It owns daemon startup and playback
-commands so desktop and headless installations use identical behavior. The
-first Speechicle in Queue is Current. Signal files in BASE are the engine's
-private process protocol:
+The engine owns every playback and timeline command. Headless callers use the
+CLI. The desktop uses the running engine's authenticated local control endpoint
+so it does not start a Python process for each click. Both paths call the same
+command functions. The first Speechicle in Queue is Current. Signal files in
+BASE are the engine's private process protocol:
   PAUSE      - pause immediately; keep the current sample position until removed
   STOP       - finish Current if playback began, or exit before it starts
   INTERRUPT  - stop playback immediately and exit
@@ -47,11 +48,13 @@ import sys
 import threading
 import time
 import urllib.request
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NamedTuple, assert_never
 
+from engine_control import EngineControlServer, LivePlaybackControl
 from file_lock import InterprocessFileLock
 from inbox_listener import listen_inbox
 
@@ -143,11 +146,50 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
-ENGINE_VERSION = "0.7.2"
-STATUS_VERSION = 14
+ENGINE_VERSION = "0.7.3"
+STATUS_VERSION = 15
 STARTUP_TIMEOUT = 120.0
+CONTROL_ACK_TIMEOUT = 2.0
 
 timeline = TimelineStorage(TIMELINE_PATHS, DEFAULT_VOICE)
+playback_control = LivePlaybackControl(lambda: PAUSE.exists())
+_playback_marker_executor: ThreadPoolExecutor | None = None
+
+
+def _persist_playback_command(command_sequence: int, paused: bool) -> None:
+    if paused:
+        publish_ordered_marker(PAUSE)
+    else:
+        resume()
+    playback_control.end_command(command_sequence)
+
+
+def _report_playback_persistence(future: Future[None]) -> None:
+    try:
+        future.result()
+    except Exception as error:
+        log(f"could not persist live playback command: {error}")
+
+
+def _schedule_playback_persistence(command_sequence: int, paused: bool) -> None:
+    executor = _playback_marker_executor
+    if executor is None:
+        try:
+            _persist_playback_command(command_sequence, paused)
+        except Exception:
+            playback_control.end_command(command_sequence)
+            raise
+        return
+    try:
+        future = executor.submit(
+            _persist_playback_command,
+            command_sequence,
+            paused,
+        )
+    except RuntimeError:
+        playback_control.end_command(command_sequence)
+        raise
+    future.add_done_callback(_report_playback_persistence)
 
 
 class EngineInstanceLock(InterprocessFileLock):
@@ -1310,6 +1352,67 @@ def wait_for_mutation_result(
     return payload
 
 
+def execute_mutation(mutation_payload: object) -> dict[str, object]:
+    """Submit one desktop mutation and return its authoritative result."""
+    request_id = secrets.token_hex(12)
+    request = parse_cli_mutation(mutation_payload, request_id)
+    previous_snapshot = _read_authoritative_status()
+    request_mutation(request)
+    try:
+        return wait_for_mutation_result(request_id)
+    except MutationOutcomeUnconfirmed as error:
+        try:
+            snapshot = _read_authoritative_status()
+        except RuntimeError:
+            snapshot = previous_snapshot
+        return _mutation_result_payload(
+            request_id,
+            "unconfirmed",
+            snapshot,
+            error=str(error),
+        )
+
+
+def playback_control_ack(paused: bool) -> dict[str, object]:
+    """Return a compact acknowledgement after the audio loop applies a command."""
+    applied = playback_control.state.wait_for(
+        {"paused", "idle"} if paused else {"playing", "idle"},
+        CONTROL_ACK_TIMEOUT,
+    )
+    snapshot = _read_authoritative_status()
+    has_work = snapshot.get("current") is not None
+    return {
+        "version": 1,
+        "engine_pid": os.getpid(),
+        "state": ("paused" if paused else "playing") if has_work else "idle",
+        "updated_at": time.time(),
+        "audio_state": applied,
+    }
+
+
+def execute_control_request(payload: dict[str, object]) -> object:
+    """Apply one request received by the running engine control server."""
+    command = payload.get("command")
+    if command == "pause" and set(payload) == {"command"}:
+        command_sequence = playback_control.begin_command(True)
+        _schedule_playback_persistence(command_sequence, True)
+        return playback_control_ack(True)
+    if command == "resume" and set(payload) == {"command"}:
+        command_sequence = playback_control.begin_command(False)
+        _schedule_playback_persistence(command_sequence, False)
+        return playback_control_ack(False)
+    if command == "mutate" and set(payload) == {"command", "mutation"}:
+        mutation = payload["mutation"]
+        is_clear = isinstance(mutation, dict) and mutation.get("type") == "clear"
+        command_sequence = playback_control.begin_command(True) if is_clear else None
+        try:
+            return execute_mutation(mutation)
+        finally:
+            if command_sequence is not None:
+                playback_control.end_command(command_sequence)
+    raise ValueError("invalid engine control request")
+
+
 def _read_authoritative_status(timeout: float = 1.0) -> dict[str, object]:
     """Read the latest complete status without consuming its shared file."""
     deadline = time.monotonic() + timeout
@@ -1825,7 +1928,7 @@ def publish_status(
     if playback_state not in {"loading", "setup_required", "stopped"}:
         has_work = current is not None
         playback_state = (
-            "paused" if has_work and PAUSE.exists()
+            "paused" if has_work and playback_control.pause_requested()
             else "playing" if has_work
             else "idle"
         )
@@ -2224,8 +2327,14 @@ def process_mutation_requests(
                 invalidate_held_chunk = invalidate_held_chunk or play_effect == "select"
                 result_id = request.id
             elif isinstance(request, ClearMutation):
-                if not do_clear(buf, st):
-                    raise MutationOutcomeUnconfirmed("clear result was unconfirmed")
+                clear_sequence = playback_control.begin_command(True)
+                try:
+                    if not do_clear(buf, st):
+                        raise MutationOutcomeUnconfirmed(
+                            "clear result was unconfirmed"
+                        )
+                finally:
+                    playback_control.end_command(clear_sequence)
                 effect = "clear"
                 invalidate_held_chunk = True
             elif isinstance(request, MoveMutation):
@@ -2523,7 +2632,7 @@ def gap_wait(seconds: float, buf: "queue.Queue", st: State) -> str | None:
         if consume_control(SKIP):
             return "skip"
         now = time.monotonic()
-        if PAUSE.exists():
+        if playback_control.pause_requested():
             publish_status("paused", st)
         else:
             remaining -= now - last_tick
@@ -2545,7 +2654,7 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
         return "done"
     out = np.zeros(len(audio), dtype=getattr(audio, "dtype", "float32")) if SILENT else audio
     playback = PauseableAudio(out, sd.CallbackStop)
-    playback.set_paused(PAUSE.exists())
+    paused = playback_control.attach(playback)
     t0 = time.time()
     stream = sd.OutputStream(
         samplerate=sr,
@@ -2556,8 +2665,9 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
         finished_callback=playback.mark_done,
     )
     stream.start()
+    playback_control.state.set("paused" if paused else "playing")
     publish_status(
-        "paused" if PAUSE.exists() else "playing",
+        "paused" if paused else "playing",
         st,
         playback=playback,
         sample_rate=sr,
@@ -2574,16 +2684,9 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
             if st.stop.is_set():
                 stream.abort()
                 return "fatal"
-            paused = PAUSE.exists()
-            if playback.set_paused(paused):
-                log(f"{'PAUSE' if paused else 'RESUME'} {path.name}")
-                publish_status(
-                    "paused" if paused else "playing",
-                    st,
-                    playback=playback,
-                    sample_rate=sr,
-                    force=True,
-                )
+            paused = playback_control.pause_requested()
+            playback_state_changed = playback.set_paused(paused)
+            playback_control.state.set("paused" if paused else "playing")
             if consume_control(INTERRUPT):
                 stream.abort()
                 reject_pending_requests(
@@ -2598,6 +2701,15 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
             if mutation_effect == "clear":
                 stream.abort()
                 return "clear"
+            if playback_state_changed:
+                log(f"{'PAUSE' if paused else 'RESUME'} {path.name}")
+                publish_status(
+                    "paused" if paused else "playing",
+                    st,
+                    playback=playback,
+                    sample_rate=sr,
+                    force=True,
+                )
             if not st.saw_stop and ordered_marker_requested(STOP):
                 st.saw_stop = True
             if st.saw_stop:
@@ -2629,6 +2741,7 @@ def play_one(sd, np, path: Path, audio, sr, kind: str, buf: "queue.Queue", st: S
         if stream.active:
             stream.abort()
         stream.close()
+        playback_control.detach(playback)
 
     if stalled:
         log(f"PLAYBACK_STALL {path.name}: no audio progress for 2s; cutting")
@@ -2931,18 +3044,35 @@ def clear_transient_signals() -> None:
 
 def serve() -> None:
     """Run the single engine process until a stop command or interruption."""
+    global _playback_marker_executor
     instance_lock = EngineInstanceLock()
     if not instance_lock.acquire():
         return
+    control_server: EngineControlServer | None = None
+    playback_marker_executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="super-speech-playback-marker",
+    )
+    _playback_marker_executor = playback_marker_executor
     try:
         STORAGE_READY.unlink(missing_ok=True)
         clear_transient_signals()
         timeline_revision, timeline_fingerprint_seed = load_timeline_revision_seed()
         publish_startup_status(timeline_revision)
         prepare_timeline_storage(instance_lock)
+        control_server = EngineControlServer(
+            BASE,
+            os.getpid(),
+            execute_control_request,
+        )
+        control_server.start()
         publish_storage_ready()
         run_engine_loop(timeline_revision, timeline_fingerprint_seed)
     finally:
+        if control_server is not None:
+            control_server.stop()
+        playback_marker_executor.shutdown(wait=True)
+        _playback_marker_executor = None
         STORAGE_READY.unlink(missing_ok=True)
         instance_lock.release()
 
@@ -3181,28 +3311,12 @@ def cli(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "mutate":
-            request_id = secrets.token_hex(12)
             try:
                 mutation_payload = json.loads(args.mutation_json)
             except json.JSONDecodeError as error:
                 raise ValueError(f"invalid mutation JSON: {error}") from error
-            request = parse_cli_mutation(mutation_payload, request_id)
             start_engine()
-            previous_snapshot = _read_authoritative_status()
-            request_mutation(request)
-            try:
-                result = wait_for_mutation_result(request_id)
-            except MutationOutcomeUnconfirmed as error:
-                try:
-                    snapshot = _read_authoritative_status()
-                except RuntimeError:
-                    snapshot = previous_snapshot
-                result = _mutation_result_payload(
-                    request_id,
-                    "unconfirmed",
-                    snapshot,
-                    error=str(error),
-                )
+            result = execute_mutation(mutation_payload)
             print(json.dumps(result, ensure_ascii=False))
         elif args.command == "clear":
             start_engine()

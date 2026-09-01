@@ -1,7 +1,7 @@
 {
   "valid": [
     {
-      "version": 14,
+      "version": 15,
       "timeline_revision": 0,
       "state": "idle",
       "updated_at": 1,
@@ -13,7 +13,7 @@
       "history": []
     },
     {
-      "version": 14,
+      "version": 15,
       "timeline_revision": 7,
       "state": "playing",
       "updated_at": 2.5,
@@ -48,7 +48,7 @@
       ]
     },
     {
-      "version": 14,
+      "version": 15,
       "timeline_revision": 8,
       "state": "paused",
       "updated_at": 3,
@@ -71,7 +71,7 @@
   ],
   "invalid": [
     {
-      "version": 14,
+      "version": 15,
       "timeline_revision": 0,
       "state": "paused",
       "updated_at": 1,
@@ -83,7 +83,7 @@
       "history": []
     },
     {
-      "version": 14,
+      "version": 15,
       "timeline_revision": 0,
       "state": "idle",
       "updated_at": 1,
@@ -104,7 +104,7 @@
       "history": []
     },
     {
-      "version": 14,
+      "version": 15,
       "timeline_revision": 0,
       "state": "loading",
       "updated_at": 1,
@@ -122,7 +122,7 @@
       "history": []
     },
     {
-      "version": 14,
+      "version": 15,
       "timeline_revision": true,
       "state": "stopped",
       "updated_at": 1,
@@ -134,7 +134,7 @@
       "history": []
     },
     {
-      "version": 14,
+      "version": 15,
       "timeline_revision": 0,
       "state": "playing",
       "updated_at": 1,
@@ -155,7 +155,7 @@
       "history": []
     },
     {
-      "version": 14,
+      "version": 15,
       "timeline_revision": 0,
       "state": "stopped",
       "updated_at": 1,
@@ -173,7 +173,7 @@
       ]
     },
     {
-      "version": 14,
+      "version": 15,
       "timeline_revision": 0,
       "state": "stopped",
       "updated_at": 1,
@@ -196,7 +196,7 @@
       ]
     },
     {
-      "version": 14,
+      "version": 15,
       "timeline_revision": 0,
       "state": "stopped",
       "updated_at": 1,
@@ -215,7 +215,7 @@
       ]
     },
     {
-      "version": 14,
+      "version": 15,
       "timeline_revision": 0,
       "state": "stopped",
       "updated_at": 1,

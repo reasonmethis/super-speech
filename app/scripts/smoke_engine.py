@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ ENGINE = APP_DIR / "build-resources" / "engine" / (
     "super-speech-engine.exe" if sys.platform == "win32" else "super-speech-engine"
 )
 MODELS = APP_DIR / "build-resources" / "models" / "kokoro"
+CONTROL_LATENCY_LIMIT_SECONDS = 0.2
 
 
 def process_exists(process_id: int | None) -> bool:
@@ -52,12 +54,31 @@ def read_status(environment: dict[str, str]) -> dict[str, Any]:
     )
     status = json.loads(result.stdout)
     if (
-        status.get("version") != 14
+        status.get("version") != 15
         or not isinstance(status.get("timeline_revision"), int)
         or "filename" in result.stdout
     ):
         raise RuntimeError("frozen engine exposed an invalid public status shape")
     return status
+
+
+def run_engine_control(runtime: Path, payload: object) -> dict[str, Any]:
+    endpoint = json.loads((runtime / "control.json").read_text(encoding="utf-8"))
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{endpoint['port']}/v1/control",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {endpoint['token']}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=65) as response:
+        envelope = json.load(response)
+    result = envelope.get("result")
+    if not isinstance(result, dict):
+        raise RuntimeError("frozen engine control returned an invalid result")
+    return result
 
 
 def wait_for_status(
@@ -163,23 +184,28 @@ def main() -> None:
             if (
                 replay_payload.get("outcome") != "committed"
                 or replay_payload.get("result_id") != speechicle_id
-                or replay_payload.get("snapshot", {}).get("version") != 14
+                or replay_payload.get("snapshot", {}).get("version") != 15
             ):
                 raise RuntimeError(
                     "frozen engine returned an invalid replay result"
                 )
             wait_for_status(
                 environment,
-                lambda status: (status.get("current") or {}).get("id")
-                == speechicle_id,
-            )
-            subprocess.run([str(ENGINE), "pause"], env=environment, check=True)
-            wait_for_status(
-                environment,
-                lambda status: status.get("state") == "paused"
+                lambda status: status.get("state") == "playing"
                 and (status.get("current") or {}).get("id") == speechicle_id,
             )
-            subprocess.run([str(ENGINE), "resume"], env=environment, check=True)
+            pause_started = time.monotonic()
+            pause_status = run_engine_control(runtime, {"command": "pause"})
+            pause_seconds = time.monotonic() - pause_started
+            if (
+                pause_status.get("state") != "paused"
+                or pause_status.get("audio_state") not in {"paused", "idle"}
+                or pause_seconds > CONTROL_LATENCY_LIMIT_SECONDS
+            ):
+                raise RuntimeError(
+                    f"frozen engine did not pause within 200 ms: {pause_seconds:.3f}s"
+                )
+            run_engine_control(runtime, {"command": "resume"})
             wait_for_status(
                 environment,
                 lambda status: status.get("state") == "idle"
