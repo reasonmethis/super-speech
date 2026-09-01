@@ -685,10 +685,6 @@ function draggableRow(kind: DraggableKind, id: string): HTMLElement | null {
     .find((row) => row.dataset.itemId === id) ?? null;
 }
 
-function activeDragGhost(): HTMLElement | null {
-  return document.querySelector<HTMLElement>(".timeline-drag-ghost");
-}
-
 function activateTimelinePointerDrag(drag: TimelinePointerDrag): boolean {
   const row = draggableRow(drag.state.kind, drag.state.sourceId);
   if (!row) {
@@ -785,13 +781,11 @@ function updateSpeechiclePointerGesture(event: PointerEvent): void {
   if (!gesture || event.pointerId !== gesture.pointerId) {
     return;
   }
-  recordSpeechiclePointerMovement(gesture, event);
   if ((event.buttons & 1) === 0) {
-    if (gesture.moved) {
-      suppressNextSpeechicleClick(gesture.button);
-    }
-    speechiclePointerGesture = null;
+    finishSpeechiclePointerGesture(event);
+    return;
   }
+  recordSpeechiclePointerMovement(gesture, event);
 }
 
 function finishSpeechiclePointerGesture(event: PointerEvent): void {
@@ -925,7 +919,7 @@ function updateTimelinePointerDrag(event: PointerEvent): void {
     Math.max(event.clientX - drag.pointerOffsetX, listBounds.left),
     listBounds.right - drag.width,
   );
-  const ghost = activeDragGhost();
+  const ghost = document.querySelector<HTMLElement>(".timeline-drag-ghost");
   if (!ghost) {
     cancelTimelinePointerDrag();
     return;
@@ -1001,6 +995,29 @@ function updateTimelinePointerDrag(event: PointerEvent): void {
   }
 }
 
+function settleTimelineDragPresentation(
+  drag: TimelinePointerDrag,
+  visualOrder: readonly string[] | null,
+  errorMessage: string,
+): boolean {
+  let projectionFailed = false;
+  try {
+    if (visualOrder) {
+      applyDragVisualOrder(drag.state.kind, visualOrder);
+    }
+  } catch (error) {
+    console.error(errorMessage, error);
+    projectionFailed = true;
+  } finally {
+    releaseQueuePointer(drag.state.pointerId);
+  }
+  if (projectionFailed) {
+    renderedTimelineKey = null;
+    render(currentStatus);
+  }
+  return !projectionFailed;
+}
+
 function finishTimelinePointerDrag(event: PointerEvent, commit: boolean): void {
   const drag = timelinePointerDrag;
   if (!drag || event.pointerId !== drag.state.pointerId) {
@@ -1012,24 +1029,14 @@ function finishTimelinePointerDrag(event: PointerEvent, commit: boolean): void {
     commit,
   });
   timelinePointerDrag = null;
-  let command = transition.command;
-  let projectionFailed = false;
-  try {
-    if (transition.visualOrder) {
-      applyDragVisualOrder(drag.state.kind, transition.visualOrder);
-    }
-  } catch (error) {
-    console.error("Could not settle timeline drag", error);
-    command = null;
-    projectionFailed = true;
-  } finally {
-    releaseQueuePointer(event.pointerId);
-  }
-  if (projectionFailed) {
-    renderedTimelineKey = null;
-    render(currentStatus);
+  if (!settleTimelineDragPresentation(
+    drag,
+    transition.visualOrder,
+    "Could not settle timeline drag",
+  )) {
     return;
   }
+  const command = transition.command;
   if (command?.type === "archive") {
     void archiveWaitingItem(command.id);
   } else if (command?.type === "move") {
@@ -1049,21 +1056,11 @@ function cancelTimelinePointerDrag(): void {
   }
   const transition = transitionTimelineDrag(drag.state, { type: "cancel" });
   timelinePointerDrag = null;
-  let projectionFailed = false;
-  try {
-    if (transition.visualOrder) {
-      applyDragVisualOrder(drag.state.kind, transition.visualOrder);
-    }
-  } catch (error) {
-    console.error("Could not cancel timeline drag", error);
-    projectionFailed = true;
-  } finally {
-    releaseQueuePointer(drag.state.pointerId);
-  }
-  if (projectionFailed) {
-    renderedTimelineKey = null;
-    render(currentStatus);
-  }
+  settleTimelineDragPresentation(
+    drag,
+    transition.visualOrder,
+    "Could not cancel timeline drag",
+  );
 }
 
 function handleQueueReorderKey(event: KeyboardEvent, id: string): void {
@@ -1214,42 +1211,56 @@ function positionTimelineMenu(
   menu.style.top = `${top}px`;
 }
 
+function showTimelineMenu(
+  menu: HTMLElement,
+  itemId: string | null,
+  buttonSelector: ".queue-menu-button" | ".speechicle-voice",
+): { item: TimelineItem; button: HTMLButtonElement } | null {
+  let target: { item: TimelineItem; button: HTMLButtonElement } | null = null;
+  if (itemId) {
+    const item = visibleTimelineItems().find(({ id }) => id === itemId);
+    const row = item
+      ? speechicleList.querySelector<HTMLElement>(`[data-item-id="${item.id}"]`)
+      : null;
+    const button = row?.querySelector<HTMLButtonElement>(buttonSelector);
+    const rowBounds = row?.getBoundingClientRect();
+    const listBounds = speechicleList.getBoundingClientRect();
+    if (
+      item &&
+      button &&
+      rowBounds &&
+      rowBounds.bottom > listBounds.top &&
+      rowBounds.top < listBounds.bottom
+    ) {
+      target = { item, button };
+    }
+  }
+
+  const openItemId = target?.item.id ?? null;
+  for (const row of speechicleList.querySelectorAll<HTMLElement>(".speechicle-item")) {
+    row.querySelector<HTMLButtonElement>(buttonSelector)?.setAttribute(
+      "aria-expanded",
+      String(row.dataset.itemId === openItemId),
+    );
+  }
+  menu.hidden = !target;
+  if (!target) {
+    menu.replaceChildren();
+  }
+  return target;
+}
+
 function setOpenActionMenu(itemId: string | null): void {
   if (itemId) {
     setOpenVoiceMenu(null);
   }
   const shouldFocus = itemId !== null && itemId !== openMenuItemId;
-  const item = itemId
-    ? visibleTimelineItems().find(({ id }) => id === itemId)
-    : null;
-  const target = item
-    ? speechicleList.querySelector<HTMLElement>(`[data-item-id="${item.id}"]`)
-    : null;
-  const button = target?.querySelector<HTMLButtonElement>(".queue-menu-button");
-  if (itemId) {
-    const listBounds = speechicleList.getBoundingClientRect();
-    const targetBounds = target?.getBoundingClientRect();
-    if (
-      !item ||
-      !button ||
-      !targetBounds ||
-      targetBounds.bottom <= listBounds.top ||
-      targetBounds.top >= listBounds.bottom
-    ) {
-      itemId = null;
-    }
-  }
-  openMenuItemId = itemId;
-  for (const row of speechicleList.querySelectorAll<HTMLElement>(".speechicle-item")) {
-    const open = row.dataset.itemId === itemId;
-    row.querySelector<HTMLButtonElement>(".queue-menu-button")
-      ?.setAttribute("aria-expanded", String(open));
-  }
-  queueActionMenu.hidden = !itemId;
-  if (!itemId || !item || !button) {
-    queueActionMenu.replaceChildren();
+  const target = showTimelineMenu(queueActionMenu, itemId, ".queue-menu-button");
+  openMenuItemId = target?.item.id ?? null;
+  if (!target) {
     return;
   }
+  const { item, button } = target;
 
   const actions: HTMLElement[] = [];
   if (item.kind === "current" && ["playing", "paused"].includes(currentStatus.state)) {
@@ -1313,37 +1324,12 @@ function setOpenVoiceMenu(itemId: string | null): void {
     setOpenActionMenu(null);
   }
   const shouldFocus = itemId !== null && itemId !== openVoiceItemId;
-  const item = itemId
-    ? visibleTimelineItems().find(({ id }) => id === itemId)
-    : null;
-  const target = item
-    ? speechicleList.querySelector<HTMLElement>(`[data-item-id="${item.id}"]`)
-    : null;
-  const button = target?.querySelector<HTMLButtonElement>(".speechicle-voice");
-  if (itemId) {
-    const listBounds = speechicleList.getBoundingClientRect();
-    const targetBounds = target?.getBoundingClientRect();
-    if (
-      !item ||
-      !button ||
-      !targetBounds ||
-      targetBounds.bottom <= listBounds.top ||
-      targetBounds.top >= listBounds.bottom
-    ) {
-      itemId = null;
-    }
-  }
-  openVoiceItemId = itemId;
-  for (const row of speechicleList.querySelectorAll<HTMLElement>(".speechicle-item")) {
-    const open = row.dataset.itemId === itemId;
-    row.querySelector<HTMLButtonElement>(".speechicle-voice")
-      ?.setAttribute("aria-expanded", String(open));
-  }
-  voiceMenu.hidden = !itemId;
-  if (!itemId || !item || !button) {
-    voiceMenu.replaceChildren();
+  const target = showTimelineMenu(voiceMenu, itemId, ".speechicle-voice");
+  openVoiceItemId = target?.item.id ?? null;
+  if (!target) {
     return;
   }
+  const { item, button } = target;
 
   const contents: HTMLElement[] = [];
   let activeGroup: string | null = null;
@@ -1491,20 +1477,16 @@ function revealCurrentItem(): void {
 }
 
 function renderTimeline(items: TimelineItem[], historyTotal: number): void {
+  const itemIds = new Set(items.map(({ id }) => id));
   const pendingExpansionId = pendingSpeechicleExpansion?.itemId;
-  if (
-    pendingExpansionId &&
-    !items.some((item) => item.id === pendingExpansionId)
-  ) {
+  if (pendingExpansionId && !itemIds.has(pendingExpansionId)) {
     cancelPendingSpeechicleExpansion();
   }
-  if (!items.some((item) => item.id === expandedItemId)) {
+  if (expandedItemId !== null && !itemIds.has(expandedItemId)) {
     expandedItemId = null;
   }
-  if (
-    failedTimelineMutation?.id &&
-    !items.some((item) => item.id === failedTimelineMutation?.id)
-  ) {
+  const failedItemId = failedTimelineMutation?.id;
+  if (failedItemId && !itemIds.has(failedItemId)) {
     failedTimelineMutation = null;
   }
   // Preserve row nodes across polling so hover, focus, expansion, and in-progress clicks survive
@@ -1522,16 +1504,17 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
   renderedTimelineKey = timelineKey;
 
   const previousScrollTop = speechicleList.scrollTop;
-  const focusedControl = document.activeElement instanceof HTMLElement
-    ? document.activeElement.closest<HTMLElement>(".speechicle-item")
+  const focusedElement = document.activeElement instanceof HTMLElement
+    ? document.activeElement
     : null;
+  const focusedControl = focusedElement?.closest<HTMLElement>(".speechicle-item");
   const focusedItemId = focusedControl?.dataset.itemId;
   const focusedControlClass = [
     "timeline-drag-handle",
     "speechicle-content",
     "speechicle-voice",
     "queue-menu-button",
-  ].find((className) => document.activeElement?.classList.contains(className));
+  ].find((className) => focusedElement?.classList.contains(className));
   speechicleList.replaceChildren();
   if (items.length === 0) {
     const empty = document.createElement("div");
@@ -1556,27 +1539,19 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     row.dataset.voice = item.voice;
     row.dataset.source = item.source ?? "";
     row.dataset.inbox = item.inbox ?? "";
-    const isCurrent = item.kind === "current";
-    const isWaiting = item.kind === "waiting";
     const isExpanded = item.id === expandedItemId;
-    const reference = itemReference(item);
     row.classList.add(`is-${item.kind}`);
-    if (isCurrent) {
+    if (item.kind === "current") {
       row.setAttribute("aria-current", "true");
     }
 
-    const rowControls: HTMLElement[] = [];
-    if (isWaiting || item.kind === "history") {
+    if (item.kind !== "current") {
       const dragHandle = document.createElement("button");
       dragHandle.className = "timeline-drag-handle";
       dragHandle.type = "button";
       dragHandle.title = item.kind === "history"
         ? "Drag to reorder History"
         : "Drag to reorder waiting speech";
-      dragHandle.setAttribute(
-        "aria-label",
-        `Reorder ${reference}. Drag, or use the arrow keys`,
-      );
       dragHandle.innerHTML = '<span aria-hidden="true"></span>';
       dragHandle.addEventListener("keydown", (event) => {
         if (item.kind === "history") {
@@ -1585,7 +1560,7 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
           handleQueueReorderKey(event, item.id);
         }
       });
-      rowControls.push(dragHandle);
+      row.append(dragHandle);
     }
 
     const body = document.createElement("div");
@@ -1607,11 +1582,9 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     const inlineVoice = document.createElement("button");
     inlineVoice.className = "speechicle-voice";
     inlineVoice.type = "button";
-    inlineVoice.textContent = formatVoice(item.voice);
     inlineVoice.setAttribute("aria-haspopup", "listbox");
     inlineVoice.setAttribute("aria-expanded", "false");
     inlineVoice.setAttribute("aria-controls", voiceMenu.id);
-    inlineVoice.setAttribute("aria-label", `Voice for ${reference}`);
     inlineVoice.addEventListener("click", () => {
       setOpenVoiceMenu(openVoiceItemId === item.id ? null : item.id);
     });
@@ -1629,11 +1602,9 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     accessibleText.className = "sr-only queue-full-text";
     accessibleText.hidden = !isExpanded;
     accessibleText.setAttribute("role", "region");
-    accessibleText.setAttribute("aria-label", `Full text for ${reference}`);
     accessibleText.textContent = item.text;
     speechicle.setAttribute("aria-controls", accessibleText.id);
     speechicle.setAttribute("aria-expanded", String(isExpanded));
-    speechicle.setAttribute("aria-label", speechicleActionLabel(item, isExpanded));
     speechicle.addEventListener("click", (event) => {
       if (suppressedSpeechicleClicks.delete(speechicle)) {
         event.preventDefault();
@@ -1658,16 +1629,14 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     menuButton.type = "button";
     menuButton.setAttribute("aria-haspopup", "dialog");
     menuButton.setAttribute("aria-expanded", "false");
-    menuButton.setAttribute("aria-label", `Actions for ${reference}`);
     menuButton.innerHTML = '<span aria-hidden="true"></span>';
     menuButton.setAttribute("aria-controls", queueActionMenu.id);
     menuButton.addEventListener("click", () => {
       setOpenActionMenu(openMenuItemId === item.id ? null : item.id);
     });
     actions.append(menuButton);
-    rowControls.push(body, actions, accessibleText);
     row.classList.toggle("is-expanded", isExpanded);
-    row.append(...rowControls);
+    row.append(body, actions, accessibleText);
     speechicleList.append(row);
   }
   for (const section of sections) {
