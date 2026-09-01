@@ -15,13 +15,14 @@ class InterprocessFileLock:
         self._file: BinaryIO | None = None
 
     def acquire(self) -> bool:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        lock_file = self._path.open("a+b")
-        if lock_file.seek(0, os.SEEK_END) == 0:
-            lock_file.write(b"0")
-            lock_file.flush()
-        lock_file.seek(0)
+        lock_file: BinaryIO | None = None
         try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            lock_file = self._path.open("a+b")
+            if lock_file.seek(0, os.SEEK_END) == 0:
+                lock_file.write(b"0")
+                lock_file.flush()
+            lock_file.seek(0)
             if os.name == "nt":
                 import msvcrt
 
@@ -31,7 +32,11 @@ class InterprocessFileLock:
 
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            lock_file.close()
+            if lock_file is not None:
+                try:
+                    lock_file.close()
+                except OSError:
+                    pass
             return False
         self._file = lock_file
         return True
