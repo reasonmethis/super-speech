@@ -58,16 +58,18 @@ class LivePlaybackControl:
         self._playback: PauseablePlayback | None = None
         self._command: tuple[int, bool] | None = None
         self._command_sequence = 0
+        self._clear_owner: str | None = None
+        self._silenced_playback: PauseablePlayback | None = None
 
     def pause_requested(self) -> bool:
         with self._lock:
-            if self._command is not None:
-                return self._command[1]
-        return self._read_persisted_pause()
+            return self._pause_intent()
 
     def begin_command(self, paused: bool) -> int:
         """Apply a command to live audio and return its ownership token."""
         with self._lock:
+            if self._clear_blocks_playback():
+                raise RuntimeError("playback cannot change while Clear is finishing")
             self._command_sequence += 1
             sequence = self._command_sequence
             self._command = (sequence, paused)
@@ -80,17 +82,30 @@ class LivePlaybackControl:
             if self._command is None or self._command[0] != sequence:
                 return
             self._command = None
-            self._set_playback_paused(self._read_persisted_pause())
+            self._set_playback_paused(self._pause_intent())
+
+    def start_clearing(self, request_id: str) -> None:
+        """Keep live audio silent until the Clear transaction settles."""
+        with self._lock:
+            if self._clear_owner not in {None, request_id}:
+                raise RuntimeError("another Clear request is already in progress")
+            self._clear_owner = request_id
+            self._set_playback_paused(True)
+
+    def finish_clearing(self, request_id: str, *, hold_active: bool) -> None:
+        """Finish Clear, optionally keeping its old stream silent until detach."""
+        with self._lock:
+            if self._clear_owner != request_id:
+                return
+            self._clear_owner = None
+            self._silenced_playback = self._playback if hold_active else None
+            self._set_playback_paused(self._pause_intent())
 
     def attach(self, playback: PauseablePlayback) -> bool:
         """Expose one audio stream to live controls and apply current intent."""
         with self._lock:
             self._playback = playback
-            paused = (
-                self._command[1]
-                if self._command is not None
-                else self._read_persisted_pause()
-            )
+            paused = self._pause_intent()
             playback.set_paused(paused)
             return paused
 
@@ -98,7 +113,22 @@ class LivePlaybackControl:
         with self._lock:
             if self._playback is playback:
                 self._playback = None
+                if self._silenced_playback is playback:
+                    self._silenced_playback = None
                 self.state.set("idle")
+
+    def _pause_intent(self) -> bool:
+        if self._clear_blocks_playback():
+            return True
+        if self._command is not None:
+            return self._command[1]
+        return self._read_persisted_pause()
+
+    def _clear_blocks_playback(self) -> bool:
+        return self._clear_owner is not None or (
+            self._playback is not None
+            and self._silenced_playback is self._playback
+        )
 
     def _set_playback_paused(self, paused: bool) -> None:
         if self._playback is not None:

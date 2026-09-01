@@ -11,6 +11,7 @@ import {
   playbackPresentation,
   selectableVoiceOptions,
   timelineItems,
+  type PendingPlayback,
   type PlaybackPresentation,
   type RuntimeStatus,
   type TimelineItem,
@@ -217,14 +218,15 @@ function timelineMutationBlocked(): boolean {
   return commandPending || pendingTimelineMutation !== null;
 }
 
-function pendingPlaybackForPresentation(): {
-  item: TimelineItem;
-  state: "playing" | "paused";
-} | null {
+function pendingPlaybackForPresentation(): PendingPlayback | null {
   const pending = pendingTimelineMutation;
-  return pending?.kind === "play"
-    ? { item: pending.item, state: pending.playbackState }
-    : null;
+  if (pending?.kind === "play") {
+    return { item: pending.item, state: pending.playbackState };
+  }
+  if (pending?.kind === "clear" && currentStatus.current) {
+    return { item: currentStatus.current, state: "clearing" };
+  }
+  return null;
 }
 
 function requiredElement<T extends HTMLElement>(id: string): T {
@@ -306,6 +308,7 @@ function timelineAction(
       move: "Moving...",
       archive: "Moving...",
       delete: "Deleting...",
+      clear: "Clearing...",
     };
     return pendingLabels[pending.mutation.type] ?? "Working...";
   }
@@ -318,6 +321,7 @@ function timelineAction(
     return "";
   }
   const labels: Partial<Record<RuntimeStatus["state"], string>> = {
+    clearing: "Clearing",
     loading: "Preparing",
     playing: "Speaking",
     paused: "Paused",
@@ -382,6 +386,13 @@ function statusCopy(presentation: PlaybackPresentation): {
   if (presentation.state === "paused") {
     return {
       label: "Paused",
+      title: formatVoice(presentation.item.voice),
+      body: presentation.item.text,
+    };
+  }
+  if (presentation.state === "clearing") {
+    return {
+      label: "Clearing",
       title: formatVoice(presentation.item.voice),
       body: presentation.item.text,
     };
@@ -471,6 +482,9 @@ function playbackIconMarkup(state: PlaybackPresentation["state"]): string {
   }
   if (state === "playing") {
     return '<svg viewBox="0 0 32 32"><rect class="solid" x="7" y="5" width="7" height="22" rx="2.5"/><rect class="solid" x="18" y="5" width="7" height="22" rx="2.5"/></svg>';
+  }
+  if (state === "clearing") {
+    return '<svg viewBox="0 0 32 32"><rect class="solid" x="8" y="8" width="16" height="16" rx="3"/></svg>';
   }
   if (state === "stopped") {
     return '<svg viewBox="0 0 32 32"><path d="M16 8v9m0 6v1"/></svg>';
@@ -586,7 +600,11 @@ function render(status: RuntimeStatus): void {
     pause: "Pause speech",
     resume: "Resume speech",
     setup: "Open setup guide",
-    inactive: presentation.state === "loading" ? "Preparing speech" : "Ready for speech",
+    inactive: presentation.state === "loading"
+      ? "Preparing speech"
+      : presentation.state === "clearing"
+        ? "Clearing speech"
+        : "Ready for speech",
   };
   playbackButton.dataset.action = action;
   playbackButton.setAttribute("aria-label", actionLabels[action]);
@@ -1453,6 +1471,7 @@ function updateTimelineDividers(items: TimelineItem[], historyTotal: number): vo
   const waitingCount = items.filter(({ kind }) => kind === "waiting").length;
   const historyCount = items.filter(({ kind }) => kind === "history").length;
   const currentLabel = ({
+      clearing: "Clearing",
       loading: "Preparing",
       playing: "Playing",
       paused: "Paused",

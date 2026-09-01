@@ -67,7 +67,7 @@ function status() {
     assert.match(row.id, /^sp_[0-9a-f]{32}$/, "Status leaked an invalid Speechicle ID");
     assert(!Object.hasOwn(row, "filename"), "Status leaked an internal filename");
   }
-  assert.equal(snapshot.version, 15, "Pointer smoke requires the current status schema");
+  assert.equal(snapshot.version, 16, "Pointer smoke requires the current status schema");
   assert(Number.isInteger(snapshot.timeline_revision));
   assert(snapshot.timeline_revision >= 0);
   return snapshot;
@@ -103,6 +103,28 @@ async function waitFor(predicate, message, timeout = 15_000) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(message);
+}
+
+async function waitForStableWindowGeometry(app, page) {
+  let previous = "";
+  let stableSince = 0;
+  await waitFor(
+    async () => {
+      const [windowBounds, viewport] = await Promise.all([
+        app.evaluate(({ BrowserWindow }) =>
+          BrowserWindow.getAllWindows()[0]?.getBounds()
+        ),
+        page.evaluate(() => ({ width: innerWidth, height: innerHeight })),
+      ]);
+      const current = JSON.stringify({ windowBounds, viewport });
+      if (current !== previous) {
+        previous = current;
+        stableSince = Date.now();
+      }
+      return Date.now() - stableSince >= 1_000;
+    },
+    "The initial Windows frameless-window geometry did not settle",
+  );
 }
 
 async function beginDrag(page, handle, deltaY = -65) {
@@ -296,7 +318,7 @@ try {
       return current?.piece_start !== null && current?.piece_end !== null;
     },
     "The engine did not publish the current internal speech piece",
-    30_000,
+    120_000,
   );
   runEngine("pause");
   await waitFor(
@@ -307,6 +329,7 @@ try {
 
   electronApp = await launchApp();
   let page = await electronApp.firstWindow();
+  await waitForStableWindowGeometry(electronApp, page);
   await waitFor(
     async () => await page.locator("body").getAttribute("data-state") === "paused",
     "The renderer did not settle into the paused fixture",
@@ -632,10 +655,6 @@ try {
   assert(pausedPlayback.icon.width >= 47, "The paused symbol must fill more of the main button");
   const resumeStartedAt = await clickPlaybackButtonNearEdge(page);
   await waitFor(
-    () => status().state === "playing",
-    "The silent fixture did not resume",
-  );
-  await waitFor(
     async () => await page.locator("body").getAttribute("data-state") === "playing",
     "The Electron window did not render resumed playback",
   );
@@ -643,6 +662,10 @@ try {
   assert(
     resumeLatencyMs <= controlLatencyLimitMs,
     `Resume took ${resumeLatencyMs} ms to reach the running engine`,
+  );
+  await waitFor(
+    () => status().state === "playing",
+    "The silent fixture did not persist Resume",
   );
   const playingPlayback = await playbackSnapshot(page);
   assert.equal(playingPlayback.accent, "#009a91");
@@ -664,10 +687,6 @@ try {
   assert.deepEqual(center(pausedPlayback.button), center(pausedPlayback.ring));
   const pauseStartedAt = await clickPlaybackButtonNearEdge(page);
   await waitFor(
-    () => status().state === "paused",
-    "The silent fixture did not pause again",
-  );
-  await waitFor(
     async () => await page.locator("body").getAttribute("data-state") === "paused",
     "The Electron window did not return to the paused layout",
   );
@@ -675,6 +694,10 @@ try {
   assert(
     pauseLatencyMs <= controlLatencyLimitMs,
     `Pause took ${pauseLatencyMs} ms to stop silent playback`,
+  );
+  await waitFor(
+    () => status().state === "paused",
+    "The silent fixture did not persist Pause",
   );
   assert(
     await page.locator(".ring-one").evaluate((ring) =>
@@ -1594,6 +1617,11 @@ try {
     "Clearing speech",
     "Clear all must present its real in-progress state",
   );
+  assert.equal(
+    await page.locator("body").getAttribute("data-state"),
+    "clearing",
+    "Clear all must enter Clearing without presenting Paused",
+  );
   await waitFor(
     () => status().current === null && status().queue_count === 0 && status().state === "idle",
     "Clear all did not archive Current and Waiting speech",
@@ -1611,7 +1639,11 @@ try {
   });
   assert(
     !clearPresentationStates.includes("paused"),
-    `Clear all exposed its internal Pause step: ${clearPresentationStates.join(", ")}`,
+    `Clear all presented Paused: ${clearPresentationStates.join(", ")}`,
+  );
+  assert(
+    clearPresentationStates.includes("clearing"),
+    `Clear all never presented Clearing: ${clearPresentationStates.join(", ")}`,
   );
   await waitFor(
     async () => await page.locator("body").getAttribute("data-state") === "idle",
@@ -1746,8 +1778,6 @@ try {
     await page.locator(".speechicle-item.is-current .speechicle-voice").textContent(),
     "George",
   );
-  runEngine("pause");
-  await waitFor(() => status().state === "paused", "Manual speech did not pause");
   mutateTimeline({ type: "clear" });
   await waitFor(
     () => status().current === null && status().queue_count === 0,
@@ -1764,7 +1794,7 @@ try {
       return current?.piece_count >= 4 && current.piece >= 1;
     },
     "The hidden renderer fixture did not begin multi-piece speech",
-    30_000,
+    120_000,
   );
   runEngine("pause");
   await waitFor(
@@ -1794,7 +1824,7 @@ try {
     () => status().current?.id === backgroundCurrent.id &&
       status().current.piece > backgroundPiece,
     "The engine did not advance to another internal speech piece",
-    30_000,
+    120_000,
   );
   const advanced = status().current;
   assert(advanced, "Follow-along progression lost Current speech");

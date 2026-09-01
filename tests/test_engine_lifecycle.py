@@ -1821,7 +1821,7 @@ def test_missing_counter_recovers_pending_commands_before_allocating(
     assert marker["command_sequence"] == 4
 
 
-def test_clear_pauses_audio_before_publishing_its_durable_mutation(
+def test_clear_publishes_one_mutation_without_a_pause_command(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1835,11 +1835,10 @@ def test_clear_pauses_audio_before_publishing_its_durable_mutation(
 
     request_id = request_mutation(engine, "clear")
 
-    marker = json.loads(engine.PAUSE.read_text(encoding="utf-8"))
     request_path = next(engine.BASE.glob(f"MUTATION.*.{request_id}.json"))
     request = json.loads(request_path.read_text(encoding="utf-8"))
-    assert marker == {"command_sequence": 1}
-    assert request["command_sequence"] == 2
+    assert not engine.PAUSE.exists()
+    assert request["command_sequence"] == 1
 
     assert engine.process_mutation_requests(queue.Queue(), state) == "clear"
     committed_result(engine, request_id)
@@ -1981,7 +1980,7 @@ def test_concurrent_mutation_publishers_receive_unique_ordered_sequences(
         for path in engine.BASE.glob("MUTATION.*.json")
     ]
     assert sorted(payload["command_sequence"] for payload in payloads) == list(
-        range(2, 10)
+        range(1, 9)
     )
 
 
@@ -2016,12 +2015,12 @@ def test_mutation_publication_handles_transient_windows_replace_errors(
     assert len(requests) == 1
     payload = json.loads(requests[0].read_text(encoding="utf-8"))
     assert payload["request_id"] == request_id
-    assert payload["command_sequence"] == 2
+    assert payload["command_sequence"] == 1
 
     marker_sequence = engine.publish_ordered_marker(engine.PAUSE)
     marker = json.loads(engine.PAUSE.read_text(encoding="utf-8"))
-    assert marker_sequence == 3
-    assert marker == {"command_sequence": 3}
+    assert marker_sequence == 2
+    assert marker == {"command_sequence": 2}
 
 
 def test_scoped_control_cannot_affect_a_successor_engine(tmp_path: Path) -> None:

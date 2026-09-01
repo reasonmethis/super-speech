@@ -144,7 +144,7 @@ test("an incompatible external engine cannot leave the app loading forever", () 
 });
 
 test("accepts a complete current-version status", () => {
-  assert.equal(ENGINE_STATUS_VERSION, 15);
+  assert.equal(ENGINE_STATUS_VERSION, 16);
   assert.equal(parseEngineStatus(status), status);
 });
 
@@ -420,6 +420,22 @@ test("an explicit selection starts playing even from a stale paused snapshot", (
   assert.deepEqual(
     playbackPresentation({ ...status, state: "paused" }, { item: selected, state: "playing" }),
     { state: "playing", item: selected },
+  );
+});
+
+test("a pending Clear presents Clearing before the engine result", () => {
+  const current = {
+    id: speechicleId(7),
+    text: "Current",
+    voice: "af_heart",
+  };
+
+  assert.deepEqual(
+    playbackPresentation(
+      { ...status, state: "paused" },
+      { item: current, state: "clearing" },
+    ),
+    { state: "clearing", item: current },
   );
 });
 

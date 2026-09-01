@@ -10,7 +10,11 @@ import pytest
 
 from engine_test_support import configure_runtime, load_engine
 
-from engine_control import EngineControlServer, PlaybackStateTracker
+from engine_control import (
+    EngineControlServer,
+    LivePlaybackControl,
+    PlaybackStateTracker,
+)
 
 
 def post_control(endpoint: dict[str, object], payload: object, token: str) -> object:
@@ -93,8 +97,8 @@ def test_engine_control_stops_live_audio_before_persisting_commands(
     def observe_resume() -> None:
         calls.append(("resume", playback_states[-1]))
 
-    def observe_mutation(payload: object) -> object:
-        calls.append(("mutate", payload, playback_states[-1]))
+    def observe_mutation(request: object) -> object:
+        calls.append(("mutate", getattr(request, "type"), playback_states[-1]))
         return mutation_result
 
     monkeypatch.setattr(
@@ -110,7 +114,7 @@ def test_engine_control_stops_live_audio_before_persisting_commands(
     )
     monkeypatch.setattr(
         engine,
-        "execute_mutation",
+        "execute_mutation_request",
         observe_mutation,
     )
 
@@ -122,7 +126,7 @@ def test_engine_control_stops_live_audio_before_persisting_commands(
     assert calls == [
         ("publish", "PAUSE", True),
         ("resume", False),
-        ("mutate", {"type": "clear"}, True),
+        ("mutate", "clear", True),
     ]
     engine.playback_control.detach(playback)
 
@@ -141,6 +145,39 @@ def test_playback_state_tracker_waits_for_the_audio_loop() -> None:
     assert tracker.wait_for({"playing"}, 0.01) == "playing"
     tracker.set("paused")
     assert tracker.wait_for({"paused"}, 0.01) == "paused"
+
+
+def test_clear_owns_live_audio_until_the_old_stream_detaches() -> None:
+    control = LivePlaybackControl(lambda: False)
+
+    class FakePlayback:
+        paused = False
+
+        def set_paused(self, paused: bool) -> bool:
+            self.paused = paused
+            return True
+
+    playback = FakePlayback()
+    control.attach(playback)
+    control.start_clearing("clear-1")
+
+    assert playback.paused
+    assert control.pause_requested()
+    control.start_clearing("clear-1")
+    with pytest.raises(RuntimeError, match="another Clear"):
+        control.start_clearing("clear-2")
+    with pytest.raises(RuntimeError, match="while Clear is finishing"):
+        control.begin_command(False)
+
+    control.finish_clearing("clear-1", hold_active=True)
+    assert playback.paused
+    assert control.pause_requested()
+
+    control.detach(playback)
+    replacement = FakePlayback()
+    assert not control.attach(replacement)
+    assert not replacement.paused
+    control.detach(replacement)
 
 
 def test_live_audio_does_not_wait_for_marker_persistence(

@@ -165,10 +165,11 @@ replacement process.
 Pause and Resume return only after the live audio object acknowledges the
 applied state. A single ordered background writer then saves the compatibility
 marker, so disk latency is not part of the click-to-audio path. The renderer
-does not predict the result. Clear all silences the audio loop before its saved
-timeline transaction begins, shows Clearing while that transaction is pending,
-and shows Ready only after the engine confirms the commit. The private pause
-step used by Clear is not published as a user action.
+does not predict the result. Clear all owns a separate Clearing state. It closes
+the live audio gate before publishing the saved timeline transaction and keeps
+the old stream silent until that stream detaches. Clearing never writes a Pause
+marker or exposes Paused, and Ready appears only after the engine confirms the
+commit.
 
 Enqueue from the desktop, Play, move, archive, delete, voice change, and clear
 use one kind of saved change file. Requests are stored on disk and handled one

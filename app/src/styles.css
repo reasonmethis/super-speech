@@ -98,6 +98,12 @@ body[data-state="paused"] {
   --accent-deep: #252e85;
 }
 
+body[data-state="clearing"] {
+  --accent: var(--carnival-raspberry);
+  --accent-bright: #f09ac1;
+  --accent-deep: #84204e;
+}
+
 body[data-state="setup_required"] {
   --accent: var(--carnival-indigo);
   --accent-bright: #9aa6ff;
@@ -381,6 +387,13 @@ body.playback-expanded footer {
 .status-dot.state-paused {
   background: #7687ff;
   box-shadow: 0 0 0 3px rgba(118, 135, 255, 0.12), 0 0 13px rgba(118, 135, 255, 0.42);
+}
+
+.status-dot.state-clearing {
+  background: var(--carnival-raspberry);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--carnival-raspberry) 18%, transparent),
+    0 0 13px color-mix(in srgb, var(--carnival-raspberry) 50%, transparent);
 }
 
 .playback-control {

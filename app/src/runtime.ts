@@ -1,4 +1,5 @@
 export type RuntimeState =
+  | "clearing"
   | "loading"
   | "playing"
   | "paused"
@@ -6,7 +7,7 @@ export type RuntimeState =
   | "setup_required"
   | "stopped";
 
-export const ENGINE_STATUS_VERSION = 15 as const;
+export const ENGINE_STATUS_VERSION = 16 as const;
 export const AGENT_MESSAGE_TEXT_MAX = 4_000;
 
 const SPEECHICLE_ID = /^sp_[0-9a-f]{32}$/;
@@ -195,13 +196,13 @@ export interface TimelineItem extends SpeechicleItem {
 }
 
 export type PlaybackPresentation =
-  | { state: "playing" | "paused"; item: SpeechicleItem }
+  | { state: "clearing" | "playing" | "paused"; item: SpeechicleItem }
   | { state: "loading"; item: SpeechicleItem | null }
   | { state: "idle" | "setup_required" | "stopped"; item: null };
 
 export type PendingPlayback = {
   item: SpeechicleItem;
-  state: "playing" | "paused";
+  state: "clearing" | "playing" | "paused";
 };
 
 export function playbackPresentation(
@@ -228,6 +229,9 @@ export function playbackPresentation(
   if (status.state === "paused") {
     return { state: "paused", item: activeItem };
   }
+  if (status.state === "clearing") {
+    return { state: "clearing", item: activeItem };
+  }
   if (status.state === "loading") {
     return { state: "loading", item: activeItem };
   }
@@ -235,6 +239,7 @@ export function playbackPresentation(
 }
 
 const RUNTIME_STATES = new Set<RuntimeState>([
+  "clearing",
   "loading",
   "playing",
   "paused",
@@ -292,7 +297,11 @@ function isCurrentItem(value: unknown): value is CurrentItem {
 
 function playbackBoundaryMatchesState(value: Record<string, unknown>): boolean {
   const hasCurrent = value.current !== null;
-  if (value.state === "playing" || value.state === "paused") {
+  if (
+    value.state === "clearing" ||
+    value.state === "playing" ||
+    value.state === "paused"
+  ) {
     return hasCurrent;
   }
   if (value.state === "idle") {

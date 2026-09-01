@@ -146,8 +146,8 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
-ENGINE_VERSION = "0.7.3"
-STATUS_VERSION = 15
+ENGINE_VERSION = "0.7.4"
+STATUS_VERSION = 16
 STARTUP_TIMEOUT = 120.0
 CONTROL_ACK_TIMEOUT = 2.0
 
@@ -950,27 +950,13 @@ def _publish_mutation_unlocked(request: MutationRequest) -> None:
 
 
 def request_mutation(request: MutationRequest) -> str:
-    """Publish one mutation, silencing playback first when clearing the queue."""
+    """Publish one mutation to the engine's durable FIFO stream."""
     if not engine_is_running():
         raise RuntimeError("engine is not running")
 
     BASE.mkdir(parents=True, exist_ok=True)
     with playback_command_lock():
-        clear_pause_sequence = None
-        if (
-            isinstance(request, ClearMutation)
-            and _ordered_marker_sequence_unlocked(PAUSE) is None
-        ):
-            clear_pause_sequence = _publish_ordered_marker_unlocked(PAUSE)
-        try:
-            _publish_mutation_unlocked(request)
-        except Exception:
-            if (
-                clear_pause_sequence is not None
-                and _ordered_marker_sequence_unlocked(PAUSE) == clear_pause_sequence
-            ):
-                PAUSE.unlink(missing_ok=True)
-            raise
+        _publish_mutation_unlocked(request)
     return request.request_id
 
 
@@ -1262,7 +1248,15 @@ def _snapshot_is_valid(snapshot: object) -> bool:
     if not (
         snapshot.get("version") == STATUS_VERSION
         and state
-        in {"idle", "loading", "paused", "playing", "setup_required", "stopped"}
+        in {
+            "clearing",
+            "idle",
+            "loading",
+            "paused",
+            "playing",
+            "setup_required",
+            "stopped",
+        }
         and isinstance(timeline_revision, int)
         and not isinstance(timeline_revision, bool)
         and timeline_revision >= 0
@@ -1284,7 +1278,7 @@ def _snapshot_is_valid(snapshot: object) -> bool:
         and not isinstance(history_count, bool)
         and history_count >= len(history_items)
         and (current is not None or not queue_items)
-        and (state not in {"playing", "paused"} or current is not None)
+        and (state not in {"clearing", "playing", "paused"} or current is not None)
         and (state != "idle" or current is None)
     ):
         return False
@@ -1352,25 +1346,29 @@ def wait_for_mutation_result(
     return payload
 
 
-def execute_mutation(mutation_payload: object) -> dict[str, object]:
-    """Submit one desktop mutation and return its authoritative result."""
-    request_id = secrets.token_hex(12)
-    request = parse_cli_mutation(mutation_payload, request_id)
+def execute_mutation_request(request: MutationRequest) -> dict[str, object]:
+    """Submit one parsed desktop mutation and return its authoritative result."""
     previous_snapshot = _read_authoritative_status()
     request_mutation(request)
     try:
-        return wait_for_mutation_result(request_id)
+        return wait_for_mutation_result(request.request_id)
     except MutationOutcomeUnconfirmed as error:
         try:
             snapshot = _read_authoritative_status()
         except RuntimeError:
             snapshot = previous_snapshot
         return _mutation_result_payload(
-            request_id,
+            request.request_id,
             "unconfirmed",
             snapshot,
             error=str(error),
         )
+
+
+def execute_mutation(mutation_payload: object) -> dict[str, object]:
+    """Parse and submit one desktop mutation."""
+    request = parse_cli_mutation(mutation_payload, secrets.token_hex(12))
+    return execute_mutation_request(request)
 
 
 def playback_control_ack(paused: bool) -> dict[str, object]:
@@ -1402,14 +1400,17 @@ def execute_control_request(payload: dict[str, object]) -> object:
         _schedule_playback_persistence(command_sequence, False)
         return playback_control_ack(False)
     if command == "mutate" and set(payload) == {"command", "mutation"}:
-        mutation = payload["mutation"]
-        is_clear = isinstance(mutation, dict) and mutation.get("type") == "clear"
-        command_sequence = playback_control.begin_command(True) if is_clear else None
+        request = parse_cli_mutation(payload["mutation"], secrets.token_hex(12))
+        if not isinstance(request, ClearMutation):
+            return execute_mutation_request(request)
+        playback_control.start_clearing(request.request_id)
         try:
-            return execute_mutation(mutation)
+            return execute_mutation_request(request)
         finally:
-            if command_sequence is not None:
-                playback_control.end_command(command_sequence)
+            playback_control.finish_clearing(
+                request.request_id,
+                hold_active=False,
+            )
     raise ValueError("invalid engine control request")
 
 
@@ -1925,8 +1926,10 @@ def publish_status(
             ),
         )
 
-    if playback_state not in {"loading", "setup_required", "stopped"}:
-        has_work = current is not None
+    has_work = current is not None
+    if playback_state == "clearing":
+        playback_state = "clearing" if has_work else "idle"
+    elif playback_state not in {"loading", "setup_required", "stopped"}:
         playback_state = (
             "paused" if has_work and playback_control.pause_requested()
             else "playing" if has_work
@@ -2327,14 +2330,20 @@ def process_mutation_requests(
                 invalidate_held_chunk = invalidate_held_chunk or play_effect == "select"
                 result_id = request.id
             elif isinstance(request, ClearMutation):
-                clear_sequence = playback_control.begin_command(True)
+                clear_committed = False
+                playback_control.start_clearing(request.request_id)
                 try:
+                    publish_status("clearing", st, force=True)
                     if not do_clear(buf, st):
                         raise MutationOutcomeUnconfirmed(
                             "clear result was unconfirmed"
                         )
+                    clear_committed = True
                 finally:
-                    playback_control.end_command(clear_sequence)
+                    playback_control.finish_clearing(
+                        request.request_id,
+                        hold_active=clear_committed
+                    )
                 effect = "clear"
                 invalidate_held_chunk = True
             elif isinstance(request, MoveMutation):
