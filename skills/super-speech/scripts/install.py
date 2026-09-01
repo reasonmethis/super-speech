@@ -42,7 +42,7 @@ def engine_environment(runtime: Path) -> dict[str, str]:
     }
 
 
-def engine_lock_is_held(runtime: Path) -> bool:
+def runtime_engine_is_active(runtime: Path) -> bool:
     lock_path = runtime / "engine.lock"
     if not lock_path.is_file():
         return False
@@ -51,10 +51,6 @@ def engine_lock_is_held(runtime: Path) -> bool:
         return True
     lock.release()
     return False
-
-
-def runtime_engine_is_active(runtime: Path) -> bool:
-    return engine_lock_is_held(runtime)
 
 
 def stop_existing_engine(engine: Path, runtime: Path) -> None:

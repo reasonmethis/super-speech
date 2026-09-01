@@ -134,7 +134,7 @@ def test_status_without_an_owner_lock_does_not_block_an_upgrade(
 
 
 def test_stale_heartbeat_does_not_report_an_active_engine(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    tmp_path: Path,
 ) -> None:
     installer = load_installer()
     runtime = tmp_path / "runtime"
@@ -144,7 +144,6 @@ def test_stale_heartbeat_does_not_report_an_active_engine(
         json.dumps({"state": "stopped", "engine_pid": 123}),
         encoding="utf-8",
     )
-    monkeypatch.setattr(installer, "engine_lock_is_held", lambda _runtime: False)
     assert not installer.runtime_engine_is_active(runtime)
 
 

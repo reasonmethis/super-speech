@@ -14,8 +14,7 @@ if [ -f "$manifest_path" ] && command -v plutil >/dev/null 2>&1; then
 fi
 
 if [ -n "$engine_path" ]; then
-    "$engine_path" "$@"
-    exit $?
+    exec "$engine_path" "$@"
 fi
 
 headless_runtime="$skill_directory/runtime"
@@ -28,5 +27,4 @@ fi
 SUPER_SPEECH_HOME=$headless_runtime
 SUPER_SPEECH_MODEL_DIR="$headless_runtime/models/kokoro"
 export SUPER_SPEECH_HOME SUPER_SPEECH_MODEL_DIR
-"$headless_engine" "$@"
-exit $?
+exec "$headless_engine" "$@"

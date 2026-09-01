@@ -38,27 +38,7 @@ if (-not (Test-Path -LiteralPath $headlessEngine -PathType Leaf)) {
     exit 1
 }
 
-$homeWasSet = Test-Path Env:SUPER_SPEECH_HOME
-$modelDirectoryWasSet = Test-Path Env:SUPER_SPEECH_MODEL_DIR
-$previousHome = $env:SUPER_SPEECH_HOME
-$previousModelDirectory = $env:SUPER_SPEECH_MODEL_DIR
-
-try {
-    $env:SUPER_SPEECH_HOME = $headlessRuntime
-    $env:SUPER_SPEECH_MODEL_DIR = Join-Path $headlessRuntime "models\kokoro"
-    & $headlessEngine @args
-    $exitCode = $LASTEXITCODE
-} finally {
-    if ($homeWasSet) {
-        $env:SUPER_SPEECH_HOME = $previousHome
-    } else {
-        Remove-Item Env:SUPER_SPEECH_HOME -ErrorAction SilentlyContinue
-    }
-    if ($modelDirectoryWasSet) {
-        $env:SUPER_SPEECH_MODEL_DIR = $previousModelDirectory
-    } else {
-        Remove-Item Env:SUPER_SPEECH_MODEL_DIR -ErrorAction SilentlyContinue
-    }
-}
-
-exit $exitCode
+$env:SUPER_SPEECH_HOME = $headlessRuntime
+$env:SUPER_SPEECH_MODEL_DIR = Join-Path $headlessRuntime "models\kokoro"
+& $headlessEngine @args
+exit $LASTEXITCODE
