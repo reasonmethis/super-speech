@@ -1,14 +1,10 @@
 from __future__ import annotations
 
 import json
-import sys
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-
-ENGINE_SOURCE = Path(__file__).parents[1] / "skills" / "super-speech" / "engine"
-sys.path.insert(0, str(ENGINE_SOURCE))
 
 from speechicle_identity import (
     IdentityCatalog,

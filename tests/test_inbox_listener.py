@@ -1,12 +1,8 @@
 from __future__ import annotations
 
 import json
-import sys
 import threading
 from pathlib import Path
-
-ENGINE_SOURCE = Path(__file__).parents[1] / "skills" / "super-speech" / "engine"
-sys.path.insert(0, str(ENGINE_SOURCE))
 
 from inbox_listener import inbox_lines
 

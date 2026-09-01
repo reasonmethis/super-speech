@@ -12,7 +12,6 @@ from types import SimpleNamespace
 import pytest
 
 ENGINE_SOURCE = Path(__file__).parents[1] / "skills" / "super-speech" / "engine"
-sys.path.insert(0, str(ENGINE_SOURCE))
 
 import timeline_storage as timeline_storage_module
 from speechicle_identity import SpeechicleFilename
