@@ -125,6 +125,31 @@ def test_metadata_follows_one_id_through_voice_history_and_delete(
     assert storage.metadata(speechicle_id) == timeline_storage_module.SpeechicleMetadata()
 
 
+def test_archive_updates_a_warm_history_view_without_rescanning(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    storage = prepared_storage(tmp_path)
+    earlier = storage.reserve("af_heart", None, "Earlier")
+    assert storage.archive_many([earlier])
+    assert storage.history_snapshot(50)[1][0]["text"] == "Earlier"
+    newest = storage.reserve("bm_fable", None, "Newest")
+
+    monkeypatch.setattr(
+        storage,
+        "history_files",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("steady-state archive scanned all History files")
+        ),
+    )
+
+    assert storage.archive_many([newest])
+    count, items = storage.history_snapshot(50)
+
+    assert count == 2
+    assert [item["text"] for item in items] == ["Newest", "Earlier"]
+
+
 def test_missing_speechicle_errors_use_the_public_id(tmp_path: Path) -> None:
     storage = prepared_storage(tmp_path)
     public_id = f"sp_{'a' * 32}"

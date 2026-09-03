@@ -313,6 +313,7 @@ class TimelineStorage:
         self._order_cache: dict[Path, list[str]] = {}
         self._history_dirty = True
         self._history_count = 0
+        self._history_limit = 0
         self._history_items: list[dict[str, object]] = []
 
     @contextmanager
@@ -752,34 +753,81 @@ class TimelineStorage:
         with self._lock:
             self._history_dirty = True
 
+    def _history_item(
+        self,
+        path: Path,
+        previous: dict[str, dict[str, object]],
+    ) -> tuple[dict[str, object], bool]:
+        filename = self.canonical_filename(path)
+        speechicle_id = filename.public_id
+        read_failed = False
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            read_failed = True
+            text = str(previous.get(speechicle_id, {}).get("text", ""))
+        item: dict[str, object] = {
+            "id": speechicle_id,
+            "text": text,
+            "voice": filename.voice,
+        }
+        metadata = self.metadata(speechicle_id)
+        if metadata.source is not None:
+            item["source"] = metadata.source
+        if metadata.inbox is not None:
+            item["inbox"] = metadata.inbox
+        return item, read_failed
+
+    def _history_ids_for_transaction(self) -> tuple[list[str], bool]:
+        saved_ids = self._read_order(self.paths.history_order)
+        # Storage mutations dirty the cache, so matching counts make this order complete
+        cache_matches_order = (
+            not self._history_dirty and len(saved_ids) == self._history_count
+        )
+        if cache_matches_order:
+            return saved_ids, True
+        paths = self.history_files()
+        return [self.public_id(path) for path in paths], False
+
+    def _record_archived_history(
+        self,
+        paths: list[Path],
+        history_ids: list[str],
+    ) -> None:
+        previous = {str(item["id"]): item for item in self._history_items}
+        moved_ids = {self.public_id(path) for path in paths}
+        new_items: list[dict[str, object]] = []
+        read_failed = False
+        for path in reversed(paths):
+            item, item_read_failed = self._history_item(
+                self.paths.history / path.name,
+                previous,
+            )
+            new_items.append(item)
+            read_failed |= item_read_failed
+        retained = [
+            item for item in self._history_items if item["id"] not in moved_ids
+        ]
+        self._history_count = len(history_ids)
+        self._history_items = [*new_items, *retained][: self._history_limit]
+        self._history_dirty = read_failed
+
     def history_snapshot(self, limit: int) -> tuple[int, list[dict[str, object]]]:
         """Return the cached bounded History view, refreshing after mutations."""
         with self._lock:
-            if self._history_dirty:
+            if self._history_dirty or limit != self._history_limit:
                 history_files = self.history_files()
                 items: list[dict[str, object]] = []
                 read_failed = False
-                previous = {str(item["id"]): item for item in self._history_items}
+                previous = {
+                    str(item["id"]): item for item in self._history_items
+                }
                 for path in history_files[:limit]:
-                    filename = self.canonical_filename(path)
-                    speechicle_id = filename.public_id
-                    try:
-                        text = path.read_text(encoding="utf-8").strip()
-                    except OSError:
-                        read_failed = True
-                        text = str(previous.get(speechicle_id, {}).get("text", ""))
-                    item: dict[str, object] = {
-                        "id": speechicle_id,
-                        "text": text,
-                        "voice": filename.voice,
-                    }
-                    metadata = self.metadata(speechicle_id)
-                    if metadata.source is not None:
-                        item["source"] = metadata.source
-                    if metadata.inbox is not None:
-                        item["inbox"] = metadata.inbox
+                    item, item_read_failed = self._history_item(path, previous)
                     items.append(item)
+                    read_failed |= item_read_failed
                 self._history_count = len(history_files)
+                self._history_limit = limit
                 self._history_items = items
                 self._history_dirty = read_failed
             return self._history_count, self._history_items
@@ -1151,17 +1199,21 @@ class TimelineStorage:
         with self.mutation(timeout=None):
             self._recover_current_plan()
             previous_queue = self.queue_files()
-            previous_history = self.history_files()
+            previous_history_ids, history_cache_is_current = (
+                self._history_ids_for_transaction()
+            )
             archived_names = {path.name for path in unique}
+            archived_ids = {self.public_id(path) for path in unique}
             desired_queue = [
                 path for path in previous_queue if path.name not in archived_names
             ]
-            retained_history = [
-                path for path in previous_history if path.name not in archived_names
-            ]
-            desired_history = [
-                *(self.paths.history / path.name for path in reversed(unique)),
-                *retained_history,
+            desired_history_ids = [
+                *(self.public_id(path) for path in reversed(unique)),
+                *(
+                    speechicle_id
+                    for speechicle_id in previous_history_ids
+                    if speechicle_id not in archived_ids
+                ),
             ]
             moves = tuple(
                 TimelineMove(
@@ -1182,9 +1234,9 @@ class TimelineStorage:
                 "archive",
                 moves,
                 tuple(self.public_id(path) for path in previous_queue),
-                tuple(self.public_id(path) for path in previous_history),
+                tuple(previous_history_ids),
                 tuple(self.public_id(path) for path in desired_queue),
-                tuple(self.public_id(path) for path in desired_history),
+                tuple(desired_history_ids),
             )
             try:
                 self._execute_plan(plan)
@@ -1192,6 +1244,8 @@ class TimelineStorage:
                 raise
             except (OSError, RuntimeError):
                 return False
+            if history_cache_is_current:
+                self._record_archived_history(unique, desired_history_ids)
             return True
 
     def archive(self, path: Path) -> bool:

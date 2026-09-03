@@ -315,7 +315,6 @@ def test_history_snapshot_keeps_rows_during_a_transient_text_lock(
     prepare_timeline(engine)
     assert engine.history_snapshot()[1][0]["text"] == "First"
     queued_second = engine.enqueue_text("Second", "af_heart")
-    assert engine.archive(queued_second)
     second = engine.SPOKEN / queued_second.name
     original_read_text = Path.read_text
 
@@ -325,6 +324,7 @@ def test_history_snapshot_keeps_rows_during_a_transient_text_lock(
         return original_read_text(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", locked_text)
+    assert engine.archive(queued_second)
     count, items = engine.history_snapshot()
 
     assert count == len(items) == 2

@@ -67,7 +67,7 @@ function status() {
     assert.match(row.id, /^sp_[0-9a-f]{32}$/, "Status leaked an invalid Speechicle ID");
     assert(!Object.hasOwn(row, "filename"), "Status leaked an internal filename");
   }
-  assert.equal(snapshot.version, 16, "Pointer smoke requires the current status schema");
+  assert.equal(snapshot.version, 17, "Pointer smoke requires the current status schema");
   assert(Number.isInteger(snapshot.timeline_revision));
   assert(snapshot.timeline_revision >= 0);
   return snapshot;
@@ -1601,14 +1601,9 @@ try {
     return startedAt;
   });
   assert.equal(
-    await page.locator("#status-label").textContent(),
-    "Clearing speech",
-    "Clear all must present its real in-progress state",
-  );
-  assert.equal(
     await page.locator("body").getAttribute("data-state"),
-    "clearing",
-    "Clear all must enter Clearing without presenting Paused",
+    "idle",
+    "Clear all must present Ready as soon as live audio stops",
   );
   await waitFor(
     () => status().current === null && status().queue_count === 0 && status().state === "idle",
@@ -1630,8 +1625,8 @@ try {
     `Clear all presented Paused: ${clearPresentationStates.join(", ")}`,
   );
   assert(
-    clearPresentationStates.includes("clearing"),
-    `Clear all never presented Clearing: ${clearPresentationStates.join(", ")}`,
+    clearPresentationStates.includes("idle"),
+    `Clear all never presented Ready: ${clearPresentationStates.join(", ")}`,
   );
   await waitFor(
     async () => await page.locator("body").getAttribute("data-state") === "idle",

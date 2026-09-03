@@ -1,7 +1,7 @@
 {
   "valid": [
     {
-      "version": 16,
+      "version": 17,
       "timeline_revision": 0,
       "state": "idle",
       "updated_at": 1,
@@ -13,7 +13,7 @@
       "history": []
     },
     {
-      "version": 16,
+      "version": 17,
       "timeline_revision": 7,
       "state": "playing",
       "updated_at": 2.5,
@@ -48,7 +48,7 @@
       ]
     },
     {
-      "version": 16,
+      "version": 17,
       "timeline_revision": 8,
       "state": "paused",
       "updated_at": 3,
@@ -67,32 +67,11 @@
       "queue": [],
       "history_count": 0,
       "history": []
-    },
-    {
-      "version": 16,
-      "timeline_revision": 9,
-      "state": "clearing",
-      "updated_at": 4,
-      "engine_pid": 42,
-      "current": {
-        "id": "sp_00000000000000000000000000000005",
-        "text": "Moving to History",
-        "voice": "af_heart",
-        "piece": 1,
-        "piece_count": 1,
-        "piece_start": 0,
-        "piece_end": 17,
-        "elapsed_seconds": 0.5
-      },
-      "queue_count": 0,
-      "queue": [],
-      "history_count": 0,
-      "history": []
     }
   ],
   "invalid": [
     {
-      "version": 16,
+      "version": 17,
       "timeline_revision": 0,
       "state": "paused",
       "updated_at": 1,
@@ -104,7 +83,7 @@
       "history": []
     },
     {
-      "version": 16,
+      "version": 17,
       "timeline_revision": 0,
       "state": "clearing",
       "updated_at": 1,
@@ -116,7 +95,7 @@
       "history": []
     },
     {
-      "version": 16,
+      "version": 17,
       "timeline_revision": 0,
       "state": "idle",
       "updated_at": 1,
@@ -137,7 +116,7 @@
       "history": []
     },
     {
-      "version": 16,
+      "version": 17,
       "timeline_revision": 0,
       "state": "loading",
       "updated_at": 1,
@@ -155,7 +134,7 @@
       "history": []
     },
     {
-      "version": 16,
+      "version": 17,
       "timeline_revision": true,
       "state": "stopped",
       "updated_at": 1,
@@ -167,7 +146,7 @@
       "history": []
     },
     {
-      "version": 16,
+      "version": 17,
       "timeline_revision": 0,
       "state": "playing",
       "updated_at": 1,
@@ -188,7 +167,7 @@
       "history": []
     },
     {
-      "version": 16,
+      "version": 17,
       "timeline_revision": 0,
       "state": "stopped",
       "updated_at": 1,
@@ -206,7 +185,7 @@
       ]
     },
     {
-      "version": 16,
+      "version": 17,
       "timeline_revision": 0,
       "state": "stopped",
       "updated_at": 1,
@@ -229,7 +208,7 @@
       ]
     },
     {
-      "version": 16,
+      "version": 17,
       "timeline_revision": 0,
       "state": "stopped",
       "updated_at": 1,
@@ -248,7 +227,7 @@
       ]
     },
     {
-      "version": 16,
+      "version": 17,
       "timeline_revision": 0,
       "state": "stopped",
       "updated_at": 1,

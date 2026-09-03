@@ -1,5 +1,4 @@
 const RUNTIME_STATES = [
-  "clearing",
   "loading",
   "playing",
   "paused",
@@ -10,7 +9,7 @@ const RUNTIME_STATES = [
 
 export type RuntimeState = (typeof RUNTIME_STATES)[number];
 
-export const ENGINE_STATUS_VERSION = 16 as const;
+export const ENGINE_STATUS_VERSION = 17 as const;
 export const AGENT_MESSAGE_TEXT_MAX = 4_000;
 
 const SPEECHICLE_ID = /^sp_[0-9a-f]{32}$/;
@@ -191,13 +190,13 @@ export interface TimelineItem extends SpeechicleItem {
 }
 
 export type PlaybackPresentation =
-  | { state: "clearing" | "playing" | "paused"; item: SpeechicleItem }
+  | { state: "playing" | "paused"; item: SpeechicleItem }
   | { state: "loading"; item: SpeechicleItem | null }
   | { state: "idle" | "setup_required" | "stopped"; item: null };
 
 export type PendingPlayback = {
   item: SpeechicleItem;
-  state: "clearing" | "playing" | "paused";
+  state: "playing" | "paused";
 };
 
 export function playbackPresentation(
@@ -219,11 +218,7 @@ export function playbackPresentation(
       ? { state: "loading", item: null }
       : { state: "idle", item: null };
   }
-  if (
-    status.state === "paused" ||
-    status.state === "clearing" ||
-    status.state === "loading"
-  ) {
+  if (status.state === "paused" || status.state === "loading") {
     return { state: status.state, item: status.current };
   }
   return { state: "playing", item: status.current };
@@ -276,11 +271,7 @@ function isCurrentItem(value: unknown): value is CurrentItem {
 
 function playbackBoundaryMatchesState(value: Record<string, unknown>): boolean {
   const hasCurrent = value.current !== null;
-  if (
-    value.state === "clearing" ||
-    value.state === "playing" ||
-    value.state === "paused"
-  ) {
+  if (value.state === "playing" || value.state === "paused") {
     return hasCurrent;
   }
   if (value.state === "idle") {
@@ -395,6 +386,24 @@ export function timelineItems(
     ...(status.current ? [timelineItem(status.current, "current", null)] : []),
     ...status.history.map((item) => timelineItem(item, "history", null)),
   ];
+}
+
+export function clearedTimeline(status: RuntimeStatus): RuntimeStatus {
+  const archived = [
+    ...status.queue.slice().reverse(),
+    ...(status.current ? [status.current] : []),
+  ];
+  const history = [...archived, ...status.history];
+  const hasHiddenHistory = status.history_count > status.history.length;
+  return {
+    ...status,
+    state: "idle",
+    current: null,
+    queue_count: 0,
+    queue: [],
+    history_count: status.history_count + archived.length,
+    history: hasHiddenHistory ? history.slice(0, status.history.length) : history,
+  };
 }
 
 export function moveSpeechicleItemBefore<T extends { id: string }>(

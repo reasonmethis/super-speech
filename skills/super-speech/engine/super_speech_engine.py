@@ -148,7 +148,7 @@ SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
-STATUS_VERSION = 16
+STATUS_VERSION = 17
 STARTUP_TIMEOUT = 120.0
 
 timeline = TimelineStorage(TIMELINE_PATHS, DEFAULT_VOICE)
@@ -1211,7 +1211,6 @@ def _snapshot_is_valid(snapshot: object) -> bool:
         snapshot.get("version") == STATUS_VERSION
         and state
         in {
-            "clearing",
             "idle",
             "loading",
             "paused",
@@ -1240,7 +1239,7 @@ def _snapshot_is_valid(snapshot: object) -> bool:
         and not isinstance(history_count, bool)
         and history_count >= len(history_items)
         and (current is not None or not queue_items)
-        and (state not in {"clearing", "playing", "paused"} or current is not None)
+        and (state not in {"playing", "paused"} or current is not None)
         and (state != "idle" or current is None)
     ):
         return False
@@ -1776,7 +1775,7 @@ def publish_startup_status(timeline_revision: int) -> dict[str, object]:
     return payload
 
 
-LifecycleState = Literal["loading", "setup_required", "stopped", "clearing"]
+LifecycleState = Literal["loading", "setup_required", "stopped"]
 
 
 def publish_status(
@@ -1855,9 +1854,7 @@ def publish_status(
         )
 
     has_work = current is not None
-    if lifecycle_state == "clearing":
-        state = "clearing" if has_work else "idle"
-    elif lifecycle_state is None:
+    if lifecycle_state is None:
         state = (
             "paused" if has_work and playback_control.pause_requested()
             else "playing" if has_work
@@ -2245,7 +2242,6 @@ def process_mutation_requests(
                 clear_committed = False
                 playback_control.start_clearing(request.request_id)
                 try:
-                    publish_status(st, lifecycle_state="clearing", force=True)
                     if not do_clear(buf, st):
                         raise MutationOutcomeUnconfirmed(
                             "clear result was unconfirmed"

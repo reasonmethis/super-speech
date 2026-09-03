@@ -6,6 +6,7 @@ import {
   INITIAL_STATUS,
   VOICE_OPTIONS,
   adoptTimelineSnapshot,
+  clearedTimeline,
   currentPieceSegments,
   moveSpeechicleItemBefore,
   playbackPresentation,
@@ -226,9 +227,6 @@ function pendingPlaybackForPresentation(): PendingPlayback | null {
   if (pending?.kind === "play") {
     return { item: pending.item, state: pending.playbackState };
   }
-  if (pending?.kind === "clear" && currentStatus.current) {
-    return { item: currentStatus.current, state: "clearing" };
-  }
   return null;
 }
 
@@ -315,7 +313,6 @@ function timelineAction(
     return "";
   }
   const labels: Partial<Record<RuntimeStatus["state"], string>> = {
-    clearing: "Clearing",
     loading: "Preparing",
     playing: "Speaking",
     paused: "Paused",
@@ -373,17 +370,11 @@ function statusCopy(presentation: PlaybackPresentation) {
       body: "Kokoro is loading locally. This normally takes a few seconds.",
     };
   }
-  if (
-    presentation.state === "paused" ||
-    presentation.state === "clearing" ||
-    presentation.state === "playing"
-  ) {
+  if (presentation.state === "paused" || presentation.state === "playing") {
     return {
       label: presentation.state === "playing"
         ? "Speaking"
-        : presentation.state === "paused"
-          ? "Paused"
-          : "Clearing",
+        : "Paused",
       title: formatVoice(presentation.item.voice),
       body: presentation.item.text,
     };
@@ -464,9 +455,6 @@ function playbackIconMarkup(state: PlaybackPresentation["state"]): string {
   if (state === "playing") {
     return '<svg viewBox="0 0 32 32"><rect class="solid" x="7" y="5" width="7" height="22" rx="2.5"/><rect class="solid" x="18" y="5" width="7" height="22" rx="2.5"/></svg>';
   }
-  if (state === "clearing") {
-    return '<svg viewBox="0 0 32 32"><rect class="solid" x="8" y="8" width="16" height="16" rx="3"/></svg>';
-  }
   if (state === "stopped") {
     return '<svg viewBox="0 0 32 32"><path d="M16 8v9m0 6v1"/></svg>';
   }
@@ -513,8 +501,11 @@ function render(status: RuntimeStatus): void {
     commandStatus.textContent = "";
   }
   currentStatus = status;
+  const displayedStatus = pendingTimelineMutation?.kind === "clear"
+    ? clearedTimeline(status)
+    : status;
   const presentation = playbackPresentation(
-    status,
+    displayedStatus,
     pendingPlaybackForPresentation(),
   );
   const copy = statusCopy(presentation);
@@ -533,8 +524,8 @@ function render(status: RuntimeStatus): void {
   currentText.classList.toggle("is-hidden", showComposer);
   speechComposer.classList.toggle("is-hidden", !showComposer);
   renderComposerControls();
-  const followedCurrent = status.current?.id === presentation.item?.id
-    ? status.current
+  const followedCurrent = displayedStatus.current?.id === presentation.item?.id
+    ? displayedStatus.current
     : null;
   const canExpand = followedCurrent !== null;
   playbackCopy.dataset.expandable = String(canExpand);
@@ -581,9 +572,7 @@ function render(status: RuntimeStatus): void {
     setup: "Open setup guide",
     inactive: presentation.state === "loading"
       ? "Preparing speech"
-      : presentation.state === "clearing"
-        ? "Clearing speech"
-        : "Ready for speech",
+      : "Ready for speech",
   };
   playbackButton.dataset.action = action;
   playbackButton.setAttribute("aria-label", actionLabels[action]);
@@ -610,8 +599,9 @@ function render(status: RuntimeStatus): void {
     sourceLabel.textContent = current.source ?? "";
   }
 
-  const visibleItems = visibleTimelineItems(status);
-  const activeCount = status.queue.length + (status.current ? 1 : 0);
+  const visibleItems = visibleTimelineItems(displayedStatus);
+  const activeCount = displayedStatus.queue.length +
+    (displayedStatus.current ? 1 : 0);
   const clearPending = pendingTimelineMutation?.kind === "clear";
   const clearFailed = failedTimelineMutation?.type === "clear";
   clearQueueButton.classList.toggle("is-hidden", activeCount === 0);
@@ -631,7 +621,7 @@ function render(status: RuntimeStatus): void {
     : clearFailed
       ? "Retry clear all"
       : "Clear all";
-  renderTimeline(visibleItems, status.history_count);
+  renderTimeline(visibleItems, displayedStatus.history_count);
 }
 
 function clearHistoryDropIndicator(): void {
@@ -1451,7 +1441,6 @@ function updateTimelineDividers(items: TimelineItem[], historyTotal: number): vo
   const waitingCount = items.filter(({ kind }) => kind === "waiting").length;
   const historyCount = items.filter(({ kind }) => kind === "history").length;
   const currentLabel = ({
-      clearing: "Clearing",
       loading: "Preparing",
       playing: "Playing",
       paused: "Paused",
@@ -1886,7 +1875,7 @@ async function runTimelineMutation(
     document.activeElement === clearQueueButton;
   pendingTimelineMutation = pending;
   failedTimelineMutation = null;
-  commandStatus.textContent = pending.kind === "clear" ? "Clearing speech" : "";
+  commandStatus.textContent = "";
   render(currentStatus);
   let committed = false;
   try {

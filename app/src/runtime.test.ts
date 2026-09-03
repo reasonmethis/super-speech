@@ -6,6 +6,7 @@ import {
   ENGINE_STATUS_VERSION,
   VOICE_OPTIONS,
   adoptTimelineSnapshot,
+  clearedTimeline,
   compatibleEngineIsRunning,
   currentPieceSegments,
   engineProcessIsLive,
@@ -172,7 +173,7 @@ test("an incompatible external engine cannot leave the app loading forever", () 
 });
 
 test("accepts a complete current-version status", () => {
-  assert.equal(ENGINE_STATUS_VERSION, 16);
+  assert.equal(ENGINE_STATUS_VERSION, 17);
   assert.equal(parseEngineStatus(status), status);
 });
 
@@ -372,7 +373,7 @@ test("makes active playback states impossible without active speech", () => {
     voice: "af_heart",
   };
 
-  for (const state of ["idle", "clearing", "paused", "playing"] as const) {
+  for (const state of ["idle", "paused", "playing"] as const) {
     assert.deepEqual(
       playbackPresentation({ ...status, state }, null),
       { state: "idle", item: null },
@@ -389,7 +390,7 @@ test("makes active playback states impossible without active speech", () => {
   );
 });
 
-test("pending Play and Clear override stale paused and stopped snapshots", () => {
+test("pending Play overrides stale paused and stopped snapshots", () => {
   const selected = {
     id: speechicleId(7),
     text: "Selected",
@@ -399,7 +400,6 @@ test("pending Play and Clear override stale paused and stopped snapshots", () =>
   for (
     const [snapshotState, pendingState] of [
       ["paused", "playing"],
-      ["paused", "clearing"],
       ["stopped", "playing"],
     ] as const
   ) {
@@ -409,6 +409,31 @@ test("pending Play and Clear override stale paused and stopped snapshots", () =>
       pending,
     );
   }
+});
+
+test("projects Clear directly to an idle timeline without changing row order", () => {
+  const current = currentItem(2);
+  const next = { id: speechicleId(3), text: "Next", voice: "af_heart" };
+  const newest = { id: speechicleId(4), text: "Newest", voice: "af_heart" };
+  const earlier = { id: speechicleId(1), text: "Earlier", voice: "af_heart" };
+
+  const cleared = clearedTimeline(liveRuntime({
+    state: "paused",
+    current,
+    queue_count: 2,
+    queue: [next, newest],
+    history_count: 1,
+    history: [earlier],
+  }));
+
+  assert.equal(cleared.state, "idle");
+  assert.equal(cleared.current, null);
+  assert.deepEqual(cleared.queue, []);
+  assert.equal(cleared.history_count, 4);
+  assert.deepEqual(
+    cleared.history.map(({ id }) => id),
+    [newest.id, next.id, current.id, earlier.id],
+  );
 });
 
 test("keeps newest waiting speech above current speech and history", () => {
