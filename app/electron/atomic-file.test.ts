@@ -391,8 +391,9 @@ test("managed skill installation creates a missing skills directory", async () =
   }
 });
 
-test("tray playback actions change only across pause-relevant states", () => {
-  assert.equal(trayPlaybackAction("idle"), null);
+test("tray playback actions cover both active and future speech", () => {
+  assert.equal(trayPlaybackAction("idle"), "pause");
+  assert.equal(trayPlaybackAction("holding"), "resume");
   assert.equal(trayPlaybackAction("stopped"), null);
   assert.equal(trayPlaybackAction("playing"), "pause");
   assert.equal(trayPlaybackAction("paused"), "resume");

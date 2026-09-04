@@ -49,7 +49,8 @@ same Queue and playback implementation.
 
 ## Desktop controls
 
-- Pause stops at the current audio sample; Resume continues from that sample
+- Pause stops at the current audio sample. When nothing is queued, Pause holds
+  future Speechicles until Resume is clicked
 - Click a Speechicle to expand its text, or double-click it to play it
 - Click the voice beneath any Speechicle to play the same text with another
   installed voice

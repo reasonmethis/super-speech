@@ -118,9 +118,11 @@ Only a drag changes relative order. Reordering Waiting or History does not
 replace Current or discard its audio.
 
 Current remains Current while its first piece is being prepared, while it is
-playing, while paused, and during a gap between pieces. Idle means there is no
-Current and no Waiting. These rules keep states such as Paused without Current,
-or Waiting without Current, out of engine status and out of the window model.
+playing, while paused, and during a gap between pieces. Idle and Holding both
+mean there is no Current and no Waiting. Holding also means the pause request
+is saved, so the next Speechicle becomes paused Current speech. These rules keep
+Paused without Current and Waiting without Current out of engine status and the
+window model.
 
 ## Status sent to the app
 
@@ -157,10 +159,10 @@ engine. This avoids starting a Python process for each click while keeping
 command behavior in Python. The endpoint file includes a random token and the
 owning process ID, so Electron rejects stale endpoints after an engine restart.
 
-Pause and Resume use an ordered `PAUSE` marker, so a paused timeline stays
-paused across an engine restart. Skip, Stop, and Interrupt name the engine
-process they belong to, so an old destructive command cannot affect a
-replacement process.
+Pause and Resume use an ordered `PAUSE` marker, so paused Current speech and an
+empty Holding timeline stay paused across an engine restart. Skip, Stop, and
+Interrupt name the engine process they belong to, so an old destructive command
+cannot affect a replacement process.
 
 Pause and Resume return only after the live audio object acknowledges the
 applied state. A single ordered background writer then saves the compatibility

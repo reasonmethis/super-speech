@@ -52,6 +52,13 @@ test("accepts only strict playback acknowledgements from the current engine", ()
     state: ack.state,
     updated_at: ack.updated_at,
   });
+  assert.deepEqual(
+    parsePlaybackControlAck(
+      { ...ack, state: "holding", audio_state: "idle" },
+      ENGINE_PID,
+    ),
+    { state: "holding", updated_at: ack.updated_at },
+  );
   assert.equal(parsePlaybackControlAck(ack, 456), null);
   assert.equal(
     parsePlaybackControlAck({ ...ack, state: "loading" }, ENGINE_PID),

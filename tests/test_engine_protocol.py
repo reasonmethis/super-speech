@@ -53,8 +53,10 @@ def test_python_status_validator_rejects_the_same_impossible_states_as_the_app()
     valid = {**base, "state": "playing", "current": current}
 
     assert engine._snapshot_is_valid(valid)
+    assert engine._snapshot_is_valid({**base, "state": "holding"})
     for invalid in [
         {**base, "state": "paused"},
+        {**valid, "state": "holding"},
         {
             **base,
             "queue_count": 1,

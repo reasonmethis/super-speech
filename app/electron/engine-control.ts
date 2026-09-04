@@ -12,17 +12,23 @@ interface EngineControlEndpoint {
 }
 
 interface PlaybackControlAck {
-  state: "idle" | "paused" | "playing";
+  state: "holding" | "idle" | "paused" | "playing";
   updated_at: number;
 }
+
+type AudioPlaybackState = "idle" | "paused" | "playing";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isPlaybackState(
+function isRuntimePlaybackState(
   value: unknown,
 ): value is PlaybackControlAck["state"] {
+  return value === "holding" || isAudioPlaybackState(value);
+}
+
+function isAudioPlaybackState(value: unknown): value is AudioPlaybackState {
   return value === "idle" || value === "paused" || value === "playing";
 }
 
@@ -86,11 +92,11 @@ export function parsePlaybackControlAck(
     Object.keys(ack).length !== 5 ||
     ack.version !== CONTROL_PROTOCOL_VERSION ||
     ack.engine_pid !== enginePid ||
-    !isPlaybackState(ack.state) ||
+    !isRuntimePlaybackState(ack.state) ||
     typeof ack.updated_at !== "number" ||
     !Number.isFinite(ack.updated_at) ||
     ack.updated_at <= 0 ||
-    !isPlaybackState(ack.audio_state)
+    !isAudioPlaybackState(ack.audio_state)
   ) {
     return null;
   }

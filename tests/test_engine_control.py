@@ -178,6 +178,30 @@ def test_live_playback_control_reports_the_synchronously_applied_state() -> None
     control.detach(playback)
 
 
+def test_playback_ack_distinguishes_holding_from_paused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = load_engine("super_speech_engine_control_ack_state")
+    snapshot = {"current": None}
+    monkeypatch.setattr(engine, "_read_authoritative_status", lambda: snapshot)
+
+    assert engine.playback_control_ack(True, "idle")["state"] == "holding"
+    assert engine.playback_control_ack(False, "idle")["state"] == "idle"
+
+    snapshot["current"] = {"id": f"sp_{'1' * 32}"}
+    assert engine.playback_control_ack(True, "paused")["state"] == "paused"
+    assert engine.playback_control_ack(False, "playing")["state"] == "playing"
+
+
+def test_playback_state_has_one_boundary_mapping() -> None:
+    engine = load_engine("super_speech_engine_playback_boundary_state")
+
+    assert engine.playback_state_for_boundary(False, False) == "idle"
+    assert engine.playback_state_for_boundary(False, True) == "holding"
+    assert engine.playback_state_for_boundary(True, False) == "playing"
+    assert engine.playback_state_for_boundary(True, True) == "paused"
+
+
 def test_clear_owns_live_audio_until_the_old_stream_detaches() -> None:
     control = LivePlaybackControl(lambda: False)
 

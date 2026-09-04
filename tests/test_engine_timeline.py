@@ -1053,6 +1053,7 @@ def test_clear_archives_a_paused_current_and_publishes_idle(tmp_path: Path) -> N
     engine.PAUSE.touch()
 
     assert engine.do_clear(queue.Queue(), state)
+    engine.resume()
     engine.publish_status(state, force=True)
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 

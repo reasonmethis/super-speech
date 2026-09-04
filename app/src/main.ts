@@ -10,6 +10,7 @@ import {
   currentPieceSegments,
   moveSpeechicleItemBefore,
   playbackPresentation,
+  playbackStateForBoundary,
   selectableVoiceOptions,
   timelineItems,
   type PendingPlayback,
@@ -379,6 +380,13 @@ function statusCopy(presentation: PlaybackPresentation) {
       body: presentation.item.text,
     };
   }
+  if (presentation.state === "holding") {
+    return {
+      label: "Holding",
+      title: "Speech is paused",
+      body: "New Speechicles will wait until you resume.",
+    };
+  }
   return {
     label: "Ready",
     title: "Ready when you are",
@@ -439,17 +447,17 @@ function playbackAction(state: PlaybackPresentation["state"]): PlaybackAction {
   if (state === "setup_required") {
     return "setup";
   }
-  if (state === "paused") {
+  if (state === "paused" || state === "holding") {
     return "resume";
   }
-  return state === "playing" ? "pause" : "inactive";
+  return state === "playing" || state === "idle" ? "pause" : "inactive";
 }
 
 function playbackIconMarkup(state: PlaybackPresentation["state"]): string {
   if (state === "setup_required") {
     return '<svg viewBox="0 0 32 32"><path d="M16 7v14m-6-5 6 6 6-6M8 25h16"/></svg>';
   }
-  if (state === "paused") {
+  if (state === "paused" || state === "holding") {
     return '<svg viewBox="0 0 32 32"><path class="solid" d="m8 5 19 11L8 27Z"/></svg>';
   }
   if (state === "playing") {
@@ -464,6 +472,10 @@ function playbackIconMarkup(state: PlaybackPresentation["state"]): string {
       <rect x="176" y="180" width="44" height="151" rx="22" fill="#F57033"/>
       <rect x="249" y="148" width="44" height="215" rx="22" fill="#CD377D"/>
       <rect x="322" y="117" width="44" height="278" rx="22" fill="#4153BE"/>
+    </svg>
+    <svg class="idle-hover-icon" viewBox="0 0 32 32">
+      <rect class="solid" x="7" y="5" width="7" height="22" rx="2.5"/>
+      <rect class="solid" x="18" y="5" width="7" height="22" rx="2.5"/>
     </svg>
   `;
 }
@@ -510,7 +522,8 @@ function render(status: RuntimeStatus): void {
   );
   const copy = statusCopy(presentation);
   const action = playbackAction(presentation.state);
-  const canCompose = presentation.state === "idle";
+  const canCompose = presentation.state === "idle" ||
+    presentation.state === "holding";
   if (!canCompose) {
     composerOpen = false;
   }
@@ -567,7 +580,7 @@ function render(status: RuntimeStatus): void {
   renderCurrentSpeechText(copy.body, followedCurrent);
 
   const actionLabels: Record<PlaybackAction, string> = {
-    pause: "Pause speech",
+    pause: presentation.state === "idle" ? "Pause incoming speech" : "Pause speech",
     resume: "Resume speech",
     setup: "Open setup guide",
     inactive: presentation.state === "loading"
@@ -1444,6 +1457,7 @@ function updateTimelineDividers(items: TimelineItem[], historyTotal: number): vo
       loading: "Preparing",
       playing: "Playing",
       paused: "Paused",
+      holding: "Holding",
       setup_required: "Setup needed",
       stopped: "Stopped",
       idle: "Idle",
@@ -1477,7 +1491,10 @@ function createTimelineDivider(section: TimelineSection): HTMLDivElement {
 function revealCurrentItem(): void {
   const currentId = currentStatus.current?.id ?? null;
   if (!currentId) {
-    if (currentStatus.state === "idle" && currentStatus.queue_count === 0) {
+    if (
+      (currentStatus.state === "idle" || currentStatus.state === "holding") &&
+      currentStatus.queue_count === 0
+    ) {
       revealedCurrentItemId = null;
     }
     return;
@@ -1962,7 +1979,8 @@ async function runPlaybackAction(): Promise<void> {
       }
       render(adoptTimelineSnapshot(currentStatus, status));
     } else {
-      render({ ...currentStatus, state: paused ? "paused" : "playing" });
+      const state = playbackStateForBoundary(currentStatus.current !== null, paused);
+      render({ ...currentStatus, state });
     }
   } catch (error) {
     if (action === "setup") {

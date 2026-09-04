@@ -2,14 +2,16 @@ const RUNTIME_STATES = [
   "loading",
   "playing",
   "paused",
+  "holding",
   "idle",
   "setup_required",
   "stopped",
 ] as const;
 
 export type RuntimeState = (typeof RUNTIME_STATES)[number];
+export type PlaybackRuntimeState = "holding" | "idle" | "paused" | "playing";
 
-export const ENGINE_STATUS_VERSION = 17 as const;
+export const ENGINE_STATUS_VERSION = 18 as const;
 export const AGENT_MESSAGE_TEXT_MAX = 4_000;
 
 const SPEECHICLE_ID = /^sp_[0-9a-f]{32}$/;
@@ -192,12 +194,22 @@ export interface TimelineItem extends SpeechicleItem {
 export type PlaybackPresentation =
   | { state: "playing" | "paused"; item: SpeechicleItem }
   | { state: "loading"; item: SpeechicleItem | null }
-  | { state: "idle" | "setup_required" | "stopped"; item: null };
+  | { state: "holding" | "idle" | "setup_required" | "stopped"; item: null };
 
 export type PendingPlayback = {
   item: SpeechicleItem;
   state: "playing" | "paused";
 };
+
+export function playbackStateForBoundary(
+  hasCurrent: boolean,
+  paused: boolean,
+): PlaybackRuntimeState {
+  if (hasCurrent) {
+    return paused ? "paused" : "playing";
+  }
+  return paused ? "holding" : "idle";
+}
 
 export function playbackPresentation(
   status: EngineStatus,
@@ -214,9 +226,10 @@ export function playbackPresentation(
   }
 
   if (!status.current) {
-    return status.state === "loading"
-      ? { state: "loading", item: null }
-      : { state: "idle", item: null };
+    if (status.state === "loading" || status.state === "holding") {
+      return { state: status.state, item: null };
+    }
+    return { state: "idle", item: null };
   }
   if (status.state === "paused" || status.state === "loading") {
     return { state: status.state, item: status.current };
@@ -274,7 +287,7 @@ function playbackBoundaryMatchesState(value: Record<string, unknown>): boolean {
   if (value.state === "playing" || value.state === "paused") {
     return hasCurrent;
   }
-  if (value.state === "idle") {
+  if (value.state === "idle" || value.state === "holding") {
     return !hasCurrent;
   }
   return true;

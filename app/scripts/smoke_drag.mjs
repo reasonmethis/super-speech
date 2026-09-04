@@ -67,7 +67,7 @@ function status() {
     assert.match(row.id, /^sp_[0-9a-f]{32}$/, "Status leaked an invalid Speechicle ID");
     assert(!Object.hasOwn(row, "filename"), "Status leaked an internal filename");
   }
-  assert.equal(snapshot.version, 17, "Pointer smoke requires the current status schema");
+  assert.equal(snapshot.version, 18, "Pointer smoke requires the current status schema");
   assert(Number.isInteger(snapshot.timeline_revision));
   assert(snapshot.timeline_revision >= 0);
   return snapshot;
@@ -1674,6 +1674,84 @@ try {
       path: path.join(screenshot.dir, `${screenshot.name}-idle${screenshot.ext}`),
     });
   }
+
+  const idleButton = page.locator("#playback-button");
+  await idleButton.hover();
+  assert(await page.locator("#playback-icon .idle-hover-icon").isVisible());
+  assert(!await page.locator("#playback-icon .idle-icon").isVisible());
+  assert(
+    await idleButton.evaluate((button) =>
+      getComputedStyle(button).backgroundImage.includes("rgb(0, 154, 145)")
+    ),
+    "Hovering Ready must preview the green Pause control",
+  );
+  await idleButton.click();
+  await waitFor(
+    async () =>
+      status().state === "holding" &&
+      await page.locator("body").getAttribute("data-state") === "holding",
+    "Pausing Ready did not enter Holding",
+  );
+  assert.equal(status().current, null);
+  assert.equal(status().queue_count, 0);
+  assert.equal(await page.locator("#status-label").textContent(), "Holding");
+  assert.equal(await idleButton.getAttribute("aria-label"), "Resume speech");
+  assert.equal(
+    await page.locator("#status-dot").evaluate((dot) => getComputedStyle(dot).backgroundColor),
+    "rgb(245, 112, 51)",
+    "Holding must use the orange brand color",
+  );
+  if (process.env.SUPER_SPEECH_SCREENSHOT) {
+    const screenshot = path.parse(process.env.SUPER_SPEECH_SCREENSHOT);
+    await page.screenshot({
+      path: path.join(screenshot.dir, `${screenshot.name}-holding${screenshot.ext}`),
+    });
+  }
+
+  await idleButton.click();
+  await waitFor(
+    async () =>
+      status().state === "idle" &&
+      await page.locator("body").getAttribute("data-state") === "idle",
+    "Resuming an empty Holding state did not return to Ready",
+  );
+  await idleButton.click();
+  await waitFor(
+    () => status().state === "holding",
+    "Ready did not re-enter Holding",
+  );
+  const heldText = "This Speechicle must wait silently until playback resumes.";
+  const heldId = runEngine(
+    "speak",
+    heldText,
+    "--voice",
+    "af_heart",
+    "--gap-ms",
+    "0",
+  );
+  await waitFor(
+    () => {
+      const snapshot = status();
+      assert.notEqual(snapshot.state, "playing", "Held speech became audible");
+      return snapshot.state === "paused" && snapshot.current?.id === heldId;
+    },
+    "Speech arriving during Holding did not become paused Current speech",
+    30_000,
+  );
+  await waitFor(
+    async () => await page.locator("body").getAttribute("data-state") === "paused",
+    "The renderer did not present held speech as Paused",
+  );
+  await page.locator("#clear-queue-button").click();
+  await waitFor(
+    async () =>
+      status().state === "idle" &&
+      status().current === null &&
+      status().queue_count === 0 &&
+      await page.locator("body").getAttribute("data-state") === "idle",
+    "Clear all did not leave held speech in Ready",
+    30_000,
+  );
 
   const composerText = "A manual Speechicle created from pasted text.";
   await page.locator("#playback-title").click();

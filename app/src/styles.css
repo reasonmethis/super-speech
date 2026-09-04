@@ -98,6 +98,12 @@ body[data-state="paused"] {
   --accent-deep: #252e85;
 }
 
+body[data-state="holding"] {
+  --accent: var(--carnival-orange);
+  --accent-bright: #ffad7f;
+  --accent-deep: #a83d12;
+}
+
 body[data-state="setup_required"] {
   --accent: var(--carnival-indigo);
   --accent-bright: #9aa6ff;
@@ -383,6 +389,13 @@ body.playback-expanded footer {
   box-shadow: 0 0 0 3px rgba(118, 135, 255, 0.12), 0 0 13px rgba(118, 135, 255, 0.42);
 }
 
+.status-dot.state-holding {
+  background: var(--carnival-orange);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--carnival-orange) 18%, transparent),
+    0 0 13px color-mix(in srgb, var(--carnival-orange) 48%, transparent);
+}
+
 .playback-control {
   position: relative;
   z-index: 2;
@@ -485,6 +498,27 @@ body[data-state="loading"] .playback-button::after {
   display: none;
 }
 
+body[data-state="idle"] .playback-button:not(:disabled):is(:hover, :focus-visible) {
+  border-color: rgba(255, 255, 255, 0.28);
+  background:
+    radial-gradient(circle at 35% 25%, rgba(255, 255, 255, 0.24), transparent 30%),
+    linear-gradient(145deg, var(--carnival-teal), #006f69);
+  box-shadow: 0 15px 40px color-mix(in srgb, #006f69 42%, transparent);
+}
+
+body[data-state="idle"] .playback-button:not(:disabled):is(:hover, :focus-visible)::after {
+  display: block;
+  border-color: color-mix(in srgb, var(--carnival-teal) 35%, transparent);
+}
+
+body[data-theme="light"][data-state="idle"] .playback-button:not(:disabled):is(:hover, :focus-visible) {
+  box-shadow: none;
+}
+
+body[data-theme="light"][data-state="idle"] .playback-button:not(:disabled):is(:hover, :focus-visible)::after {
+  display: none;
+}
+
 body[data-state="loading"] .playback-icon {
   animation: breathe 1.8s ease-in-out infinite;
 }
@@ -512,6 +546,18 @@ body[data-state="loading"] .playback-icon,
   width: 112px;
   height: 112px;
   filter: none;
+}
+
+.playback-icon .idle-hover-icon {
+  display: none;
+}
+
+body[data-state="idle"] .playback-button:not(:disabled):is(:hover, :focus-visible) .idle-icon {
+  display: none;
+}
+
+body[data-state="idle"] .playback-button:not(:disabled):is(:hover, :focus-visible) .idle-hover-icon {
+  display: block;
 }
 
 .playback-icon path:not(.solid) {

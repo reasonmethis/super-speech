@@ -35,6 +35,7 @@ import {
   parseEngineProcessStatus,
   parseTimelineMutation,
   parseTimelineMutationResult,
+  playbackStateForBoundary,
   runtimeStateForSnapshot,
   runtimeStatusForMutationSnapshot,
   statusAfterTransientRead,
@@ -788,11 +789,11 @@ async function setPaused(paused: boolean): Promise<RuntimeStatus> {
   }
   const status: RuntimeStatus = {
     ...runtime,
-    state: runtime.current ? ack.state : "idle",
+    state: ack.state,
     updated_at: Math.max(runtime.updated_at, ack.updated_at),
   };
-  const expectedState = paused ? "paused" : "playing";
-  if (status.state !== expectedState && status.state !== "idle") {
+  const expectedState = playbackStateForBoundary(runtime.current !== null, paused);
+  if (status.state !== expectedState) {
     throw new Error("The engine did not enter the requested playback state");
   }
   refreshTrayMenu(status);

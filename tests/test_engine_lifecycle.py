@@ -458,7 +458,7 @@ def test_status_replaces_progress_that_is_not_for_queue_first(tmp_path: Path) ->
     assert state.current_projection.active_piece is None
 
 
-def test_status_cannot_be_paused_without_current_or_waiting_speech(
+def test_status_reports_holding_when_paused_without_speech(
     tmp_path: Path,
 ) -> None:
     engine = load_engine("super_speech_engine_status_empty_pause")
@@ -468,7 +468,7 @@ def test_status_cannot_be_paused_without_current_or_waiting_speech(
     engine.publish_status(engine.State(), force=True)
     status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
 
-    assert status["state"] == "idle"
+    assert status["state"] == "holding"
     assert status["current"] is None
     assert status["queue"] == []
 

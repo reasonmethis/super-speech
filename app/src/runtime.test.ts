@@ -15,6 +15,7 @@ import {
   mutationResultMatchesRequest,
   ownedEngineRestartReason,
   playbackPresentation,
+  playbackStateForBoundary,
   parseEngineStatus,
   parseEngineProcessStatus,
   parseTimelineMutation,
@@ -173,7 +174,7 @@ test("an incompatible external engine cannot leave the app loading forever", () 
 });
 
 test("accepts a complete current-version status", () => {
-  assert.equal(ENGINE_STATUS_VERSION, 17);
+  assert.equal(ENGINE_STATUS_VERSION, 18);
   assert.equal(parseEngineStatus(status), status);
 });
 
@@ -282,9 +283,11 @@ test("rejects waiting speech without a playback-boundary item", () => {
 
 test("rejects playback states that contradict the boundary", () => {
   const current = currentItem(1);
+  assert.notEqual(parseEngineStatus({ ...status, state: "holding" }), null);
   assert.equal(parseEngineStatus({ ...status, state: "playing" }), null);
   assert.equal(parseEngineStatus({ ...status, state: "paused" }), null);
   assert.equal(parseEngineStatus({ ...status, state: "idle", current }), null);
+  assert.equal(parseEngineStatus({ ...status, state: "holding", current }), null);
 });
 
 test("rejects duplicate active rows", () => {
@@ -366,7 +369,7 @@ test("extracts the current Unicode piece with code-point offsets", () => {
   });
 });
 
-test("makes active playback states impossible without active speech", () => {
+test("preserves only work-free playback states without active speech", () => {
   const waiting = {
     id: speechicleId(2),
     text: "Waiting",
@@ -380,6 +383,10 @@ test("makes active playback states impossible without active speech", () => {
     );
   }
   assert.deepEqual(
+    playbackPresentation({ ...status, state: "holding" }, null),
+    { state: "holding", item: null },
+  );
+  assert.deepEqual(
     playbackPresentation({
       ...status,
       state: "idle",
@@ -388,6 +395,13 @@ test("makes active playback states impossible without active speech", () => {
     }, null),
     { state: "idle", item: null },
   );
+});
+
+test("derives playback state from one current boundary and pause intent", () => {
+  assert.equal(playbackStateForBoundary(false, false), "idle");
+  assert.equal(playbackStateForBoundary(false, true), "holding");
+  assert.equal(playbackStateForBoundary(true, false), "playing");
+  assert.equal(playbackStateForBoundary(true, true), "paused");
 });
 
 test("pending Play overrides stale paused and stopped snapshots", () => {
