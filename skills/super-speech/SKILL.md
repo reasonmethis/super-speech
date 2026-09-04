@@ -3,7 +3,7 @@ name: super-speech
 description: Speak concise replies aloud with the local Super Speech engine. Use whenever the user asks for voice or audio replies, asks for Super Speech, names a Kokoro voice, or wants to install, configure, or troubleshoot Super Speech. Works with either the desktop app or the minimal headless engine. Default to af_heart unless the user asks for another voice.
 metadata:
   managed_by: super-speech
-  integration_version: 4
+  integration_version: 5
 ---
 
 # Super Speech
@@ -61,7 +61,7 @@ On macOS, set `SKILL` to the absolute directory containing this `SKILL.md`:
 When several agent tasks share one engine, add a short source label:
 
 ```powershell
-& "$skill\scripts\super-speech.ps1" speak 'Your spoken reply.' --voice af_heart --source 'Codex: Super Speech UI'
+& "$skill\scripts\super-speech.ps1" speak 'Your spoken reply.' --voice af_heart --source 'Agent: Project task'
 ```
 
 Choose the label on the first spoken reply from a task, then reuse it exactly
@@ -71,30 +71,20 @@ for later replies from that task. The app shows it beside the voice. Keep it at
 ## Listen for replies from the app
 
 Attaching an inbox is a promise that a new Reply will reach this same task and
-cause it to run. Before passing `--inbox`, arrange a wake-up path supported by
-the execution environment. A detached listener whose output cannot reach the
-task does not meet this contract. If no wake-up path is available, do not pass
-`--inbox`.
+cause it to run, including after the current turn ends. Before passing
+`--inbox`, connect the inbox to the current agent host's supported way to send a
+message to an existing task. This may be a task messaging API, an event hook, a
+background watcher, or another host feature that can wake an idle task. A
+detached listener whose output cannot reach the task does not meet this
+contract. If the host cannot wake this task, do not pass `--inbox`.
 
 Choose one private, unique absolute `.jsonl` path for the task and reuse it on
 every spoken reply. Never share one inbox between tasks.
 
-In Codex desktop on Windows, start the self-contained background listener before
-the first `speak` call:
-
-```powershell
-$thread = $env:CODEX_THREAD_ID
-& "$skill\scripts\start-codex-inbox.ps1" -Inbox $inbox -ThreadId $thread
-```
-
-Require a JSON result whose `status` is `listening` or `already_listening`.
-This listener follows the inbox after the current turn ends and sends each new
-message through the running Codex desktop app to wake this exact task. Reuse the
-same inbox and task ID for the life of the task.
-
-In another execution environment, start the portable listener as a long-running
-command and connect each stdout line to that environment's task wake-up API.
-Wait until stderr says it is listening:
+Start the portable listener before the first `speak` call. It creates the file,
+prints one complete JSON message per stdout line, and keeps following new
+messages. Connect that stream to the host's task messaging mechanism and wait
+until stderr says the listener is ready:
 
 ```powershell
 & "$skill\scripts\super-speech.ps1" listen-inbox $inbox
@@ -104,24 +94,37 @@ Wait until stderr says it is listening:
 "$SKILL/scripts/super-speech.sh" listen-inbox "$INBOX"
 ```
 
-When a complete message arrives, the wake-up path must deliver it exactly once
-as a user message to this same task. Before claiming the inbox works, test that
-full route with the task idle rather than merely checking that the file changed.
+The bridge between the listener and the agent host must:
+
+- survive after the current turn ends
+- keep the stable task or session identifier needed to address this same task
+- send the message text as new user input through the host's supported task API
+- persist handled message IDs so a restart does not repeat replies
+- retry temporary host or transport failures without losing the message
+
+Use the host's existing task owner. Do not start a competing agent process that
+tries to open the same task state. Before claiming the inbox works, let the task
+become idle and test that a Reply wakes it. Seeing a new line in the file is not
+enough.
+
+If the current host already has a packaged adapter in this skill, use it instead
+of rebuilding the bridge. For Codex desktop on Windows, read
+[references/codex-desktop-inbox.md](references/codex-desktop-inbox.md).
 
 Then attach the same path to each Speechicle:
 
 ```powershell
-& "$skill\scripts\super-speech.ps1" speak 'Your spoken reply.' --voice af_heart --source 'Codex: Super Speech UI' --inbox $inbox
+& "$skill\scripts\super-speech.ps1" speak 'Your spoken reply.' --voice af_heart --source 'Agent: Project task' --inbox $inbox
 ```
 
 ```bash
-"$SKILL/scripts/super-speech.sh" speak "Your spoken reply." --voice af_heart --source "Codex: Super Speech UI" --inbox "$INBOX"
+"$SKILL/scripts/super-speech.sh" speak "Your spoken reply." --voice af_heart --source "Agent: Project task" --inbox "$INBOX"
 ```
 
 Each stdout line from the listener is one complete JSON message:
 
 ```json
-{"version":1,"kind":"user_message","id":"07ca7adc-12f2-4b7b-9e9e-48739da4194b","sent_at":"2026-08-31T12:00:00.000Z","speechicle_id":"sp_0123456789abcdef0123456789abcdef","source":"Codex: Super Speech UI","text":"Please check the retry path."}
+{"version":1,"kind":"user_message","id":"07ca7adc-12f2-4b7b-9e9e-48739da4194b","sent_at":"2026-08-31T12:00:00.000Z","speechicle_id":"sp_0123456789abcdef0123456789abcdef","source":"Agent: Project task","text":"Please check the retry path."}
 ```
 
 Accept lines only when they have protocol `version` 1, kind `user_message`, a
@@ -131,11 +134,9 @@ default the listener first emits saved messages and then follows new ones. Add
 `--from-end` only when the user has clearly chosen to ignore messages already
 in the file.
 
-The background Codex listener remains armed after delivering a message. In
-other environments, arm the wake-up path again while the task still offers
-replies. The file preserves messages, but it is storage, not a wake-up
-mechanism. Do not claim the inbox is live after the listener or wake-up path has
-stopped.
+Keep the bridge armed while the task still offers replies. The file preserves
+messages, but it is storage, not a wake-up mechanism. Do not claim the inbox is
+live after the listener or bridge has stopped.
 
 The launcher uses the desktop engine when a valid app installation exists.
 Otherwise it uses the headless engine inside this skill. Do not parse the
