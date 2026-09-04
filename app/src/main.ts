@@ -1263,7 +1263,7 @@ function renderActionMenu(
   }
   if (item.inbox) {
     actions.push(createMenuAction(
-      "Send message",
+      "Reply",
       () => openInboxReply(item),
     ));
   }
@@ -1422,8 +1422,8 @@ function openInboxReply(item: TimelineItem): void {
   }
   inboxReplyItemId = item.id;
   inboxReplyTitle.textContent = item.source
-    ? `Message ${item.source}`
-    : "Message agent";
+    ? `Reply to ${item.source}`
+    : "Reply to agent";
   inboxReplyText.value = "";
   inboxReplyStatus.textContent = "";
   renderInboxReplyControls();

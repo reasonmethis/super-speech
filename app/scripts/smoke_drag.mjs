@@ -1112,7 +1112,7 @@ try {
   );
   assert.deepEqual(
     await visibleActions.locator(".queue-menu-action").allTextContents(),
-    ["Play", "Send message", "Copy text", "Delete"],
+    ["Play", "Reply", "Copy text", "Delete"],
   );
   assert.equal(
     await visibleActions.locator(".queue-menu-action").first().evaluate(
@@ -1136,11 +1136,11 @@ try {
       path: path.join(screenshot.dir, `${screenshot.name}-menu${screenshot.ext}`),
     });
   }
-  await visibleActions.getByRole("button", { name: "Send message" }).click();
+  await visibleActions.getByRole("button", { name: "Reply" }).click();
   const replyDialog = page.locator("#inbox-reply-dialog");
-  assert(await replyDialog.isVisible(), "Send message did not open the reply dialog");
+  assert(await replyDialog.isVisible(), "Reply did not open the reply dialog");
   assert.equal(await visibleActions.count(), 0, "The row menu stayed open behind the reply dialog");
-  assert.equal(await page.locator("#inbox-reply-title").textContent(), "Message agent");
+  assert.equal(await page.locator("#inbox-reply-title").textContent(), "Reply to agent");
   if (process.env.SUPER_SPEECH_SCREENSHOT) {
     const screenshot = path.parse(process.env.SUPER_SPEECH_SCREENSHOT);
     await page.screenshot({
@@ -1207,7 +1207,7 @@ try {
   );
   assert.deepEqual(
     await visibleActions.locator(".queue-menu-action").allTextContents(),
-    ["Play", "Send message", "Copy text", "Delete"],
+    ["Play", "Reply", "Copy text", "Delete"],
     "History must use the same Play label and expose Delete",
   );
   await page.locator("#speech-heading").click();
