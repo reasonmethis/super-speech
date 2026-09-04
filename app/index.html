@@ -73,11 +73,19 @@
               aria-label="Speech text"
             ></textarea>
             <div id="composer-actions" class="composer-actions is-hidden">
-              <label class="composer-voice">
+              <div class="composer-voice">
                 <span>Voice</span>
-                <select id="composer-voice" aria-label="Voice for new speech"></select>
-              </label>
-              <button id="composer-submit" type="submit">Add to Speechicles</button>
+                <button
+                  id="composer-voice"
+                  class="composer-voice-button"
+                  type="button"
+                  aria-label="Voice for new speech: Heart"
+                  aria-haspopup="listbox"
+                  aria-controls="voice-menu"
+                  aria-expanded="false"
+                >Heart</button>
+              </div>
+              <button id="composer-submit" class="composer-submit" type="submit">Add to Speechicles</button>
             </div>
           </form>
         </div>

@@ -413,27 +413,17 @@ try {
   const extraVoicesToggle = settingsPanel.getByRole("checkbox", {
     name: "Allow extra voices",
   });
-  const composerVoiceOptions = page.locator("#composer-voice option");
-  const visibleArchivedVoices = async () =>
-    await composerVoiceOptions.evaluateAll(
-      (options, archived) =>
-        options.map((option) => option.value).filter((value) => archived.includes(value)),
-      archivedVoiceIds,
-    );
   assert.equal(await extraVoicesToggle.isChecked(), false);
-  assert.deepEqual(await visibleArchivedVoices(), []);
   await extraVoicesToggle.check();
   assert.equal(
     await page.evaluate(() => localStorage.getItem("super-speech-extra-voices")),
     "true",
   );
-  assert.deepEqual(await visibleArchivedVoices(), archivedVoiceIds);
   await extraVoicesToggle.uncheck();
   assert.equal(
     await page.evaluate(() => localStorage.getItem("super-speech-extra-voices")),
     "false",
   );
-  assert.deepEqual(await visibleArchivedVoices(), []);
   await settingsPanel.getByRole("button", { name: "Light" }).click();
   assert.equal(await page.locator("body").getAttribute("data-theme"), "light");
   assert.equal(
@@ -445,27 +435,29 @@ try {
     await page.locator('meta[name="theme-color"]').getAttribute("content"),
     "#f5f6f9",
   );
+  const lightAppearance = await page.evaluate(() => {
+    const style = (selector) => getComputedStyle(document.querySelector(selector));
+    return {
+      shellBackgroundImage: style(".app-shell").backgroundImage,
+      shellBorderRadius: style(".app-shell").borderRadius,
+      shellBorderWidth: style(".app-shell").borderWidth,
+      brandShadow: style(".brand-mark").boxShadow,
+      brandRadius: style(".brand-mark").borderRadius,
+      buttonAppearance: style(".playback-button").appearance,
+      buttonBackgroundImage: style(".playback-button").backgroundImage,
+      buttonShadow: style(".playback-button").boxShadow,
+      buttonFilter: style(".playback-button").filter,
+      buttonHalo: getComputedStyle(
+        document.querySelector(".playback-button"),
+        "::after",
+      ).display,
+      iconFilter: style(".playback-icon").filter,
+      controlOverflow: style(".playback-control").overflow,
+    };
+  });
+  const { buttonBackgroundImage, ...flatLightAppearance } = lightAppearance;
   assert.deepEqual(
-    await page.evaluate(() => {
-      const style = (selector) => getComputedStyle(document.querySelector(selector));
-      return {
-        shellBackgroundImage: style(".app-shell").backgroundImage,
-        shellBorderRadius: style(".app-shell").borderRadius,
-        shellBorderWidth: style(".app-shell").borderWidth,
-        brandShadow: style(".brand-mark").boxShadow,
-        brandRadius: style(".brand-mark").borderRadius,
-        buttonAppearance: style(".playback-button").appearance,
-        buttonBackgroundImage: style(".playback-button").backgroundImage,
-        buttonShadow: style(".playback-button").boxShadow,
-        buttonFilter: style(".playback-button").filter,
-        buttonHalo: getComputedStyle(
-          document.querySelector(".playback-button"),
-          "::after",
-        ).display,
-        iconFilter: style(".playback-icon").filter,
-        controlOverflow: style(".playback-control").overflow,
-      };
-    }),
+    flatLightAppearance,
     {
       shellBackgroundImage: "none",
       shellBorderRadius: "0px",
@@ -473,7 +465,6 @@ try {
       brandShadow: "none",
       brandRadius: "0px",
       buttonAppearance: "none",
-      buttonBackgroundImage: "none",
       buttonShadow: "none",
       buttonFilter: "none",
       buttonHalo: "none",
@@ -481,6 +472,28 @@ try {
       controlOverflow: "visible",
     },
     "The light theme must be flat and free of nested window or icon shells",
+  );
+  assert.match(
+    buttonBackgroundImage,
+    /radial-gradient\(circle at 35% 25%/,
+    "The light playback button must keep the same upper-left highlight as dark mode",
+  );
+  const activeButtonBackgrounds = await page.evaluate(() => {
+    const originalState = document.body.dataset.state;
+    const backgrounds = ["playing", "paused", "holding", "setup_required", "stopped"].map(
+      (state) => {
+        document.body.dataset.state = state;
+        return getComputedStyle(document.querySelector(".playback-button")).backgroundImage;
+      },
+    );
+    document.body.dataset.state = originalState;
+    return backgrounds;
+  });
+  assert(
+    activeButtonBackgrounds.every((background) =>
+      background.includes("radial-gradient(circle at 35% 25%")
+    ),
+    "Every colored playback state must use the same highlight treatment",
   );
   if (process.env.SUPER_SPEECH_SCREENSHOT) {
     const screenshot = path.parse(process.env.SUPER_SPEECH_SCREENSHOT);
@@ -1096,6 +1109,10 @@ try {
   assert.equal(await page.locator("#voice-menu .voice-menu-option:focus").textContent(), "Heart");
   await visibleVoiceMenu.locator('[data-voice="af_heart"]').click();
   assert.equal(await visibleVoiceMenu.count(), 0, "Selecting the current voice did not close the menu");
+  assert(
+    await inlineVoice.evaluate((button) => button === document.activeElement),
+    "Selecting a Speechicle voice must restore focus to its button",
+  );
   await menuButton.click();
   const visibleActions = page.locator("#queue-action-menu:not([hidden])");
   await waitFor(
@@ -1822,7 +1839,81 @@ try {
       path: path.join(screenshot.dir, `${screenshot.name}-composer${screenshot.ext}`),
     });
   }
-  await page.locator("#composer-voice").selectOption("bm_george");
+  const composerVoiceButton = page.locator("#composer-voice");
+  assert.equal(await composerVoiceButton.textContent(), "Heart");
+  assert.equal(await composerVoiceButton.locator("svg").count(), 0);
+  await composerVoiceButton.click();
+  const composerVoiceMenu = page.locator("#voice-menu:not([hidden])");
+  assert.equal(await composerVoiceMenu.count(), 1, "The composer voice menu did not open");
+  assert.deepEqual(
+    await composerVoiceMenu.locator(".voice-menu-group").allTextContents(),
+    ["US female", "US male", "UK female", "UK male"],
+  );
+  assert.deepEqual(
+    await composerVoiceMenu.locator(".voice-menu-option").evaluateAll(
+      (options, archived) =>
+        options.map((option) => option.dataset.voice).filter((voice) => archived.includes(voice)),
+      archivedVoiceIds,
+    ),
+    [],
+  );
+  assert.equal(
+    await composerVoiceMenu.locator('[aria-selected="true"]').textContent(),
+    "Heart",
+  );
+  assert.equal(
+    await composerVoiceMenu.locator(".voice-menu-option:focus").textContent(),
+    "Heart",
+    "The composer must use the same focused selection as Speechicle voice menus",
+  );
+  assert.deepEqual(
+    await composerVoiceMenu.evaluate((menu) => {
+      const style = getComputedStyle(menu);
+      return {
+        width: menu.getBoundingClientRect().width,
+        scrollbarWidth: style.scrollbarWidth,
+      };
+    }),
+    voiceMenuStyle,
+    "Both voice entry points must use the same menu shell",
+  );
+  assert(
+    await composerVoiceMenu.evaluate((menu) => {
+      const bounds = menu.getBoundingClientRect();
+      const center = document.elementFromPoint(
+        bounds.left + bounds.width / 2,
+        bounds.top + bounds.height / 2,
+      );
+      return bounds.left >= 0 &&
+        bounds.top >= 0 &&
+        bounds.right <= window.innerWidth &&
+        bounds.bottom <= window.innerHeight &&
+        center !== null &&
+        menu.contains(center);
+    }),
+    "The composer voice menu must stay fully visible",
+  );
+  if (process.env.SUPER_SPEECH_SCREENSHOT) {
+    const screenshot = path.parse(process.env.SUPER_SPEECH_SCREENSHOT);
+    await page.screenshot({
+      path: path.join(screenshot.dir, `${screenshot.name}-composer-voice-menu${screenshot.ext}`),
+    });
+  }
+  await composer.fill("");
+  assert.equal(
+    await composerVoiceMenu.count(),
+    0,
+    "Clearing a manual draft must also close its now-hidden voice menu",
+  );
+  await composer.fill(composerText);
+  await composerVoiceButton.click();
+  await composerVoiceMenu.locator('[data-voice="bm_george"]').click();
+  assert.equal(await composerVoiceButton.textContent(), "George");
+  assert.equal(await composerVoiceButton.getAttribute("aria-expanded"), "false");
+  assert(
+    await composerVoiceButton.evaluate((button) => button === document.activeElement),
+    "Selecting a composer voice must restore focus to its button",
+  );
   await page.locator("#composer-submit").click();
   await waitFor(
     () => status().current?.text === composerText && status().current?.source === "Manual",

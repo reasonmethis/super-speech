@@ -87,7 +87,7 @@ const currentText = requiredElement<HTMLParagraphElement>("current-text");
 const speechComposer = requiredElement<HTMLFormElement>("speech-composer");
 const composerText = requiredElement<HTMLTextAreaElement>("composer-text");
 const composerActions = requiredElement<HTMLDivElement>("composer-actions");
-const composerVoice = requiredElement<HTMLSelectElement>("composer-voice");
+const composerVoice = requiredElement<HTMLButtonElement>("composer-voice");
 const composerSubmit = requiredElement<HTMLButtonElement>("composer-submit");
 const voicePill = requiredElement<HTMLSpanElement>("voice-pill");
 const voiceLabel = requiredElement<HTMLSpanElement>("voice-label");
@@ -191,9 +191,10 @@ interface PendingSpeechicleExpansion {
   timeoutId: number;
 }
 
-type TimelineMenuState =
+type OpenMenuState =
   | { kind: "action"; itemId: string }
-  | { kind: "voice"; itemId: string };
+  | { kind: "voice"; itemId: string }
+  | { kind: "composer-voice" };
 
 let currentStatus = desktopApi ? INITIAL_STATUS : demoStatus;
 let commandPending = false;
@@ -205,12 +206,13 @@ let timelinePointerDrag: TimelinePointerDrag | null = null;
 let speechiclePointerGesture: SpeechiclePointerGesture | null = null;
 const suppressedSpeechicleClicks = new WeakSet<HTMLButtonElement>();
 let pendingSpeechicleExpansion: PendingSpeechicleExpansion | null = null;
-let openTimelineMenu: TimelineMenuState | null = null;
+let openMenu: OpenMenuState | null = null;
 let revealedCurrentItemId: string | null = null;
 let ringSettlingAnimations: Animation[] = [];
 let playbackExpanded = false;
 let lastFollowedPieceKey: string | null = null;
 let composerOpen = false;
+let composerVoiceId = "af_heart";
 let inboxReplyItemId: string | null = null;
 let inboxReplyPending = false;
 
@@ -249,45 +251,32 @@ function formatVoice(voice: string): string {
   return voiceLabels.get(voice) ?? voice.replace(/^[a-z]{2}_/, "").replaceAll("_", " ");
 }
 
-function populateVoiceSelect(
-  select: HTMLSelectElement,
-  selectedVoice: string,
-): void {
-  select.replaceChildren();
-  const groups = new Map<string, HTMLOptGroupElement>();
-  for (const [id, label, group] of selectableVoiceOptions(allowExtraVoices, selectedVoice)) {
-    let options = groups.get(group);
-    if (!options) {
-      options = document.createElement("optgroup");
-      options.label = group;
-      groups.set(group, options);
-      select.append(options);
-    }
-    const option = document.createElement("option");
-    option.value = id;
-    option.textContent = label;
-    option.selected = id === selectedVoice;
-    options.append(option);
-  }
-}
-
-populateVoiceSelect(composerVoice, "af_heart");
 extraVoicesToggle.addEventListener("change", () => {
   allowExtraVoices = extraVoicesToggle.checked;
   localStorage.setItem("super-speech-extra-voices", String(allowExtraVoices));
-  const selectedVoice = !allowExtraVoices && ARCHIVED_VOICE_IDS.has(composerVoice.value)
-    ? "af_heart"
-    : composerVoice.value || "af_heart";
-  populateVoiceSelect(composerVoice, selectedVoice);
+  if (!allowExtraVoices && ARCHIVED_VOICE_IDS.has(composerVoiceId)) {
+    composerVoiceId = "af_heart";
+  }
   render(currentStatus);
+  if (openMenu) {
+    setOpenMenu(openMenu);
+  }
 });
 
 function renderComposerControls(): void {
   const hasText = composerText.value.trim() !== "";
   const blocked = timelineMutationBlocked();
+  if ((!hasText || blocked) && openMenu?.kind === "composer-voice") {
+    setOpenMenu(null);
+  }
   composerActions.classList.toggle("is-hidden", !hasText);
   composerText.disabled = blocked;
   composerVoice.disabled = blocked;
+  composerVoice.textContent = formatVoice(composerVoiceId);
+  composerVoice.setAttribute(
+    "aria-label",
+    `Voice for new speech: ${formatVoice(composerVoiceId)}`,
+  );
   composerSubmit.disabled = blocked || !hasText;
 }
 
@@ -525,6 +514,9 @@ function render(status: RuntimeStatus): void {
   const canCompose = presentation.state === "idle" ||
     presentation.state === "holding";
   if (!canCompose) {
+    if (openMenu?.kind === "composer-voice") {
+      setOpenMenu(null);
+    }
     composerOpen = false;
   }
   const showComposer = canCompose && composerOpen;
@@ -1184,21 +1176,24 @@ function reconcileTimelineNodes(items: TimelineItem[]): boolean {
   return true;
 }
 
-function positionTimelineMenu(
+function positionMenu(
   menu: HTMLElement,
   button: HTMLElement,
   horizontalAlignment: "start" | "end",
+  scope: "timeline" | "window" = "timeline",
 ): void {
   const edgeGap = 8;
   const itemGap = 4;
-  const listBounds = speechicleList.getBoundingClientRect();
+  const scopeBounds = scope === "timeline"
+    ? speechicleList.getBoundingClientRect()
+    : { top: 0, right: window.innerWidth, bottom: window.innerHeight, left: 0 };
   const buttonBounds = button.getBoundingClientRect();
-  const availableTop = Math.max(edgeGap, listBounds.top + edgeGap);
-  const availableBottom = Math.min(window.innerHeight - edgeGap, listBounds.bottom - edgeGap);
+  const availableTop = Math.max(edgeGap, scopeBounds.top + edgeGap);
+  const availableBottom = Math.min(window.innerHeight - edgeGap, scopeBounds.bottom - edgeGap);
   menu.style.maxHeight = `${Math.max(0, availableBottom - availableTop)}px`;
   const menuBounds = menu.getBoundingClientRect();
-  const availableLeft = Math.max(edgeGap, listBounds.left);
-  const availableRight = Math.min(window.innerWidth - edgeGap, listBounds.right);
+  const availableLeft = Math.max(edgeGap, scopeBounds.left);
+  const availableRight = Math.min(window.innerWidth - edgeGap, scopeBounds.right);
   const preferredLeft = horizontalAlignment === "start"
     ? buttonBounds.left
     : buttonBounds.right - menuBounds.width;
@@ -1298,21 +1293,22 @@ function renderActionMenu(
     ));
   }
   queueActionMenu.replaceChildren(...actions);
-  positionTimelineMenu(queueActionMenu, button, "end");
+  positionMenu(queueActionMenu, button, "end");
   if (shouldFocus) {
     queueActionMenu.querySelector<HTMLElement>("button")?.focus();
   }
 }
 
 function renderVoiceMenu(
-  target: { item: TimelineItem; button: HTMLButtonElement },
+  button: HTMLButtonElement,
+  selectedVoice: string,
+  selectVoice: (voice: string) => void,
   shouldFocus: boolean,
+  scope: "timeline" | "window" = "timeline",
 ): void {
-  const { item, button } = target;
-
   const contents: HTMLElement[] = [];
   let activeGroup: string | null = null;
-  for (const [id, label, group] of selectableVoiceOptions(allowExtraVoices, item.voice)) {
+  for (const [id, label, group] of selectableVoiceOptions(allowExtraVoices, selectedVoice)) {
     if (group !== activeGroup) {
       const heading = document.createElement("div");
       heading.className = "voice-menu-group";
@@ -1326,25 +1322,31 @@ function renderVoiceMenu(
     option.role = "option";
     option.dataset.voice = id;
     option.textContent = label;
-    option.setAttribute("aria-selected", String(id === item.voice));
+    option.setAttribute("aria-selected", String(id === selectedVoice));
     option.disabled = timelineMutationBlocked();
     option.addEventListener("click", () => {
-      setOpenTimelineMenu(null);
-      if (id !== item.voice) {
-        void playTimelineItem(item, id);
-      }
+      setOpenMenu(null);
+      button.focus({ preventScroll: true });
+      selectVoice(id);
     });
     contents.push(option);
   }
   voiceMenu.replaceChildren(...contents);
-  positionTimelineMenu(voiceMenu, button, "start");
+  positionMenu(voiceMenu, button, "start", scope);
   if (shouldFocus) {
     voiceMenu.querySelector<HTMLElement>('[aria-selected="true"]')?.focus();
   }
 }
 
-function setOpenTimelineMenu(next: TimelineMenuState | null): void {
-  const previous = openTimelineMenu;
+function menuKey(menu: OpenMenuState | null): string {
+  if (!menu) {
+    return "";
+  }
+  return menu.kind === "composer-voice" ? menu.kind : `${menu.kind}:${menu.itemId}`;
+}
+
+function setOpenMenu(next: OpenMenuState | null): void {
+  const previous = openMenu;
   const actionTarget = showTimelineMenu(
     queueActionMenu,
     next?.kind === "action" ? next.itemId : null,
@@ -1355,48 +1357,61 @@ function setOpenTimelineMenu(next: TimelineMenuState | null): void {
     next?.kind === "voice" ? next.itemId : null,
     ".speechicle-voice",
   );
-  const target = next?.kind === "action"
-    ? actionTarget
-    : next?.kind === "voice"
-      ? voiceTarget
-      : null;
-  openTimelineMenu = next && target
-    ? { kind: next.kind, itemId: target.item.id }
-    : null;
-  if (!openTimelineMenu || !target) {
+  const composerTarget = next?.kind === "composer-voice" && composerOpen && !composerVoice.disabled;
+  composerVoice.setAttribute("aria-expanded", String(composerTarget));
+
+  if (next?.kind === "action" && actionTarget) {
+    openMenu = { kind: "action", itemId: actionTarget.item.id };
+  } else if (next?.kind === "voice" && voiceTarget) {
+    openMenu = { kind: "voice", itemId: voiceTarget.item.id };
+  } else if (composerTarget) {
+    openMenu = { kind: "composer-voice" };
+  } else {
+    openMenu = null;
+  }
+  if (!openMenu) {
     return;
   }
 
-  const shouldFocus = previous?.kind !== openTimelineMenu.kind ||
-    previous.itemId !== openTimelineMenu.itemId;
-  if (openTimelineMenu.kind === "action") {
-    renderActionMenu(target, shouldFocus);
-  } else {
-    renderVoiceMenu(target, shouldFocus);
+  const shouldFocus = menuKey(previous) !== menuKey(openMenu);
+  if (openMenu.kind === "action" && actionTarget) {
+    renderActionMenu(actionTarget, shouldFocus);
+  } else if (openMenu.kind === "voice" && voiceTarget) {
+    const { item, button } = voiceTarget;
+    renderVoiceMenu(button, item.voice, (voice) => {
+      if (voice !== item.voice) {
+        void playTimelineItem(item, voice);
+      }
+    }, shouldFocus);
+  } else if (openMenu.kind === "composer-voice") {
+    voiceMenu.hidden = false;
+    renderVoiceMenu(composerVoice, composerVoiceId, (voice) => {
+      composerVoiceId = voice;
+      renderComposerControls();
+    }, shouldFocus, "window");
   }
 }
 
-function toggleTimelineMenu(next: TimelineMenuState): void {
-  setOpenTimelineMenu(
-    openTimelineMenu?.kind === next.kind && openTimelineMenu.itemId === next.itemId
-      ? null
-      : next,
-  );
+function toggleMenu(next: OpenMenuState): void {
+  setOpenMenu(menuKey(openMenu) === menuKey(next) ? null : next);
 }
 
-function closeTimelineMenu(restoreFocus: boolean): void {
-  const open = openTimelineMenu;
-  const buttonSelector = open?.kind === "action"
-    ? ".queue-menu-button"
-    : open?.kind === "voice"
-      ? ".speechicle-voice"
-      : null;
-  const button = restoreFocus && open && buttonSelector
-    ? speechicleList.querySelector<HTMLButtonElement>(
+function closeMenu(restoreFocus: boolean): void {
+  const open = openMenu;
+  let button: HTMLButtonElement | null = null;
+  if (restoreFocus && open) {
+    if (open.kind === "composer-voice") {
+      button = composerVoice;
+    } else {
+      const buttonSelector = open.kind === "action"
+        ? ".queue-menu-button"
+        : ".speechicle-voice";
+      button = speechicleList.querySelector<HTMLButtonElement>(
         `[data-item-id="${open.itemId}"] ${buttonSelector}`,
-      )
-    : null;
-  setOpenTimelineMenu(null);
+      );
+    }
+  }
+  setOpenMenu(null);
   if (button) {
     button.focus({ preventScroll: true });
   } else if (!restoreFocus && open?.kind === "action") {
@@ -1414,7 +1429,7 @@ function createMenuAction(
   button.type = "button";
   button.textContent = label;
   button.addEventListener("click", () => {
-    closeTimelineMenu(className !== "is-delete");
+    closeMenu(className !== "is-delete");
     action();
   });
   return button;
@@ -1532,7 +1547,9 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     return;
   }
   cancelTimelinePointerDrag();
-  setOpenTimelineMenu(null);
+  if (openMenu?.kind !== "composer-voice") {
+    setOpenMenu(null);
+  }
   renderedTimelineKey = timelineKey;
 
   const previousScrollTop = speechicleList.scrollTop;
@@ -1618,7 +1635,7 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     inlineVoice.setAttribute("aria-expanded", "false");
     inlineVoice.setAttribute("aria-controls", voiceMenu.id);
     inlineVoice.addEventListener("click", () => {
-      toggleTimelineMenu({ kind: "voice", itemId: item.id });
+      toggleMenu({ kind: "voice", itemId: item.id });
     });
     const source = document.createElement("span");
     source.className = "speechicle-source";
@@ -1664,7 +1681,7 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     menuButton.innerHTML = '<span aria-hidden="true"></span>';
     menuButton.setAttribute("aria-controls", queueActionMenu.id);
     menuButton.addEventListener("click", () => {
-      toggleTimelineMenu({ kind: "action", itemId: item.id });
+      toggleMenu({ kind: "action", itemId: item.id });
     });
     actions.append(menuButton);
     row.classList.toggle("is-expanded", isExpanded);
@@ -2001,6 +2018,9 @@ function closeComposer(restoreFocus: boolean): void {
   if (!composerOpen) {
     return;
   }
+  if (openMenu?.kind === "composer-voice") {
+    setOpenMenu(null);
+  }
   composerOpen = false;
   render(currentStatus);
   if (restoreFocus) {
@@ -2011,6 +2031,9 @@ function closeComposer(restoreFocus: boolean): void {
 playbackButton.addEventListener("click", () => void runPlaybackAction());
 
 composerText.addEventListener("input", renderComposerControls);
+composerVoice.addEventListener("click", () => {
+  toggleMenu({ kind: "composer-voice" });
+});
 
 speechComposer.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -2024,7 +2047,7 @@ speechComposer.addEventListener("submit", async (event) => {
       mutation: {
         type: "enqueue",
         text,
-        voice: composerVoice.value,
+        voice: composerVoiceId,
         source: MANUAL_SOURCE,
       },
     },
@@ -2131,7 +2154,7 @@ function cancelTransientInteractions(): void {
   cancelTimelinePointerDrag();
   cancelSpeechiclePointerGesture();
   cancelPendingSpeechicleExpansion();
-  setOpenTimelineMenu(null);
+  setOpenMenu(null);
 }
 
 document.addEventListener("visibilitychange", () => {
@@ -2169,8 +2192,8 @@ speechicleList.addEventListener("pointerdown", (event) => {
   }
 });
 speechicleList.addEventListener("scroll", () => {
-  if (openTimelineMenu) {
-    setOpenTimelineMenu(openTimelineMenu);
+  if (openMenu?.kind === "action" || openMenu?.kind === "voice") {
+    setOpenMenu(openMenu);
   }
 }, { passive: true });
 voiceMenu.addEventListener("keydown", (event) => {
@@ -2211,7 +2234,7 @@ speechicleList.addEventListener("lostpointercapture", (event) => {
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     cancelTimelinePointerDrag();
-    closeTimelineMenu(true);
+    closeMenu(true);
     closeComposer(true);
     if (playbackExpanded) {
       setPlaybackExpanded(false);
@@ -2225,16 +2248,20 @@ document.addEventListener("pointerdown", (event) => {
   if (!(target instanceof Element)) {
     return;
   }
-  if (composerOpen && !target.closest("#speech-composer")) {
+  const isInComposerVoiceMenu = openMenu?.kind === "composer-voice" &&
+    target.closest("#voice-menu");
+  if (composerOpen && !target.closest("#speech-composer") && !isInComposerVoiceMenu) {
     closeComposer(false);
   }
-  const openMenuSelector = openTimelineMenu?.kind === "action"
+  const openMenuSelector = openMenu?.kind === "action"
     ? ".speechicle-actions, #queue-action-menu"
-    : openTimelineMenu?.kind === "voice"
+    : openMenu?.kind === "voice"
       ? ".speechicle-voice, #voice-menu"
-      : null;
+      : openMenu?.kind === "composer-voice"
+        ? ".composer-voice, #voice-menu"
+        : null;
   if (openMenuSelector && !target.closest(openMenuSelector)) {
-    setOpenTimelineMenu(null);
+    setOpenMenu(null);
   }
 }, true);
 window.addEventListener("blur", () => {
