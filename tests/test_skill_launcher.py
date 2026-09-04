@@ -13,6 +13,9 @@ ROOT = Path(__file__).parents[1]
 POWERSHELL_LAUNCHER = (
     ROOT / "skills" / "super-speech" / "scripts" / "super-speech.ps1"
 )
+CODEX_INBOX_STARTER = (
+    ROOT / "skills" / "super-speech" / "scripts" / "start-codex-inbox.ps1"
+)
 SHELL_LAUNCHER = (
     ROOT / "skills" / "super-speech" / "scripts" / "super-speech.sh"
 )
@@ -61,6 +64,50 @@ def run_powershell_launcher(
         text=True,
         env=environment,
     )
+
+
+def run_codex_inbox_starter(
+    *arguments: str,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            powershell_runner(),
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(CODEX_INBOX_STARTER),
+            *arguments,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_codex_inbox_starter_requires_an_absolute_inbox() -> None:
+    result = run_codex_inbox_starter(
+        "-Inbox",
+        "relative-inbox.jsonl",
+        "-ThreadId",
+        "00000000-0000-0000-0000-000000000001",
+    )
+
+    assert result.returncode != 0
+    assert "Inbox must be a valid absolute path" in result.stderr
+
+
+def test_codex_inbox_starter_requires_a_task_id(tmp_path: Path) -> None:
+    result = run_codex_inbox_starter(
+        "-Inbox",
+        str(tmp_path / "inbox.jsonl"),
+        "-ThreadId",
+        "not-a-task-id",
+    )
+
+    assert result.returncode != 0
+    assert "ThreadId must be a Codex task ID" in result.stderr
 
 
 def write_python_probe(path: Path) -> None:

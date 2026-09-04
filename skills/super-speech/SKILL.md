@@ -3,7 +3,7 @@ name: super-speech
 description: Speak concise replies aloud with the local Super Speech engine. Use whenever the user asks for voice or audio replies, asks for Super Speech, names a Kokoro voice, or wants to install, configure, or troubleshoot Super Speech. Works with either the desktop app or the minimal headless engine. Default to af_heart unless the user asks for another voice.
 metadata:
   managed_by: super-speech
-  integration_version: 3
+  integration_version: 4
 ---
 
 # Super Speech
@@ -72,17 +72,29 @@ for later replies from that task. The app shows it beside the voice. Keep it at
 
 Attaching an inbox is a promise that a new Reply will reach this same task and
 cause it to run. Before passing `--inbox`, arrange a wake-up path supported by
-the execution environment. It may keep the current turn waiting on listener
-output, or it may resume an idle task when a new message arrives. A detached
-listener whose output cannot reach the task does not meet this contract. If no
-wake-up path is available, do not pass `--inbox`.
+the execution environment. A detached listener whose output cannot reach the
+task does not meet this contract. If no wake-up path is available, do not pass
+`--inbox`.
 
 Choose one private, unique absolute `.jsonl` path for the task and reuse it on
 every spoken reply. Never share one inbox between tasks.
 
-Start the listener as a long-running command before the first `speak` call. Wait
-until its stderr says it is listening. The command creates the parent directory
-and file when needed:
+In Codex desktop on Windows, start the self-contained background listener before
+the first `speak` call:
+
+```powershell
+$thread = $env:CODEX_THREAD_ID
+& "$skill\scripts\start-codex-inbox.ps1" -Inbox $inbox -ThreadId $thread
+```
+
+Require a JSON result whose `status` is `listening` or `already_listening`.
+This listener follows the inbox after the current turn ends and sends each new
+message through the running Codex desktop app to wake this exact task. Reuse the
+same inbox and task ID for the life of the task.
+
+In another execution environment, start the portable listener as a long-running
+command and connect each stdout line to that environment's task wake-up API.
+Wait until stderr says it is listening:
 
 ```powershell
 & "$skill\scripts\super-speech.ps1" listen-inbox $inbox
@@ -92,11 +104,9 @@ and file when needed:
 "$SKILL/scripts/super-speech.sh" listen-inbox "$INBOX"
 ```
 
-Connect listener output to the chosen wake-up path and keep any command-session
-or task identifier that path needs. When a complete message arrives, the path
-must wake or resume this same task and deliver the message exactly once. Before
-claiming the inbox works, test that full route with the task idle rather than
-merely checking that the file changed.
+When a complete message arrives, the wake-up path must deliver it exactly once
+as a user message to this same task. Before claiming the inbox works, test that
+full route with the task idle rather than merely checking that the file changed.
 
 Then attach the same path to each Speechicle:
 
@@ -121,8 +131,9 @@ default the listener first emits saved messages and then follows new ones. Add
 `--from-end` only when the user has clearly chosen to ignore messages already
 in the file.
 
-After handling a message, arm the wake-up path again while the task still
-offers replies. The file preserves messages, but it is storage, not a wake-up
+The background Codex listener remains armed after delivering a message. In
+other environments, arm the wake-up path again while the task still offers
+replies. The file preserves messages, but it is storage, not a wake-up
 mechanism. Do not claim the inbox is live after the listener or wake-up path has
 stopped.
 
