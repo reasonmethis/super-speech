@@ -57,7 +57,7 @@ same Queue and playback implementation.
 - Use a row's three-dot menu for the actions that apply there. Current has
   Pause or Resume while active and Play when stopped; Waiting and History have
   Play. All rows have Copy text. Delete moves Waiting into History and
-  permanently removes History. A row also has Send message when its agent is
+  permanently removes History. A row also has Reply when its agent is
   listening on an inbox
 - Clear all stops Current and moves active speech into History
 - When Super Speech is idle, type or paste text into the main card, choose a
