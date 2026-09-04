@@ -69,8 +69,9 @@ Agents can attach a short source label to spoken replies. The app shows that
 label beside the voice so simultaneous agent tasks remain distinguishable. An
 agent can also attach a private inbox file. The app then lets the user send a
 durable reply back to that task without exposing the file path in the window.
-Agents attach an inbox only while they can keep their current turn open and
-wait on listener output; the file alone cannot wake a finished task.
+Agents attach an inbox only after arranging a live path that wakes or resumes
+their task when a reply arrives. The file alone is storage and cannot wake an
+agent.
 
 ## How it works
 
