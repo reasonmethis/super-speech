@@ -70,9 +70,14 @@ for later replies from that task. The app shows it beside the voice. Keep it at
 
 ## Listen for replies from the app
 
-Add an inbox only when this task can keep a listener running and read its
-output. Choose one private, unique absolute `.jsonl` path for the task and reuse
-it on every spoken reply. Never share one inbox between tasks.
+Attaching an inbox is a promise that Reply can wake this same agent turn. Add
+one only when the execution environment can keep the turn open and return
+listener output to the agent. A detached or merely running process does not
+meet that contract. If the environment cannot resume the turn when process
+output arrives, do not pass `--inbox`.
+
+Choose one private, unique absolute `.jsonl` path for the task and reuse it on
+every spoken reply. Never share one inbox between tasks.
 
 Start the listener as a long-running command before the first `speak` call. Wait
 until its stderr says it is listening. The command creates the parent directory
@@ -85,6 +90,12 @@ and file when needed:
 ```bash
 "$SKILL/scripts/super-speech.sh" listen-inbox "$INBOX"
 ```
+
+Keep the listener's command session ID. Whenever no other work is ready, use
+the execution tool's wait or poll operation on that same session. If the wait
+times out without a message, wait again. Keep the agent turn open rather than
+sending a final response. Starting the process and then letting the turn go
+idle does not create a wake-up channel.
 
 Then attach the same path to each Speechicle:
 
@@ -109,10 +120,11 @@ default the listener first emits saved messages and then follows new ones. Add
 `--from-end` only when the user has clearly chosen to ignore messages already
 in the file.
 
-Keep the listener alive only while this task can act on its output. The file
-preserves a message, but it cannot wake a finished or suspended agent task by
-itself. Do not tell the user the inbox is being monitored after the listener
-has stopped.
+After handling a message, return to the listener wait while the task still
+offers replies. Stop only when the user ends the task or asks to stop accepting
+replies. The file preserves messages after that, but it cannot wake a finished
+or suspended agent task by itself. Do not claim the inbox is live after the
+listener or its agent turn has stopped.
 
 The launcher uses the desktop engine when a valid app installation exists.
 Otherwise it uses the headless engine inside this skill. Do not parse the
