@@ -25,6 +25,7 @@ if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
 }
 
 if ($enginePath) {
+    $ErrorActionPreference = "Continue"
     & $enginePath @args
     exit $LASTEXITCODE
 }
@@ -40,5 +41,6 @@ if (-not (Test-Path -LiteralPath $headlessEngine -PathType Leaf)) {
 
 $env:SUPER_SPEECH_HOME = $headlessRuntime
 $env:SUPER_SPEECH_MODEL_DIR = Join-Path $headlessRuntime "models\kokoro"
+$ErrorActionPreference = "Continue"
 & $headlessEngine @args
 exit $LASTEXITCODE
