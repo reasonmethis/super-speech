@@ -198,6 +198,7 @@ type OpenMenuState =
 
 let currentStatus = desktopApi ? INITIAL_STATUS : demoStatus;
 let commandPending = false;
+let pendingPlaybackPause: boolean | null = null;
 let pendingTimelineMutation: PendingTimelineMutation | null = null;
 let failedTimelineMutation: TimelineMutationFailure | null = null;
 let expandedItemId: string | null = null;
@@ -228,7 +229,12 @@ function timelineMutationBlocked(): boolean {
 function pendingPlaybackForPresentation(): PendingPlayback | null {
   const pending = pendingTimelineMutation;
   if (pending?.kind === "play") {
-    return { item: pending.item, state: pending.playbackState };
+    return {
+      item: pending.item,
+      state: pendingPlaybackPause === null
+        ? pending.playbackState
+        : pendingPlaybackPause ? "paused" : "playing",
+    };
   }
   return null;
 }
@@ -505,8 +511,17 @@ function render(status: RuntimeStatus): void {
   const displayedStatus = pendingTimelineMutation?.kind === "clear"
     ? clearedTimeline(status)
     : status;
+  const playbackStatus = pendingPlaybackPause === null
+    ? displayedStatus
+    : {
+      ...displayedStatus,
+      state: playbackStateForBoundary(
+        displayedStatus.current !== null,
+        pendingPlaybackPause,
+      ),
+    };
   const presentation = playbackPresentation(
-    displayedStatus,
+    playbackStatus,
     pendingPlaybackForPresentation(),
   );
   const copy = statusCopy(presentation);
@@ -1979,10 +1994,11 @@ async function runPlaybackAction(): Promise<void> {
   ) {
     return;
   }
+  const paused = action === "pause";
   commandPending = true;
+  pendingPlaybackPause = action === "setup" ? null : paused;
   commandStatus.textContent = "";
   render(currentStatus);
-  const paused = action === "pause";
   const pendingPlay = pendingTimelineMutation?.kind === "play"
     ? pendingTimelineMutation
     : null;
@@ -2009,6 +2025,7 @@ async function runPlaybackAction(): Promise<void> {
         : "Could not resume speech. Try again.";
     }
   } finally {
+    pendingPlaybackPause = null;
     commandPending = false;
     render(currentStatus);
   }

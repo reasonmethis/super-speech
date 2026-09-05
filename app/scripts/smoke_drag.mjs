@@ -1702,12 +1702,36 @@ try {
     ),
     "Hovering Ready must preview the green Pause control",
   );
-  await idleButton.click();
+  const immediateHoldingState = await idleButton.evaluate((button) => {
+    globalThis.__holdingPresentationStates = [];
+    globalThis.__holdingPresentationObserver = new MutationObserver(() => {
+      globalThis.__holdingPresentationStates.push(document.body.dataset.state);
+    });
+    globalThis.__holdingPresentationObserver.observe(document.body, {
+      attributes: true,
+      attributeFilter: ["data-state"],
+    });
+    button.click();
+    return document.body.dataset.state;
+  });
+  assert.equal(
+    immediateHoldingState,
+    "holding",
+    "Pausing Ready must present Holding in the same click task",
+  );
   await waitFor(
     async () =>
       status().state === "holding" &&
       await page.locator("body").getAttribute("data-state") === "holding",
     "Pausing Ready did not enter Holding",
+  );
+  const holdingPresentationStates = await page.evaluate(() => {
+    globalThis.__holdingPresentationObserver.disconnect();
+    return globalThis.__holdingPresentationStates;
+  });
+  assert(
+    !holdingPresentationStates.includes("idle"),
+    `Pausing Ready presented Idle again: ${holdingPresentationStates.join(", ")}`,
   );
   assert.equal(status().current, null);
   assert.equal(status().queue_count, 0);
