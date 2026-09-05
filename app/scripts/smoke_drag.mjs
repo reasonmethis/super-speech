@@ -1702,7 +1702,7 @@ try {
     ),
     "Hovering Ready must preview the green Pause control",
   );
-  const immediateHoldingState = await idleButton.evaluate((button) => {
+  const pendingPauseAppearance = await idleButton.evaluate((button) => {
     globalThis.__holdingPresentationStates = [];
     globalThis.__holdingPresentationObserver = new MutationObserver(() => {
       globalThis.__holdingPresentationStates.push(document.body.dataset.state);
@@ -1712,13 +1712,19 @@ try {
       attributeFilter: ["data-state"],
     });
     button.click();
-    return document.body.dataset.state;
+    return {
+      state: document.body.dataset.state,
+      background: getComputedStyle(button).backgroundImage,
+      idleIcon: getComputedStyle(button.querySelector(".idle-icon")).display,
+    };
   });
   assert.equal(
-    immediateHoldingState,
-    "holding",
-    "Pausing Ready must present Holding in the same click task",
+    pendingPauseAppearance.state,
+    "idle",
+    "The renderer must await the engine before reporting Holding",
   );
+  assert(pendingPauseAppearance.background.includes("rgb(0, 154, 145)"));
+  assert.equal(pendingPauseAppearance.idleIcon, "none", "Pending Pause exposed the idle icon");
   await waitFor(
     async () =>
       status().state === "holding" &&
@@ -1730,7 +1736,7 @@ try {
     return globalThis.__holdingPresentationStates;
   });
   assert(
-    !holdingPresentationStates.includes("idle"),
+    !holdingPresentationStates.slice(holdingPresentationStates.indexOf("holding")).includes("idle"),
     `Pausing Ready presented Idle again: ${holdingPresentationStates.join(", ")}`,
   );
   assert.equal(status().current, null);
@@ -1749,12 +1755,22 @@ try {
     });
   }
 
-  await idleButton.click();
+  const pendingResumeState = await idleButton.evaluate((button) => {
+    button.click();
+    return document.body.dataset.state;
+  });
+  assert.equal(pendingResumeState, "holding", "Resume must await the engine's reply");
   await waitFor(
     async () =>
       status().state === "idle" &&
       await page.locator("body").getAttribute("data-state") === "idle",
     "Resuming an empty Holding state did not return to Ready",
+  );
+  assert(
+    await idleButton.evaluate((button) =>
+      getComputedStyle(button).backgroundImage.includes("rgb(0, 154, 145)")
+    ),
+    "Resume must preserve the hovered appearance when returning to Ready",
   );
   await idleButton.click();
   await waitFor(
@@ -2081,6 +2097,87 @@ try {
     async () => await page.locator("body").getAttribute("data-state") === "idle",
     "The renderer did not recover after replacing the external engine",
   );
+
+  // Hold IPC replies open to inspect rendered frames before success or failure
+  const confirmedStatus = await page.evaluate(() => window.superSpeech.getStatus());
+  await electronApp.evaluate(({ ipcMain }, snapshot) => {
+    globalThis.playbackTest = { snapshot, calls: 0, complete: null };
+    ipcMain.removeHandler("runtime:get-status");
+    ipcMain.handle("runtime:get-status", () => globalThis.playbackTest.snapshot);
+    ipcMain.removeHandler("runtime:set-paused");
+    ipcMain.handle("runtime:set-paused", (_event, paused) => {
+      const test = globalThis.playbackTest;
+      test.calls += 1;
+      return new Promise((resolve, reject) => {
+        test.complete = (fail) => {
+          if (fail) {
+            reject(new Error("Playback test rejected command"));
+            return;
+          }
+          test.snapshot = {
+            ...test.snapshot,
+            state: test.snapshot.current
+              ? paused ? "paused" : "playing"
+              : paused ? "holding" : "idle",
+            updated_at: test.snapshot.updated_at + 1,
+          };
+          resolve(test.snapshot);
+        };
+      });
+    });
+  }, confirmedStatus);
+  for (const state of ["idle", "holding", "playing", "paused"]) {
+    for (const fail of [false, true]) {
+      await electronApp.evaluate((_electron, { state, current }) => {
+        const test = globalThis.playbackTest;
+        test.calls = 0;
+        test.complete = null;
+        test.snapshot = {
+          ...test.snapshot,
+          state,
+          current: state === "idle" || state === "holding" ? null : current,
+          history: [],
+          history_count: 0,
+          updated_at: test.snapshot.updated_at + 1,
+        };
+      }, { state, current: backgroundCurrent });
+      await waitFor(
+        async () => await page.locator("body").getAttribute("data-state") === state,
+        `The delayed playback fixture did not reach ${state}`,
+      );
+      await idleButton.hover();
+      const appearances = await idleButton.evaluate(async (button) => {
+        const appearance = () => ({
+          state: document.body.dataset.state,
+          background: getComputedStyle(button).backgroundImage,
+          icon: document.querySelector("#playback-icon").innerHTML,
+        });
+        const before = appearance();
+        button.click();
+        button.click();
+        const frames = [];
+        for (let index = 0; index < 8; index += 1) {
+          await new Promise(requestAnimationFrame);
+          frames.push(appearance());
+        }
+        return { before, frames };
+      });
+      for (const frame of appearances.frames) {
+        assert.deepEqual(frame, appearances.before, `Pending command changed ${state} before acknowledgement`);
+      }
+      assert.equal(await idleButton.getAttribute("aria-disabled"), "true");
+      assert.equal(await electronApp.evaluate(() => globalThis.playbackTest.calls), 1);
+      await electronApp.evaluate((_electron, fail) => globalThis.playbackTest.complete(fail), fail);
+      const destination = fail ? state : {
+        idle: "holding", holding: "idle", playing: "paused", paused: "playing",
+      }[state];
+      await waitFor(
+        async () => await page.locator("body").getAttribute("data-state") === destination &&
+          await idleButton.getAttribute("aria-busy") === "false",
+        `The ${state} command did not finish in ${destination}`,
+      );
+    }
+  }
 
   console.log("Super Speech renderer interaction smoke test passed");
 } catch (error) {

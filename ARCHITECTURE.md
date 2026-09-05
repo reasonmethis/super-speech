@@ -167,7 +167,13 @@ cannot affect a replacement process.
 Pause and Resume return only after the live audio object acknowledges the
 applied state. A single ordered background writer then saves the compatibility
 marker, so disk latency is not part of the click-to-audio path. The renderer
-does not predict the result. Clear all owns a separate Clearing state. It closes
+does not predict the result. While awaiting the reply, it keeps the confirmed
+playback state and the button's hover and focus appearance. It marks the button
+busy and rejects repeated commands without applying native disabled styling.
+The acknowledgement supplies the next playback state; a failed command leaves
+the confirmed state visible.
+
+Clear all owns a separate Clearing state. It closes
 the live audio gate before publishing the saved timeline transaction and keeps
 the old stream silent until that stream detaches. Clearing never writes a Pause
 marker or exposes Paused, and Ready appears only after the engine confirms the

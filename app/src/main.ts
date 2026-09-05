@@ -198,7 +198,6 @@ type OpenMenuState =
 
 let currentStatus = desktopApi ? INITIAL_STATUS : demoStatus;
 let commandPending = false;
-let pendingPlaybackPause: boolean | null = null;
 let pendingTimelineMutation: PendingTimelineMutation | null = null;
 let failedTimelineMutation: TimelineMutationFailure | null = null;
 let expandedItemId: string | null = null;
@@ -231,9 +230,7 @@ function pendingPlaybackForPresentation(): PendingPlayback | null {
   if (pending?.kind === "play") {
     return {
       item: pending.item,
-      state: pendingPlaybackPause === null
-        ? pending.playbackState
-        : pendingPlaybackPause ? "paused" : "playing",
+      state: pending.playbackState,
     };
   }
   return null;
@@ -511,17 +508,8 @@ function render(status: RuntimeStatus): void {
   const displayedStatus = pendingTimelineMutation?.kind === "clear"
     ? clearedTimeline(status)
     : status;
-  const playbackStatus = pendingPlaybackPause === null
-    ? displayedStatus
-    : {
-      ...displayedStatus,
-      state: playbackStateForBoundary(
-        displayedStatus.current !== null,
-        pendingPlaybackPause,
-      ),
-    };
   const presentation = playbackPresentation(
-    playbackStatus,
+    displayedStatus,
     pendingPlaybackForPresentation(),
   );
   const copy = statusCopy(presentation);
@@ -598,8 +586,13 @@ function render(status: RuntimeStatus): void {
   playbackButton.setAttribute("aria-label", actionLabels[action]);
   const nonPlaybackMutationPending = pendingTimelineMutation !== null &&
     pendingTimelineMutation.kind !== "play";
-  playbackButton.disabled = commandPending || nonPlaybackMutationPending ||
+  // Keep hover and focus intact while a command awaits the engine's reply
+  playbackButton.disabled = nonPlaybackMutationPending ||
     action === "inactive";
+  playbackButton.setAttribute(
+    "aria-disabled",
+    String(commandPending || playbackButton.disabled),
+  );
   playbackButton.setAttribute(
     "aria-busy",
     String(commandPending || pendingTimelineMutation !== null ||
@@ -1996,7 +1989,6 @@ async function runPlaybackAction(): Promise<void> {
   }
   const paused = action === "pause";
   commandPending = true;
-  pendingPlaybackPause = action === "setup" ? null : paused;
   commandStatus.textContent = "";
   render(currentStatus);
   const pendingPlay = pendingTimelineMutation?.kind === "play"
@@ -2025,7 +2017,6 @@ async function runPlaybackAction(): Promise<void> {
         : "Could not resume speech. Try again.";
     }
   } finally {
-    pendingPlaybackPause = null;
     commandPending = false;
     render(currentStatus);
   }
