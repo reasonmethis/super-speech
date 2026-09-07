@@ -211,6 +211,7 @@ def test_clear_owns_live_audio_until_the_old_stream_detaches() -> None:
 
     assert playback.paused
     assert control.pause_requested()
+    assert not control.user_paused()
     control.start_clearing("clear-1")
     with pytest.raises(RuntimeError, match="another Clear"):
         control.start_clearing("clear-2")
@@ -220,6 +221,7 @@ def test_clear_owns_live_audio_until_the_old_stream_detaches() -> None:
     control.finish_clearing("clear-1", hold_active=True)
     assert playback.paused
     assert control.pause_requested()
+    assert not control.user_paused()
 
     control.detach(playback)
     replacement = FakePlayback()

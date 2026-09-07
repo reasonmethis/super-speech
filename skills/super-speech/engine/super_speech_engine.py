@@ -1887,7 +1887,7 @@ def publish_status(
 
     has_current = current is not None
     if lifecycle_state is None:
-        pause_requested = playback_control.pause_requested()
+        pause_requested = playback_control.user_paused()
         state = playback_state_for_boundary(has_current, pause_requested)
     else:
         state = lifecycle_state

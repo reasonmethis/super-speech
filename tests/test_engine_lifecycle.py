@@ -619,6 +619,31 @@ def test_mutation_waits_for_status_publication_through_reader_locks(
     assert not state.stop.is_set()
 
 
+@pytest.mark.parametrize("paused", [False, True])
+def test_clear_snapshot_is_ready_while_its_old_stream_stays_silent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, paused: bool
+) -> None:
+    engine = load_engine("super_speech_engine_clear_silenced_stream")
+    configure_runtime(engine, tmp_path)
+    prepare_timeline(engine)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    if paused:
+        engine.publish_ordered_marker(engine.PAUSE)
+    playback = PauseableAudio(np.zeros(100), CallbackStop)
+    engine.playback_control.attach(playback)
+    request_id = request_mutation(engine, "clear")
+    engine.process_mutation_requests(queue.Queue(), engine.State())
+
+    result = json.loads(engine.mutation_result_path(request_id).read_text(encoding="utf-8"))
+    assert result["outcome"] == "committed"
+    assert result["snapshot"]["state"] == "idle"
+    assert result["snapshot"]["current"] is None
+    assert playback.paused
+    assert engine.playback_control.pause_requested()
+    assert not engine.playback_control.user_paused()
+    engine.playback_control.detach(playback)
+
+
 def test_backward_wall_clock_cannot_throttle_or_regress_status(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

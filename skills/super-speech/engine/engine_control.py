@@ -37,6 +37,11 @@ class LivePlaybackControl:
         with self._lock:
             return self._pause_intent()
 
+    def user_paused(self) -> bool:
+        """Report the user's pause setting, excluding Clear's temporary audio silence."""
+        with self._lock:
+            return self._user_pause_intent()
+
     def begin_command(self, paused: bool) -> tuple[object, PlaybackState]:
         """Apply a command and return its ownership token and live audio state."""
         with self._lock:
@@ -89,6 +94,9 @@ class LivePlaybackControl:
     def _pause_intent(self) -> bool:
         if self._clear_blocks_playback():
             return True
+        return self._user_pause_intent()
+
+    def _user_pause_intent(self) -> bool:
         if self._command is not None:
             return self._command[1]
         return self._read_persisted_pause()
