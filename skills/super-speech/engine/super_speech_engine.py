@@ -2583,7 +2583,6 @@ _prev_audio_end: float | None = None
 
 def play_one(
     sd,
-    np,
     path: Path,
     audio,
     sr,
@@ -2597,16 +2596,24 @@ def play_one(
         return "fatal"
     if len(audio) == 0:
         return "done"
-    out = np.zeros(len(audio), dtype=getattr(audio, "dtype", "float32")) if SILENT else audio
-    playback = PauseableAudio(out, sd.CallbackStop)
+    playback = PauseableAudio(audio, sd.CallbackStop)
+
+    def output_callback(outdata, frames, time_info, status):
+        try:
+            playback.callback(outdata, frames, time_info, status)
+        finally:
+            # Mute only the device output, so silent tests exercise real audio data
+            if SILENT:
+                outdata.fill(0)
+
     paused = playback_control.attach(playback)
     t0 = time.time()
     stream = sd.OutputStream(
         samplerate=sr,
         channels=playback.channels,
-        dtype=getattr(out, "dtype", "float32"),
+        dtype=audio.dtype,
         blocksize=max(64, int(sr * 0.02)),
-        callback=playback.callback,
+        callback=output_callback,
         finished_callback=playback.mark_done,
     )
     stream.start()
@@ -2908,7 +2915,6 @@ def run_engine_loop(
             publish_status(st, force=True)
             outcome = play_one(
                 sd,
-                np,
                 buffered.path,
                 buffered.audio,
                 buffered.sample_rate,

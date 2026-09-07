@@ -11,8 +11,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import numpy as np
     import sherpa_onnx
     from kokoro_onnx import Kokoro
+    from numpy.typing import NDArray
 
 ALBA_VOICE = "piper_alba"
 ALBA_DIRECTORY = "piper-alba"
@@ -53,7 +55,9 @@ class SpeechSynthesizer:
         self.models = models
         self.alba: sherpa_onnx.OfflineTts | None = None
 
-    def create(self, text: str, *, voice: str, speed: float, lang: str):
+    def create(
+        self, text: str, *, voice: str, speed: float, lang: str
+    ) -> tuple[NDArray[np.float32], int]:
         if voice != ALBA_VOICE:
             return self.kokoro.create(text, voice=voice, speed=speed, lang=lang)
         if self.alba is None:
@@ -73,4 +77,7 @@ class SpeechSynthesizer:
                 ),
             ))
         audio = self.alba.generate(text, sid=0, speed=speed)
-        return audio.samples, audio.sample_rate
+        import numpy as np
+
+        # Convert sherpa's Python list to the float32 array used by the audio player
+        return np.asarray(audio.samples, dtype=np.float32), audio.sample_rate

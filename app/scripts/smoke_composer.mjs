@@ -85,11 +85,31 @@ export async function testComposerFeatures({ page, runEngine, status, waitFor, i
   }
   await page.locator("#composer-inbox").click();
   await menu.getByRole("option", { name: "Speak aloud", exact: true }).click();
-  await page.locator("#composer-text").fill("Alba uses the same pause controls as every other voice.");
+  await page.locator("#composer-text").fill(
+    "Alba uses the same pause controls as every other voice. " +
+    "This recording must finish every part, not merely announce that the first part is ready. " +
+    "The next sentence makes this long enough to exercise the transition between separately generated pieces. " +
+    "After Alba finishes, another voice will play through the same audio output. " +
+    "All of this test audio is muted only when it reaches the device callback.",
+  );
   await page.locator("#composer-submit").click();
   await waitFor(() => status().current?.voice === "piper_alba" && status().current?.piece > 0, "The bundled Alba voice did not generate audio", 60_000);
+  const albaStatus = status();
+  const albaId = albaStatus.current.id;
+  assert(albaStatus.current.piece_count > 1, "Alba must exercise more than one audio piece");
   const pause = await page.evaluate(() => window.superSpeech.setPaused(true));
   assert.equal(pause.state, "paused");
+  const heart = await page.evaluate(() => window.superSpeech.mutateTimeline({
+    type: "enqueue", text: "Heart follows Alba on the same player.", voice: "af_heart",
+  }));
+  assert.equal(heart.outcome, "committed");
+  await page.evaluate(() => window.superSpeech.setPaused(false));
+  await waitFor(() => status().current?.id === albaId && status().current.piece > 1, "Alba did not play its next audio piece", 60_000);
+  await waitFor(() => {
+    const snapshot = status();
+    assert.equal(snapshot.engine_pid, albaStatus.engine_pid, "The engine restarted during real audio playback");
+    return snapshot.current === null && [albaId, heart.result_id].every((id) => snapshot.history.some((item) => item.id === id));
+  }, "Both voices must finish playing, not merely finish synthesis", 120_000);
   const clear = await page.evaluate(() => window.superSpeech.mutateTimeline({ type: "clear" }));
   assert.equal(clear.outcome, "committed");
   assert.equal(clear.snapshot.state, "idle");

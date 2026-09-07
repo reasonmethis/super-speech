@@ -284,7 +284,6 @@ def test_audio_stream_failure_propagates_before_playback(
     with pytest.raises(RuntimeError, match="no audio device"):
         engine.play_one(
             sounddevice,
-            np,
             path,
             np.ones(4, dtype=np.float32),
             1000,
@@ -292,6 +291,57 @@ def test_audio_stream_failure_propagates_before_playback(
             queue.Queue(),
             state,
         )
+
+@pytest.mark.parametrize("silent", [False, True])
+@pytest.mark.parametrize("channels", [1, 2])
+def test_silent_playback_mutes_only_the_final_device_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, silent: bool, channels: int
+) -> None:
+    engine = load_engine("super_speech_engine_silent_output_boundary")
+    configure_runtime(engine, tmp_path)
+    monkeypatch.setattr(engine, "SILENT", silent)
+    samples = np.full((6, channels), 0.25, dtype=np.float32)
+    audio = samples[:, 0] if channels == 1 else samples
+    path = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    path.write_text("Speech", encoding="utf-8")
+    state = engine.State()
+    set_current(engine, state, path)
+    output = []
+
+    def make_playback(source, callback_stop):
+        assert source is audio, "Silent mode must not replace or normalize the input"
+        return PauseableAudio(source, callback_stop)
+
+    monkeypatch.setattr(engine, "PauseableAudio", make_playback)
+
+    class RecordingStream:
+        active = False
+
+        def __init__(self, *, callback, finished_callback, **settings):
+            assert settings["channels"] == channels
+            assert settings["dtype"] == np.float32
+            self.callback = callback
+            self.finished_callback = finished_callback
+
+        def start(self):
+            for _ in range(2):
+                block = np.empty((4, channels), dtype=np.float32)
+                try:
+                    self.callback(block, 4, None, None)
+                except CallbackStop:
+                    self.finished_callback()
+                output.append(block.copy())
+
+        def close(self):
+            pass
+
+    sounddevice = SimpleNamespace(CallbackStop=CallbackStop, OutputStream=RecordingStream)
+    assert engine.play_one(sounddevice, path, audio, 1000, "piece", queue.Queue(), state) == "done"
+    rendered = np.concatenate(output)
+    np.testing.assert_array_equal(rendered[:6], np.zeros_like(samples) if silent else samples)
+    np.testing.assert_array_equal(rendered[6:], 0)
+    np.testing.assert_array_equal(audio, 0.25)
+
 
 def test_fatal_engine_stop_cannot_start_another_audio_stream(
     tmp_path: Path,
@@ -313,7 +363,6 @@ def test_fatal_engine_stop_cannot_start_another_audio_stream(
 
     assert engine.play_one(
         sounddevice,
-        np,
         path,
         np.ones(4, dtype=np.float32),
         1000,

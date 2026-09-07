@@ -1118,13 +1118,12 @@ def test_engine_loop_replays_history_before_the_existing_queue(
 
         def start(self) -> None:
             self.active = True
-            playback = self.callback.__self__
-            played_samples.append(int(playback.audio[0, 0]))
-            output = np.empty_like(playback.audio)
+            output = np.empty((4, 1), dtype=np.float32)
             try:
                 self.callback(output, len(output), None, None)
             except FakeCallbackStop:
                 pass
+            played_samples.append(int(output[0, 0]))
             self.active = False
             self.finished_callback()
             if len(played_samples) == 2:
@@ -2206,11 +2205,18 @@ def test_clear_silences_playback_before_archiving_finishes(
     outcomes: list[str] = []
     stream_cleanup: list[str] = []
 
+    original_playback = engine.PauseableAudio
+
+    def track_playback(*args):
+        playback = original_playback(*args)
+        playbacks.append(playback)
+        return playback
+
+    monkeypatch.setattr(engine, "PauseableAudio", track_playback)
+
     class FakeOutputStream:
         def __init__(self, *, callback, **_kwargs) -> None:
-            self.playback = callback.__self__
             self.active = False
-            playbacks.append(self.playback)
 
         def start(self) -> None:
             self.active = True
@@ -2241,7 +2247,6 @@ def test_clear_silences_playback_before_archiving_finishes(
         outcomes.append(
             engine.play_one(
                 sounddevice,
-                np,
                 current,
                 np.ones(10_000, dtype=np.float32),
                 1_000,
