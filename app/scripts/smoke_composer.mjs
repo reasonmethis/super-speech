@@ -103,12 +103,13 @@ export async function testComposerFeatures({ page, runEngine, status, waitFor, i
     type: "enqueue", text: "Heart follows Alba on the same player.", voice: "af_heart",
   }));
   assert.equal(heart.outcome, "committed");
+  assert.equal(typeof heart.resultId, "string");
   await page.evaluate(() => window.superSpeech.setPaused(false));
   await waitFor(() => status().current?.id === albaId && status().current.piece > 1, "Alba did not play its next audio piece", 60_000);
   await waitFor(() => {
     const snapshot = status();
     assert.equal(snapshot.engine_pid, albaStatus.engine_pid, "The engine restarted during real audio playback");
-    return snapshot.current === null && [albaId, heart.result_id].every((id) => snapshot.history.some((item) => item.id === id));
+    return snapshot.current === null && [albaId, heart.resultId].every((id) => snapshot.history.some((item) => item.id === id));
   }, "Both voices must finish playing, not merely finish synthesis", 120_000);
   const clear = await page.evaluate(() => window.superSpeech.mutateTimeline({ type: "clear" }));
   assert.equal(clear.outcome, "committed");
