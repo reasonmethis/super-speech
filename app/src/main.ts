@@ -286,9 +286,6 @@ function saveDefaultVoice(voice: string): void {
   defaultVoiceId = voice;
   localStorage.setItem("super-speech-default-voice", voice);
   defaultVoiceButton.textContent = formatVoice(voice);
-  if (!composerOpen) {
-    composerVoiceId = voice;
-  }
 }
 
 function inboxLabel(item: { source?: string; inbox?: string }): string {

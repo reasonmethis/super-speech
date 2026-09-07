@@ -794,14 +794,16 @@ def _read_command_sequence_unlocked() -> int:
     return payload["last_sequence"]
 
 
-def _replace_command_json_unlocked(
+def _replace_json_file(
     temporary: Path,
     target: Path,
     payload: dict[str, object],
     error_message: str,
 ) -> None:
+    """Confirm a complete JSON replacement, allowing short-lived Windows reader locks."""
     last_error: OSError | None = None
-    for _ in range(5):
+    # Allow about five seconds for readers or scanners to release the destination
+    for _ in range(250):
         try:
             os.replace(temporary, target)
             return
@@ -829,7 +831,7 @@ def _allocate_command_sequence_unlocked() -> int:
             json.dumps(payload, separators=(",", ":")),
             encoding="utf-8",
         )
-        _replace_command_json_unlocked(
+        _replace_json_file(
             temporary,
             PLAYBACK_COMMAND_SEQUENCE,
             payload,
@@ -869,7 +871,7 @@ def _publish_ordered_marker_unlocked(
             json.dumps(payload, separators=(",", ":")),
             encoding="utf-8",
         )
-        _replace_command_json_unlocked(
+        _replace_json_file(
             temporary,
             signal,
             payload,
@@ -917,7 +919,7 @@ def _publish_mutation_unlocked(request: MutationRequest) -> None:
             json.dumps(payload, separators=(",", ":")),
             encoding="utf-8",
         )
-        _replace_command_json_unlocked(
+        _replace_json_file(
             temp_path,
             request_path,
             payload,
@@ -1917,7 +1919,7 @@ def publish_status(
     )
     try:
         temp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        os.replace(temp_path, STATUS)
+        _replace_json_file(temp_path, STATUS, payload, "could not publish engine status")
         STATUS_FAILURE.unlink(missing_ok=True)
         _last_status_write_monotonic = monotonic_now
         _last_status_updated_at = updated_at
@@ -1928,11 +1930,11 @@ def publish_status(
             )
         _status_failure_started = None
         return payload
-    except OSError as error:
+    except (OSError, RuntimeError) as error:
         if _status_failure_started is None:
             _status_failure_started = monotonic_now
             log(f"status publication failed: {type(error).__name__}: {error}")
-        elif monotonic_now - _status_failure_started >= 5.0:
+        if time.monotonic() - _status_failure_started >= 5.0:
             try:
                 STATUS_FAILURE.touch()
             except OSError as marker_error:
@@ -2767,7 +2769,7 @@ def run_engine_loop(
         log(f"could not enumerate voices: {e}; voice validation disabled")
         AVAILABLE_VOICES = set()
     log(
-        f"kokoro loaded ({len(AVAILABLE_VOICES)} voices); buffered drainer "
+        f"kokoro loaded; {len(AVAILABLE_VOICES)} voices available; buffered drainer "
         f"(buffer<={BUFFER_MAX}, gap={CHUNK_GAP_S}s, split={SPLIT_CHARS}c"
         f"{', SILENT' if SILENT else ''})"
     )

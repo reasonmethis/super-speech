@@ -562,7 +562,7 @@ def test_persistent_status_publication_failure_stops_the_engine(
     assert not engine.STATUS_FAILURE.exists()
 
 
-def test_status_publication_uses_a_fresh_temporary_file_after_failure(
+def test_status_publication_retries_reader_locks_before_acknowledging(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     engine = load_engine("super_speech_engine_status_fresh_temporary")
@@ -580,16 +580,43 @@ def test_status_publication_uses_a_fresh_temporary_file_after_failure(
 
     monkeypatch.setattr(engine.os, "replace", replace)
 
-    engine.publish_status(state, force=True)
+    first = engine.publish_status(state, force=True)
+    assert first is not None
     engine.publish_status(state, force=True)
 
-    assert len(temporary_paths) == 2
-    assert temporary_paths[0] != temporary_paths[1]
+    assert len(temporary_paths) == 3
+    assert temporary_paths[0] == temporary_paths[1]
+    assert temporary_paths[1] != temporary_paths[2]
     assert not state.stop.is_set()
     assert json.loads(engine.STATUS.read_text(encoding="utf-8"))["state"] == "idle"
-    log = engine.LOG.read_text(encoding="utf-8")
-    assert "status publication failed: PermissionError" in log
-    assert "status publication recovered" in log
+
+
+def test_mutation_waits_for_status_publication_through_reader_locks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine = load_engine("super_speech_engine_mutation_status_retry")
+    configure_runtime(engine, tmp_path)
+    prepare_timeline(engine)
+    monkeypatch.setattr(engine, "engine_is_running", lambda: True)
+    request_id = request_mutation(engine, "clear")
+    real_replace = engine.os.replace
+    failures = 0
+
+    def briefly_locked(source: Path, target: Path) -> None:
+        nonlocal failures
+        if Path(target) == engine.STATUS and failures < 8:
+            failures += 1
+            raise PermissionError("reader still has the snapshot open")
+        real_replace(source, target)
+
+    monkeypatch.setattr(engine.os, "replace", briefly_locked)
+    state = engine.State()
+    engine.process_mutation_requests(queue.Queue(), state)
+    result = json.loads(engine.mutation_result_path(request_id).read_text(encoding="utf-8"))
+    assert failures == 8
+    assert result["outcome"] == "committed"
+    assert result["snapshot"] == json.loads(engine.STATUS.read_text(encoding="utf-8"))
+    assert not state.stop.is_set()
 
 
 def test_backward_wall_clock_cannot_throttle_or_regress_status(
@@ -1921,7 +1948,7 @@ def test_failed_clear_publication_preserves_the_previous_pause_state(
     monkeypatch.setattr(engine, "engine_is_running", lambda: True)
     if already_paused:
         engine.publish_ordered_marker(engine.PAUSE)
-    original_replace = engine._replace_command_json_unlocked
+    original_replace = engine._replace_json_file
 
     def fail_mutation_publish(
         temporary: Path,
@@ -1933,7 +1960,7 @@ def test_failed_clear_publication_preserves_the_previous_pause_state(
             raise RuntimeError("could not publish timeline mutation")
         original_replace(temporary, target, payload, error_message)
 
-    monkeypatch.setattr(engine, "_replace_command_json_unlocked", fail_mutation_publish)
+    monkeypatch.setattr(engine, "_replace_json_file", fail_mutation_publish)
 
     with pytest.raises(RuntimeError, match="could not publish timeline mutation"):
         request_mutation(engine, "clear")
