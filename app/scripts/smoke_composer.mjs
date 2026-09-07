@@ -37,6 +37,9 @@ export async function testComposerFeatures({ page, runEngine, status, waitFor, i
   await page.locator("#settings-button").click();
   await page.locator("#default-voice").click();
   const menu = page.locator("#voice-menu");
+  await page.keyboard.press("Escape");
+  assert(await page.locator("#settings-panel").isVisible(), "Escape from a picker must preserve Settings");
+  await page.locator("#default-voice").click();
   assert(await menu.evaluate((element) => {
     const rect = element.getBoundingClientRect();
     return rect.left >= 0 && rect.top >= 0 && rect.bottom <= innerHeight &&
@@ -49,6 +52,9 @@ export async function testComposerFeatures({ page, runEngine, status, waitFor, i
   assert(await page.locator("#composer-actions").isVisible(), "An empty composer needs controls");
   assert.equal(await page.locator("#composer-voice").textContent(), "Alba");
   assert(!await page.locator("#composer-submit").isEnabled());
+  await page.locator("#composer-voice").click();
+  await page.keyboard.press("Escape");
+  assert(await page.locator("#speech-composer").isVisible(), "Escape from a picker must preserve the composer");
   await page.locator("#composer-inbox").click();
   assert.equal(await menu.getByRole("option", { name: "Test agent", exact: true }).count(), 1, "One inbox must have one destination");
   await menu.getByRole("option", { name: "Unavailable agent", exact: true }).click();

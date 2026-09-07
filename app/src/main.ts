@@ -2377,8 +2377,16 @@ speechicleList.addEventListener("lostpointercapture", (event) => {
 });
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
+    if (openMenu) {
+      event.preventDefault();
+      closeMenu(true);
+      return;
+    }
+    // Let native dialogs and popovers close without dismissing the editor behind them
+    if (inboxReplyDialog.open || settingsPanel.matches(":popover-open")) {
+      return;
+    }
     cancelTimelinePointerDrag();
-    closeMenu(true);
     closeComposer(true);
     if (playbackExpanded) {
       setPlaybackExpanded(false);
