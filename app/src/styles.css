@@ -247,7 +247,7 @@ button {
 .settings-panel {
   position: fixed;
   inset: 44px 18px auto auto;
-  width: 164px;
+  width: 210px;
   margin: 0;
   padding: 11px;
   border: 1px solid var(--line);
@@ -679,7 +679,65 @@ body[data-state="loading"] .playback-copy {
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
+  flex-wrap: wrap;
 }
+
+.default-voice-setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.composer-status {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.composer-status:empty { display: none; }
+
+.speechicle-reply {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: 0;
+  border-radius: 4px;
+  padding: 1px 4px;
+  color: var(--text-secondary);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.speechicle-reply svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.speechicle-reply:hover,
+.speechicle-reply:focus-visible { background: var(--control-hover); }
+
+.load-history-button {
+  display: block;
+  margin: 12px auto;
+  padding: 7px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  background: var(--control-bg);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.load-history-button[hidden] { display: none; }
+.load-history-button:hover { background: var(--control-hover); }
 
 .composer-voice {
   display: flex;
@@ -708,7 +766,11 @@ body[data-state="loading"] .playback-copy {
 
 .composer-voice-button {
   min-width: 92px;
+  max-width: 180px;
   padding: 0 7px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
   cursor: pointer;
   text-align: left;
 }
@@ -1074,6 +1136,7 @@ body[data-state="loading"] .playback-copy {
   font-size: 10.5px;
   cursor: pointer;
   text-align: left;
+  overflow-wrap: anywhere;
 }
 
 .voice-menu-option:hover,

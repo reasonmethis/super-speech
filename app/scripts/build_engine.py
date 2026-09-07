@@ -48,6 +48,8 @@ def main() -> None:
             "--collect-all",
             "kokoro_onnx",
             "--collect-all",
+            "sherpa_onnx",
+            "--collect-all",
             "sounddevice",
             "--collect-all",
             "espeakng_loader",

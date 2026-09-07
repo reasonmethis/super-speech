@@ -8,10 +8,12 @@ import {
   adoptTimelineSnapshot,
   clearedTimeline,
   currentPieceSegments,
+  defaultComposerVoice,
   moveSpeechicleItemBefore,
   playbackPresentation,
   playbackStateForBoundary,
   selectableVoiceOptions,
+  replyTargets,
   timelineItems,
   type PendingPlayback,
   type PlaybackPresentation,
@@ -86,9 +88,12 @@ const playbackTitle = requiredElement<HTMLHeadingElement>("playback-title");
 const currentText = requiredElement<HTMLParagraphElement>("current-text");
 const speechComposer = requiredElement<HTMLFormElement>("speech-composer");
 const composerText = requiredElement<HTMLTextAreaElement>("composer-text");
-const composerActions = requiredElement<HTMLDivElement>("composer-actions");
 const composerVoice = requiredElement<HTMLButtonElement>("composer-voice");
 const composerSubmit = requiredElement<HTMLButtonElement>("composer-submit");
+const composerInbox = requiredElement<HTMLButtonElement>("composer-inbox");
+const composerStatus = requiredElement<HTMLDivElement>("composer-status");
+const defaultVoiceButton = requiredElement<HTMLButtonElement>("default-voice");
+const settingsPanel = requiredElement<HTMLDivElement>("settings-panel");
 const voicePill = requiredElement<HTMLSpanElement>("voice-pill");
 const voiceLabel = requiredElement<HTMLSpanElement>("voice-label");
 const sourcePill = requiredElement<HTMLSpanElement>("source-pill");
@@ -194,7 +199,7 @@ interface PendingSpeechicleExpansion {
 type OpenMenuState =
   | { kind: "action"; itemId: string }
   | { kind: "voice"; itemId: string }
-  | { kind: "composer-voice" };
+  | { kind: "composer-voice" | "composer-inbox" | "default-voice" };
 
 let currentStatus = desktopApi ? INITIAL_STATUS : demoStatus;
 let commandPending = false;
@@ -213,6 +218,13 @@ let playbackExpanded = false;
 let lastFollowedPieceKey: string | null = null;
 let composerOpen = false;
 let composerVoiceId = "af_heart";
+let composerInboxId = "";
+let composerSending = false;
+let historyLoading = false;
+const loadHistoryButton = document.createElement("button");
+loadHistoryButton.type = "button";
+loadHistoryButton.className = "load-history-button";
+loadHistoryButton.textContent = "Load 50 more";
 let inboxReplyItemId: string | null = null;
 let inboxReplyPending = false;
 
@@ -249,6 +261,9 @@ const voiceLabels = new Map<string, string>(
 );
 let allowExtraVoices = localStorage.getItem("super-speech-extra-voices") === "true";
 extraVoicesToggle.checked = allowExtraVoices;
+let defaultVoiceId = defaultComposerVoice(localStorage.getItem("super-speech-default-voice"), allowExtraVoices);
+composerVoiceId = defaultVoiceId;
+defaultVoiceButton.textContent = formatVoice(defaultVoiceId);
 
 function formatVoice(voice: string): string {
   return voiceLabels.get(voice) ?? voice.replace(/^[a-z]{2}_/, "").replaceAll("_", " ");
@@ -258,21 +273,44 @@ extraVoicesToggle.addEventListener("change", () => {
   allowExtraVoices = extraVoicesToggle.checked;
   localStorage.setItem("super-speech-extra-voices", String(allowExtraVoices));
   if (!allowExtraVoices && ARCHIVED_VOICE_IDS.has(composerVoiceId)) {
-    composerVoiceId = "af_heart";
+    composerVoiceId = defaultComposerVoice(defaultVoiceId, allowExtraVoices);
   }
+  saveDefaultVoice(defaultComposerVoice(defaultVoiceId, allowExtraVoices));
   render(currentStatus);
   if (openMenu) {
     setOpenMenu(openMenu);
   }
 });
 
+function saveDefaultVoice(voice: string): void {
+  defaultVoiceId = voice;
+  localStorage.setItem("super-speech-default-voice", voice);
+  defaultVoiceButton.textContent = formatVoice(voice);
+  if (!composerOpen) {
+    composerVoiceId = voice;
+  }
+}
+
+function inboxLabel(item: { source?: string; inbox?: string }): string {
+  return item.source || item.inbox?.split(/[\\/]/).pop() || "Agent";
+}
+
 function renderComposerControls(): void {
   const hasText = composerText.value.trim() !== "";
-  const blocked = timelineMutationBlocked();
-  if ((!hasText || blocked) && openMenu?.kind === "composer-voice") {
+  const blocked = timelineMutationBlocked() || composerSending;
+  if (blocked && (openMenu?.kind === "composer-voice" || openMenu?.kind === "composer-inbox")) {
     setOpenMenu(null);
   }
-  composerActions.classList.toggle("is-hidden", !hasText);
+  const target = timelineItems(currentStatus).find(({ id }) => id === composerInboxId);
+  composerInbox.textContent = composerInboxId ? (target ? inboxLabel(target) : "Inbox unavailable") : "Speak aloud";
+  composerInbox.disabled = blocked;
+  composerVoice.closest(".composer-voice")!.classList.toggle("is-hidden", Boolean(composerInboxId));
+  composerSubmit.textContent = composerSending ? "Sending" : composerInboxId ? "Send reply" : "Add to Speechicles";
+  if (composerInboxId) {
+    composerText.maxLength = AGENT_MESSAGE_TEXT_MAX;
+  } else {
+    composerText.removeAttribute("maxlength");
+  }
   composerText.disabled = blocked;
   composerVoice.disabled = blocked;
   composerVoice.textContent = formatVoice(composerVoiceId);
@@ -280,7 +318,7 @@ function renderComposerControls(): void {
     "aria-label",
     `Voice for new speech: ${formatVoice(composerVoiceId)}`,
   );
-  composerSubmit.disabled = blocked || !hasText;
+  composerSubmit.disabled = blocked || !hasText || Boolean(composerInboxId && !target?.inbox);
 }
 
 function timelineAction(
@@ -517,7 +555,7 @@ function render(status: RuntimeStatus): void {
   const canCompose = presentation.state === "idle" ||
     presentation.state === "holding";
   if (!canCompose) {
-    if (openMenu?.kind === "composer-voice") {
+    if (openMenu?.kind === "composer-voice" || openMenu?.kind === "composer-inbox") {
       setOpenMenu(null);
     }
     composerOpen = false;
@@ -1307,16 +1345,17 @@ function renderActionMenu(
   }
 }
 
-function renderVoiceMenu(
+function renderChoiceMenu(
   button: HTMLButtonElement,
-  selectedVoice: string,
-  selectVoice: (voice: string) => void,
+  selected: string,
+  choices: ReadonlyArray<readonly [string, string, string]>,
+  select: (id: string) => void,
   shouldFocus: boolean,
   scope: "timeline" | "window" = "timeline",
 ): void {
   const contents: HTMLElement[] = [];
   let activeGroup: string | null = null;
-  for (const [id, label, group] of selectableVoiceOptions(allowExtraVoices, selectedVoice)) {
+  for (const [id, label, group] of choices) {
     if (group !== activeGroup) {
       const heading = document.createElement("div");
       heading.className = "voice-menu-group";
@@ -1330,12 +1369,12 @@ function renderVoiceMenu(
     option.role = "option";
     option.dataset.voice = id;
     option.textContent = label;
-    option.setAttribute("aria-selected", String(id === selectedVoice));
+    option.setAttribute("aria-selected", String(id === selected));
     option.disabled = timelineMutationBlocked();
     option.addEventListener("click", () => {
       setOpenMenu(null);
       button.focus({ preventScroll: true });
-      selectVoice(id);
+      select(id);
     });
     contents.push(option);
   }
@@ -1350,7 +1389,7 @@ function menuKey(menu: OpenMenuState | null): string {
   if (!menu) {
     return "";
   }
-  return menu.kind === "composer-voice" ? menu.kind : `${menu.kind}:${menu.itemId}`;
+  return "itemId" in menu ? `${menu.kind}:${menu.itemId}` : menu.kind;
 }
 
 function setOpenMenu(next: OpenMenuState | null): void {
@@ -1366,7 +1405,14 @@ function setOpenMenu(next: OpenMenuState | null): void {
     ".speechicle-voice",
   );
   const composerTarget = next?.kind === "composer-voice" && composerOpen && !composerVoice.disabled;
+  const inboxTarget = next?.kind === "composer-inbox" && composerOpen && !composerInbox.disabled;
+  const defaultTarget = next?.kind === "default-voice" && settingsPanel.matches(":popover-open");
   composerVoice.setAttribute("aria-expanded", String(composerTarget));
+  composerInbox.setAttribute("aria-expanded", String(inboxTarget));
+  defaultVoiceButton.setAttribute("aria-expanded", String(defaultTarget));
+  // Keep the default picker in the settings popover's top layer
+  (defaultTarget ? settingsPanel : document.body).append(voiceMenu);
+  voiceMenu.setAttribute("aria-label", inboxTarget ? "Send to" : "Choose voice");
 
   if (next?.kind === "action" && actionTarget) {
     openMenu = { kind: "action", itemId: actionTarget.item.id };
@@ -1374,6 +1420,10 @@ function setOpenMenu(next: OpenMenuState | null): void {
     openMenu = { kind: "voice", itemId: voiceTarget.item.id };
   } else if (composerTarget) {
     openMenu = { kind: "composer-voice" };
+  } else if (inboxTarget) {
+    openMenu = { kind: "composer-inbox" };
+  } else if (defaultTarget) {
+    openMenu = { kind: "default-voice" };
   } else {
     openMenu = null;
   }
@@ -1386,15 +1436,32 @@ function setOpenMenu(next: OpenMenuState | null): void {
     renderActionMenu(actionTarget, shouldFocus);
   } else if (openMenu.kind === "voice" && voiceTarget) {
     const { item, button } = voiceTarget;
-    renderVoiceMenu(button, item.voice, (voice) => {
+    renderChoiceMenu(button, item.voice, selectableVoiceOptions(allowExtraVoices, item.voice), (voice) => {
       if (voice !== item.voice) {
         void playTimelineItem(item, voice);
       }
     }, shouldFocus);
   } else if (openMenu.kind === "composer-voice") {
     voiceMenu.hidden = false;
-    renderVoiceMenu(composerVoice, composerVoiceId, (voice) => {
+    renderChoiceMenu(composerVoice, composerVoiceId, selectableVoiceOptions(allowExtraVoices, composerVoiceId), (voice) => {
       composerVoiceId = voice;
+      renderComposerControls();
+    }, shouldFocus, "window");
+  } else if (openMenu.kind === "default-voice") {
+    voiceMenu.hidden = false;
+    renderChoiceMenu(defaultVoiceButton, defaultVoiceId, selectableVoiceOptions(allowExtraVoices, defaultVoiceId), saveDefaultVoice, shouldFocus, "window");
+  } else if (openMenu.kind === "composer-inbox") {
+    voiceMenu.hidden = false;
+    const targets = replyTargets(timelineItems(currentStatus));
+    const choices: Array<[string, string, string]> = [["", "Speak aloud", "Destination"]];
+    for (const item of targets) {
+      const label = inboxLabel(item);
+      const duplicateLabel = targets.some((other) => other.id !== item.id && inboxLabel(other) === label);
+      choices.push([item.id, duplicateLabel ? `${label} - ${item.inbox}` : label, "Agent inboxes"]);
+    }
+    renderChoiceMenu(composerInbox, composerInboxId, choices, (id) => {
+      composerInboxId = id;
+      composerStatus.textContent = "";
       renderComposerControls();
     }, shouldFocus, "window");
   }
@@ -1408,8 +1475,9 @@ function closeMenu(restoreFocus: boolean): void {
   const open = openMenu;
   let button: HTMLButtonElement | null = null;
   if (restoreFocus && open) {
-    if (open.kind === "composer-voice") {
-      button = composerVoice;
+    if (!("itemId" in open)) {
+      button = open.kind === "composer-voice" ? composerVoice
+        : open.kind === "composer-inbox" ? composerInbox : defaultVoiceButton;
     } else {
       const buttonSelector = open.kind === "action"
         ? ".queue-menu-button"
@@ -1501,6 +1569,10 @@ function updateTimelineDividers(items: TimelineItem[], historyTotal: number): vo
     divider.querySelector<HTMLElement>(".timeline-divider-title")!.textContent = title;
     divider.querySelector<HTMLElement>(".timeline-divider-count")!.textContent = count;
   }
+  loadHistoryButton.hidden = historyCount >= historyTotal;
+  loadHistoryButton.disabled = historyLoading || timelineMutationBlocked();
+  loadHistoryButton.textContent = historyLoading ? "Loading..." : "Load 50 more";
+  speechicleList.append(loadHistoryButton);
 }
 
 function createTimelineDivider(section: TimelineSection): HTMLDivElement {
@@ -1555,7 +1627,7 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     return;
   }
   cancelTimelinePointerDrag();
-  if (openMenu?.kind !== "composer-voice") {
+  if (openMenu && "itemId" in openMenu) {
     setOpenMenu(null);
   }
   renderedTimelineKey = timelineKey;
@@ -1652,6 +1724,16 @@ function renderTimeline(items: TimelineItem[], historyTotal: number): void {
     const action = document.createElement("span");
     action.className = "speechicle-status";
     meta.append(inlineVoice, source, action);
+    if (item.inbox) {
+      const reply = document.createElement("button");
+      reply.type = "button";
+      reply.className = "speechicle-reply";
+      reply.title = `Reply to ${inboxLabel(item)}`;
+      reply.setAttribute("aria-label", reply.title);
+      reply.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3 2 7l4.5 4M2 7h6a5 5 0 0 1 5 5" /></svg><span>Reply</span>';
+      reply.addEventListener("click", () => openInboxReply(item));
+      meta.append(reply);
+    }
     body.append(speechicle, meta);
 
     const accessibleText = document.createElement("div");
@@ -1761,6 +1843,10 @@ function updateTimelineRows(items: TimelineItem[]): void {
       );
     }
     const menuButton = row.querySelector<HTMLButtonElement>(".queue-menu-button");
+    const replyButton = row.querySelector<HTMLButtonElement>(".speechicle-reply");
+    if (replyButton) {
+      replyButton.disabled = timelineCommandInFlight;
+    }
     if (menuButton) {
       menuButton.disabled = timelineCommandInFlight;
       menuButton.setAttribute("aria-label", `Actions for ${reference}`);
@@ -2023,10 +2109,10 @@ async function runPlaybackAction(): Promise<void> {
 }
 
 function closeComposer(restoreFocus: boolean): void {
-  if (!composerOpen) {
+  if (!composerOpen || composerSending) {
     return;
   }
-  if (openMenu?.kind === "composer-voice") {
+  if (openMenu?.kind === "composer-voice" || openMenu?.kind === "composer-inbox") {
     setOpenMenu(null);
   }
   composerOpen = false;
@@ -2038,15 +2124,61 @@ function closeComposer(restoreFocus: boolean): void {
 
 playbackButton.addEventListener("click", () => void runPlaybackAction());
 
-composerText.addEventListener("input", renderComposerControls);
+composerText.addEventListener("input", () => {
+  composerStatus.textContent = "";
+  renderComposerControls();
+});
 composerVoice.addEventListener("click", () => {
   toggleMenu({ kind: "composer-voice" });
+});
+composerInbox.addEventListener("click", () => toggleMenu({ kind: "composer-inbox" }));
+defaultVoiceButton.addEventListener("click", () => toggleMenu({ kind: "default-voice" }));
+settingsPanel.addEventListener("toggle", () => {
+  if (!settingsPanel.matches(":popover-open") && openMenu?.kind === "default-voice") {
+    setOpenMenu(null);
+  }
+});
+loadHistoryButton.addEventListener("click", async () => {
+  if (!desktopApi || historyLoading || timelineMutationBlocked()) {
+    return;
+  }
+  historyLoading = true;
+  commandStatus.textContent = "";
+  render(currentStatus);
+  try {
+    const snapshot = await desktopApi.loadHistory(currentStatus.history.length + 50);
+    render(adoptTimelineSnapshot(currentStatus, snapshot));
+  } catch {
+    commandStatus.textContent = "Could not load older speech. Try again.";
+  } finally {
+    historyLoading = false;
+    render(currentStatus);
+  }
 });
 
 speechComposer.addEventListener("submit", async (event) => {
   event.preventDefault();
   const text = composerText.value.trim();
-  if (!text) {
+  if (!text || composerSending || timelineMutationBlocked()) {
+    return;
+  }
+  composerStatus.textContent = "";
+  if (composerInboxId) {
+    if (!desktopApi) {
+      return;
+    }
+    composerSending = true;
+    renderComposerControls();
+    try {
+      await desktopApi.sendInboxMessage(composerInboxId, text);
+      composerText.value = "";
+      composerStatus.textContent = "Reply sent";
+    } catch {
+      composerStatus.textContent = "Could not send. Your message is still here.";
+    } finally {
+      composerSending = false;
+      renderComposerControls();
+    }
     return;
   }
   const committed = await runTimelineMutation(
@@ -2064,7 +2196,7 @@ speechComposer.addEventListener("submit", async (event) => {
   if (committed) {
     composerOpen = false;
     composerText.value = "";
-    renderComposerControls();
+    render(currentStatus);
   }
 });
 
@@ -2111,6 +2243,10 @@ playbackCopy.addEventListener("click", () => {
 currentText.addEventListener("click", () => {
   if (currentText.dataset.composable === "true") {
     composerOpen = true;
+    if (!composerText.value) {
+      composerVoiceId = defaultVoiceId;
+      composerStatus.textContent = "";
+    }
     render(currentStatus);
     requestAnimationFrame(() => composerText.focus());
   }
@@ -2256,7 +2392,7 @@ document.addEventListener("pointerdown", (event) => {
   if (!(target instanceof Element)) {
     return;
   }
-  const isInComposerVoiceMenu = openMenu?.kind === "composer-voice" &&
+  const isInComposerVoiceMenu = (openMenu?.kind === "composer-voice" || openMenu?.kind === "composer-inbox") &&
     target.closest("#voice-menu");
   if (composerOpen && !target.closest("#speech-composer") && !isInComposerVoiceMenu) {
     closeComposer(false);
@@ -2265,8 +2401,9 @@ document.addEventListener("pointerdown", (event) => {
     ? ".speechicle-actions, #queue-action-menu"
     : openMenu?.kind === "voice"
       ? ".speechicle-voice, #voice-menu"
-      : openMenu?.kind === "composer-voice"
-        ? ".composer-voice, #voice-menu"
+      : openMenu?.kind === "composer-voice" || openMenu?.kind === "composer-inbox"
+        ? "#speech-composer, #voice-menu"
+        : openMenu?.kind === "default-voice" ? "#default-voice, #voice-menu"
         : null;
   if (openMenuSelector && !target.closest(openMenuSelector)) {
     setOpenMenu(null);

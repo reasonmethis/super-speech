@@ -9,6 +9,7 @@ import {
   clearedTimeline,
   compatibleEngineIsRunning,
   currentPieceSegments,
+  defaultComposerVoice,
   engineProcessIsLive,
   isSpeechicleId,
   moveSpeechicleItemBefore,
@@ -23,6 +24,7 @@ import {
   runtimeStatusForMutationSnapshot,
   runtimeStateForSnapshot,
   selectableVoiceOptions,
+  replyTargets,
   statusAfterTransientRead,
   statusForEngineProcess,
   timelineItems,
@@ -33,6 +35,33 @@ import {
 function speechicleId(value: number): string {
   return `sp_${value.toString(16).padStart(32, "0")}`;
 }
+
+test("manual defaults use a selectable voice and fall back to Heart", () => {
+  assert.equal(defaultComposerVoice(null, false), "af_heart");
+  assert.equal(defaultComposerVoice("missing", false), "af_heart");
+  assert.equal(defaultComposerVoice("af_nicole", false), "af_heart");
+  assert.equal(defaultComposerVoice("af_nicole", true), "af_nicole");
+  assert.equal(defaultComposerVoice("piper_alba", false), "piper_alba");
+});
+
+test("reply destinations deduplicate inboxes without merging distinct agent paths", () => {
+  const rows = [
+    { id: speechicleId(1), text: "a", voice: "af_heart", inbox: "C:\\Tasks\\one.jsonl" },
+    { id: speechicleId(2), text: "b", voice: "af_heart", inbox: "c:/tasks/ONE.jsonl" },
+    { id: speechicleId(3), text: "c", voice: "af_heart", inbox: "/tasks/One.jsonl" },
+    { id: speechicleId(4), text: "d", voice: "af_heart", inbox: "/tasks/one.jsonl" },
+    { id: speechicleId(5), text: "e", voice: "af_heart" },
+  ];
+  assert.deepEqual(replyTargets(rows).map(({ id }) => id), [rows[0].id, rows[2].id, rows[3].id]);
+});
+
+test("Alba works in both new speech and voice-change commands", () => {
+  const enqueue = { type: "enqueue", text: "Hello", voice: "piper_alba" };
+  const play = { type: "play", id: speechicleId(1), voice: "piper_alba" };
+  assert.deepEqual(parseTimelineMutation(enqueue), enqueue);
+  assert.deepEqual(parseTimelineMutation(play), play);
+  assert.equal(parseTimelineMutation({ ...enqueue, voice: "piper_unknown" }), null);
+});
 
 const status: EngineStatus = {
   version: ENGINE_STATUS_VERSION,
@@ -174,7 +203,7 @@ test("an incompatible external engine cannot leave the app loading forever", () 
 });
 
 test("accepts a complete current-version status", () => {
-  assert.equal(ENGINE_STATUS_VERSION, 18);
+  assert.equal(ENGINE_STATUS_VERSION, 19);
   assert.equal(parseEngineStatus(status), status);
 });
 

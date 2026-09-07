@@ -127,7 +127,7 @@ def test_unreadable_current_has_one_empty_piece_status_shape(
 def test_stopped_status_includes_recent_history_ids(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_stopped_history_protocol")
     configure_runtime(engine, tmp_path)
-    engine.HISTORY_LIMIT = 1
+    engine.history_limit = 1
     older = engine.SPOKEN / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     newer = engine.SPOKEN / "002-sp_00000000000000000000000000000002-bm_fable-say.txt"
     older.write_text("Older", encoding="utf-8")

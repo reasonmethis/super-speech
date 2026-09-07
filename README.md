@@ -1,6 +1,6 @@
 # Super Speech
 
-Super Speech gives AI coding agents private voice replies. Kokoro speech
+Super Speech gives AI coding agents private voice replies. Kokoro and Piper speech
 synthesis runs on the user's computer, without an API key or per-word bill.
 
 One agent reply becomes one Speechicle. A Speechicle stays one row and one
@@ -17,8 +17,8 @@ Finished, skipped, cleared, or manually archived Speechicles appear in History.
 Choose the desktop app for a tray icon, pause and resume controls, a visible
 timeline, replay, reordering, voice changes, typed or pasted speech, and Light
 or Dark appearance. Agents can also opt into an inbox so the user can send a
-reply from a Speechicle's menu. The installer contains the app, speech engine,
-model, voices, and agent skill. It does not need a separate Python or Node.js
+reply directly from a Speechicle or the main composer. The installer contains the app, speech engine,
+models, voices, and agent skill. It does not need a separate Python or Node.js
 installation.
 
 The Windows x64 installer is tested locally from this repository. A public
@@ -48,6 +48,19 @@ the engine packaged inside the headless skill. The app and the skill share the
 same Queue and playback implementation.
 
 ## Desktop controls
+
+- A Reply button beside a Speechicle's voice means its agent supplied an inbox.
+  Click it to write back. Delivery writes to that inbox; the agent must have
+  arranged to watch it and wake its task
+- Click the idle explanation to type. Choose Speak aloud and a voice, or choose
+  an agent inbox and Send reply. Inbox destinations come from the loaded
+  Speechicles, with one choice per inbox file
+- Settings includes a default voice for new typed speech, initially Heart
+- Alba is the Scottish female Piper voice also used in WhisperPilot. Its model
+  loads on first use and stays available for subsequent speech. Kokoro voices
+  remain available; switching voices does not change pause or replay behavior
+- At the bottom of History, Load 50 more reveals older Speechicles. Loaded rows
+  remain available until the engine restarts
 
 - Pause stops at the current audio sample. When nothing is queued, Pause holds
   future Speechicles until Resume is clicked

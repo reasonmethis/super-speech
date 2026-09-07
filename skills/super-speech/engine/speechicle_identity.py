@@ -19,11 +19,12 @@ from pathlib import Path
 from typing import Literal
 
 PUBLIC_ID_PATTERN = re.compile(r"sp_[a-f0-9]{32}\Z")
-VOICE_PATTERN = re.compile(r"[ab][fm]_[a-z0-9_]+\Z")
+VOICE_ID_SOURCE = r"(?:[ab][fm]_[a-z0-9_]+|piper_alba)"
+VOICE_PATTERN = re.compile(VOICE_ID_SOURCE + r"\Z")
 SPEECHICLE_FILENAME_PATTERN = re.compile(
     r"(?P<sequence>[0-9]{3,})-"
     r"(?P<public_id>sp_[a-f0-9]{32})-"
-    r"(?P<voice>[ab][fm]_[a-z0-9_]+)"
+    rf"(?P<voice>{VOICE_ID_SOURCE})"
     r"(?:-g(?P<gap_ms>[0-9]+))?-say\.txt\Z"
 )
 STRICT_SEQUENCE_PATTERN = re.compile(r"([0-9]+)-.+\.txt\Z")

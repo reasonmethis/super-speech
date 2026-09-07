@@ -31,6 +31,8 @@ otherwise.
 - `scripts/smoke_engine.py` checks the packaged engine with silent audio
 - `scripts/smoke_drag.mjs` drives real Electron pointer input against an
   isolated silent runtime
+- `scripts/smoke_composer.mjs` extends that test with inbox destinations,
+  default voice persistence, History loading, and real Alba synthesis
 - `scripts/smoke_installed.mjs` checks the installed executable and bundled
   engine
 
@@ -125,8 +127,8 @@ These commands prepare resources, build Electron, and write the Windows NSIS
 installer or macOS DMG under `release/<version>/`. Node dependencies must
 already be installed.
 
-The package contains the Electron app, the standalone engine, Kokoro model and
-voices, the agent skill, source required for redistribution, licenses, and
+The package contains the Electron app, the standalone engine, Kokoro and Piper
+Alba models and voices, the agent skill, source required for redistribution, licenses, and
 third-party notices.
 
 ## Release checks

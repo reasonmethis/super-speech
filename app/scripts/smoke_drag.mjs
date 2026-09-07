@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron } from "playwright-core";
+import { testComposerFeatures } from "./smoke_composer.mjs";
 
 const appDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const executableName = process.platform === "win32"
@@ -67,7 +68,7 @@ function status() {
     assert.match(row.id, /^sp_[0-9a-f]{32}$/, "Status leaked an invalid Speechicle ID");
     assert(!Object.hasOwn(row, "filename"), "Status leaked an internal filename");
   }
-  assert.equal(snapshot.version, 18, "Pointer smoke requires the current status schema");
+  assert.equal(snapshot.version, 19, "Pointer smoke requires the current status schema");
   assert(Number.isInteger(snapshot.timeline_revision));
   assert(snapshot.timeline_revision >= 0);
   return snapshot;
@@ -330,6 +331,10 @@ try {
     async () => await page.locator("body").getAttribute("data-state") === "paused",
     "The renderer did not settle into the paused fixture",
   );
+  if (process.argv.includes("--composer-only")) {
+    await page.evaluate(() => window.superSpeech.mutateTimeline({ type: "clear" }));
+    await testComposerFeatures({ page, runEngine, status, waitFor, inbox });
+  } else {
   const followed = status().current;
   assert(followed, "Follow-along requires Current speech");
   const followedText = Array.from(followed.text)
@@ -1092,7 +1097,7 @@ try {
   );
   assert.deepEqual(
     await visibleVoiceMenu.locator(".voice-menu-group").allTextContents(),
-    ["US female", "US male", "UK female", "UK male"],
+    ["US female", "US male", "UK female", "UK male", "Piper - Scottish female"],
   );
   assert.equal(
     await visibleVoiceMenu.locator('.voice-menu-option[aria-selected="true"]').textContent(),
@@ -1887,7 +1892,7 @@ try {
   assert.equal(await composerVoiceMenu.count(), 1, "The composer voice menu did not open");
   assert.deepEqual(
     await composerVoiceMenu.locator(".voice-menu-group").allTextContents(),
-    ["US female", "US male", "UK female", "UK male"],
+    ["US female", "US male", "UK female", "UK male", "Piper - Scottish female"],
   );
   assert.deepEqual(
     await composerVoiceMenu.locator(".voice-menu-option").evaluateAll(
@@ -1942,10 +1947,11 @@ try {
   await composer.fill("");
   assert.equal(
     await composerVoiceMenu.count(),
-    0,
-    "Clearing a manual draft must also close its now-hidden voice menu",
+    1,
+    "The voice picker stays available with an empty draft",
   );
   await composer.fill(composerText);
+  await page.keyboard.press("Escape");
   await composerVoiceButton.click();
   await composerVoiceMenu.locator('[data-voice="bm_george"]').click();
   assert.equal(await composerVoiceButton.textContent(), "George");
@@ -2050,6 +2056,7 @@ try {
   );
 
   const externalEnginePid = status().engine_pid;
+  await testComposerFeatures({ page, runEngine, status, waitFor, inbox });
   assert(externalEnginePid, "External-engine supervision requires a live fixture");
   process.kill(externalEnginePid);
   await waitFor(
@@ -2179,6 +2186,7 @@ try {
     }
   }
 
+  }
   console.log("Super Speech renderer interaction smoke test passed");
 } catch (error) {
   const engineLog = path.join(runtime, "engine.log");

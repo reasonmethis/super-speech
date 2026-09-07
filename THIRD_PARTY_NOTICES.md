@@ -13,6 +13,16 @@ engine and model assets under their respective licenses.
 - ONNX Runtime is MIT licensed by Microsoft
 - NumPy is BSD-3-Clause licensed with separately licensed bundled components
 - python-sounddevice is MIT licensed by Matthias Geier
+- sherpa-onnx is Apache-2.0 licensed by the sherpa-onnx contributors
+- Piper Alba uses the University of Edinburgh's Alba Scottish English dataset,
+  licensed CC BY 4.0. Its model card is included in the Alba model directory
+
+Alba attribution and model sources:
+
+- https://datashare.ed.ac.uk/handle/10283/3270
+- https://creativecommons.org/licenses/by/4.0/
+- https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_GB/alba/medium/MODEL_CARD
+- https://github.com/k2-fsa/sherpa-onnx
 
 The frozen engine combines with the GPL phonemization components and is
 distributed under GPLv3-compatible terms. The Electron application remains a

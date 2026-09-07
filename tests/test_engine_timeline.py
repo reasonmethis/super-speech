@@ -112,7 +112,7 @@ def test_selection_preserves_one_visible_timeline_order(tmp_path: Path) -> None:
 def test_history_reordering_is_persisted_within_the_recent_window(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_history_order")
     configure_runtime(engine, tmp_path)
-    engine.HISTORY_LIMIT = 2
+    engine.history_limit = 2
     first = engine.SPOKEN / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
     second = engine.SPOKEN / "002-sp_00000000000000000000000000000002-af_heart-say.txt"
     third = engine.SPOKEN / "003-sp_00000000000000000000000000000003-af_heart-say.txt"

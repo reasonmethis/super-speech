@@ -983,7 +983,7 @@ def test_history_voice_rejection_restores_the_history_boundary(
     assert engine.process_mutation_requests(queue.Queue(), engine.State()) is None
 
     result = rejected_result(engine, request_id)
-    assert result["error"] == "unknown Kokoro voice: bm_fable"
+    assert result["error"] == "unknown speech voice: bm_fable"
     assert engine.timeline.history_files() == history
     assert not list(engine.QUEUE.glob("*.txt"))
 

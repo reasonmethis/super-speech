@@ -2390,7 +2390,7 @@ def test_startup_publications_retry_transient_windows_replace_errors(
 def test_status_exposes_bounded_recent_history(tmp_path: Path) -> None:
     engine = load_engine("super_speech_engine_history_status")
     configure_runtime(engine, tmp_path)
-    engine.HISTORY_LIMIT = 2
+    engine.history_limit = 2
     for number in (1, 2, 3):
         (engine.SPOKEN / f"{number:03d}-sp_{number:032x}-af_heart-say.txt").write_text(
             f"History {number}", encoding="utf-8"

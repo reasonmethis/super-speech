@@ -11,12 +11,12 @@ const RUNTIME_STATES = [
 export type RuntimeState = (typeof RUNTIME_STATES)[number];
 export type PlaybackRuntimeState = "holding" | "idle" | "paused" | "playing";
 
-export const ENGINE_STATUS_VERSION = 18 as const;
+export const ENGINE_STATUS_VERSION = 19 as const;
 export const AGENT_MESSAGE_TEXT_MAX = 4_000;
 
 const SPEECHICLE_ID = /^sp_[0-9a-f]{32}$/;
 const MUTATION_REQUEST_ID = /^[0-9a-f]{24}$/;
-const KOKORO_VOICE_ID = /^[ab][fm]_[a-z0-9_]+$/;
+const VOICE_ID = /^(?:[ab][fm]_[a-z0-9_]+|piper_alba)$/;
 const SOURCE_LABEL_MAX = 80;
 const INBOX_PATH_MAX = 4_096;
 
@@ -24,7 +24,7 @@ export function isSpeechicleId(value: unknown): value is string {
   return typeof value === "string" && SPEECHICLE_ID.test(value);
 }
 
-// Labels for the SHA-pinned Kokoro v1.0 voice archive bundled by prepare_resources
+// Voices included in the SHA-pinned model bundles staged by prepare_resources
 export const VOICE_OPTIONS = [
   ["af_alloy", "Alloy", "US female"],
   ["af_aoede", "Aoede", "US female"],
@@ -54,6 +54,7 @@ export const VOICE_OPTIONS = [
   ["bm_fable", "Fable", "UK male"],
   ["bm_george", "George", "UK male"],
   ["bm_lewis", "Lewis", "UK male"],
+  ["piper_alba", "Alba", "Piper - Scottish female"],
 ] as const;
 
 export const ARCHIVED_VOICE_IDS: ReadonlySet<string> = new Set([
@@ -71,6 +72,27 @@ export function selectableVoiceOptions(
   return VOICE_OPTIONS.filter(([id]) =>
     allowExtraVoices || !ARCHIVED_VOICE_IDS.has(id) || id === selectedVoice
   );
+}
+
+export function defaultComposerVoice(saved: string | null, allowExtraVoices: boolean): string {
+  return selectableVoiceOptions(allowExtraVoices).find(([id]) => id === saved)?.[0] ?? "af_heart";
+}
+
+export function replyTargets(items: SpeechicleItem[]): SpeechicleItem[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    if (!item.inbox) {
+      return false;
+    }
+    // Windows paths are case-insensitive; POSIX paths are not
+    const key = /^(?:[a-z]:|\\\\)/i.test(item.inbox)
+      ? item.inbox.replaceAll("\\", "/").toLowerCase() : item.inbox;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 export interface SpeechicleItem {
@@ -471,8 +493,8 @@ export type TimelineMutationResult<TSnapshot extends EngineStatus = EngineStatus
     snapshot: TSnapshot;
   };
 
-function isKokoroVoiceId(value: unknown): value is string {
-  return typeof value === "string" && KOKORO_VOICE_ID.test(value);
+function isVoiceId(value: unknown): value is string {
+  return typeof value === "string" && VOICE_ID.test(value);
 }
 
 function isSourceLabel(value: unknown): value is string {
@@ -532,7 +554,7 @@ export function parseTimelineMutation(value: unknown): TimelineMutation | null {
     if (
       !hasOnlyFields(mutation, ["type", "text", "voice", "source"]) ||
       !text ||
-      !isKokoroVoiceId(mutation.voice) ||
+      !isVoiceId(mutation.voice) ||
       (source !== undefined && !isSourceLabel(source))
     ) {
       return null;
@@ -550,7 +572,7 @@ export function parseTimelineMutation(value: unknown): TimelineMutation | null {
   if (mutation.type === "play") {
     if (
       !hasOnlyFields(mutation, ["type", "id", "voice"]) ||
-      (mutation.voice !== undefined && !isKokoroVoiceId(mutation.voice))
+      (mutation.voice !== undefined && !isVoiceId(mutation.voice))
     ) {
       return null;
     }
@@ -722,6 +744,7 @@ export function runtimeStatusForMutationSnapshot(
 
 export interface DesktopApi {
   getStatus(): Promise<RuntimeStatus>;
+  loadHistory(limit: number): Promise<RuntimeStatus>;
   getVersions(): Promise<VersionInfo>;
   setPaused(paused: boolean): Promise<RuntimeStatus>;
   mutateTimeline(
@@ -745,6 +768,7 @@ export function statusForEngineProcess(
 
 export const IPC_CHANNELS = {
   getStatus: "runtime:get-status",
+  loadHistory: "runtime:load-history",
   getVersions: "runtime:get-versions",
   setPaused: "runtime:set-paused",
   mutateTimeline: "runtime:mutate-timeline",

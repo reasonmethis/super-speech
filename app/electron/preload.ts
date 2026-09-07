@@ -3,6 +3,7 @@ import { IPC_CHANNELS, type DesktopApi } from "../src/runtime";
 
 const api: DesktopApi = {
   getStatus: () => ipcRenderer.invoke(IPC_CHANNELS.getStatus),
+  loadHistory: (limit) => ipcRenderer.invoke(IPC_CHANNELS.loadHistory, limit),
   getVersions: () => ipcRenderer.invoke(IPC_CHANNELS.getVersions),
   setPaused: (paused) => ipcRenderer.invoke(IPC_CHANNELS.setPaused, paused),
   mutateTimeline: (mutation) =>

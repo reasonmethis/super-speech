@@ -6,11 +6,10 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Literal, TypeAlias
 
-from speechicle_identity import is_public_id
+from speechicle_identity import VOICE_PATTERN, is_public_id
 from timeline_storage import normalize_inbox_path, normalize_source_label
 
 REQUEST_ID_PATTERN = re.compile(r"[a-f0-9]{24}")
-VOICE_PATTERN = re.compile(r"[ab][fm]_[a-z0-9_]+")
 
 
 @dataclass(frozen=True)
@@ -114,7 +113,7 @@ def _validate_voice(value: object) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str) or VOICE_PATTERN.fullmatch(value) is None:
-        raise ValueError("invalid Kokoro voice")
+        raise ValueError("invalid speech voice")
     return value
 
 
@@ -152,7 +151,7 @@ def parse_durable_mutation(payload: object) -> MutationRequest:
             raise ValueError("speech text cannot be empty")
         voice = _validate_voice(payload.get("voice"))
         if voice is None:
-            raise ValueError("Kokoro voice is required")
+            raise ValueError("speech voice is required")
         return EnqueueMutation(
             request_id=request_id,
             text=text.strip(),

@@ -378,6 +378,18 @@ async function mutateTimeline(
   return runtimeMutationResult(result);
 }
 
+async function loadHistory(limit: unknown): Promise<RuntimeStatus> {
+  if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 50 || limit > 1_000_000) {
+    throw new Error("Invalid History limit");
+  }
+  const { result } = await controlEngine({ command: "history", limit });
+  const snapshot = parseEngineStatus(result);
+  if (!snapshot) {
+    throw new Error("Invalid History snapshot");
+  }
+  return runtimeStatusForMutationSnapshot(snapshot, getStatus());
+}
+
 function sendInboxMessage(speechicleId: unknown, text: unknown): Promise<void> {
   if (!isSpeechicleId(speechicleId) || typeof text !== "string") {
     return Promise.reject(new Error("Invalid agent message"));
@@ -996,6 +1008,7 @@ function createTray(): void {
 
 function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.getStatus, getStatus);
+  ipcMain.handle(IPC_CHANNELS.loadHistory, (_event, limit) => loadHistory(limit));
   ipcMain.handle(IPC_CHANNELS.getVersions, getVersions);
   ipcMain.handle(IPC_CHANNELS.setPaused, (_event, paused: boolean) => setPaused(paused));
   ipcMain.handle(IPC_CHANNELS.mutateTimeline, (_event, mutation: TimelineMutation) =>

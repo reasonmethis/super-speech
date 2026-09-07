@@ -73,10 +73,12 @@ from mutation_protocol import (
 )
 from pauseable_audio import PauseableAudio
 from speechicle_identity import (
+    VOICE_PATTERN,
     SpeechicleFilename,
     is_public_id,
 )
 from super_speech_version import __version__ as ENGINE_VERSION
+from speech_synthesizer import ALBA_DIRECTORY, ALBA_VOICE, SpeechSynthesizer, install_alba_model
 from timeline_storage import (
     MutationOutcomeUnconfirmed,
     TimelinePaths,
@@ -144,11 +146,12 @@ SIGNAL_TICK = 0.02    # match the output block for responsive playback controls
 CHUNK_GAP_S = 0.2     # silence before each chunk (natural rhythm); override per-file with -gMMM-
 BUFFER_MAX = 8        # pieces of pre-rendered audio the worker may bank ahead
 HISTORY_LIMIT = 50    # recent spoken entries published to desktop clients
+history_limit = HISTORY_LIMIT
 SPLIT_CHARS = int(os.environ.get("SUPER_SPEECH_SPLIT_CHARS", "250"))
 
 SILENT = bool(os.environ.get("SUPER_SPEECH_SILENT"))
 
-STATUS_VERSION = 18
+STATUS_VERSION = 19
 STARTUP_TIMEOUT = 120.0
 
 timeline = TimelineStorage(TIMELINE_PATHS, DEFAULT_VOICE)
@@ -460,6 +463,7 @@ def install_models(destination: Path = MODEL_DIR) -> None:
             partial.unlink(missing_ok=True)
             raise
         print(f"installed {target}")
+    install_alba_model(destination.parent / ALBA_DIRECTORY)
 
 
 def public_id_for_path(path: Path) -> str:
@@ -496,8 +500,8 @@ def enqueue_text(
     text = text.strip()
     if not text:
         raise ValueError("speech text cannot be empty")
-    if not re.fullmatch(r"[ab][fm]_[a-z0-9_]+", voice):
-        raise ValueError(f"invalid Kokoro voice: {voice}")
+    if not VOICE_PATTERN.fullmatch(voice):
+        raise ValueError(f"invalid speech voice: {voice}")
     if gap_ms is not None and not 0 <= gap_ms <= 1500:
         raise ValueError("gap must be between 0 and 1500 milliseconds")
     return timeline.reserve(
@@ -515,7 +519,7 @@ def _normalize_cli_voice(voice: str) -> str:
 
 
 def history_snapshot() -> tuple[int, list[dict[str, object]]]:
-    return timeline.history_snapshot(HISTORY_LIMIT)
+    return timeline.history_snapshot(history_limit)
 
 
 def prepare_timeline_storage(instance_lock: EngineInstanceLock) -> None:
@@ -1358,7 +1362,21 @@ def playback_control_ack(
 
 def execute_control_request(payload: dict[str, object]) -> object:
     """Apply one request received by the running engine control server."""
+    global history_limit
     command = payload.get("command")
+    if command == "history" and set(payload) == {"command", "limit"}:
+        limit = payload["limit"]
+        if type(limit) is not int or not HISTORY_LIMIT <= limit <= 1_000_000:
+            raise ValueError("invalid History limit")
+        # Grow the engine's one History view, so polling and mutations retain loaded rows
+        history_limit = max(history_limit, limit)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            snapshot = _read_authoritative_status()
+            if len(snapshot["history"]) >= min(limit, snapshot["history_count"]):
+                return snapshot
+            time.sleep(0.02)
+        raise RuntimeError("History did not finish loading")
     if command in ("pause", "resume") and set(payload) == {"command"}:
         paused = command == "pause"
         command_token, audio_state = playback_control.begin_command(paused)
@@ -1693,7 +1711,7 @@ _status_failure_started: float | None = None
 
 
 def _fingerprint_row(item: dict[str, object]) -> dict[str, object]:
-    return {key: item.get(key) for key in ("id", "voice", "source")}
+    return {key: item.get(key) for key in ("id", "voice", "source", "inbox")}
 
 
 def timeline_fingerprint(
@@ -1979,7 +1997,7 @@ def apply_play_mutation(
         if requested_voice is not None and (
             AVAILABLE_VOICES and requested_voice not in AVAILABLE_VOICES
         ):
-            raise ValueError(f"unknown Kokoro voice: {requested_voice}")
+            raise ValueError(f"unknown speech voice: {requested_voice}")
         try:
             selection = timeline.select(chunk_id, requested_voice)
         except MutationOutcomeUnconfirmed:
@@ -2025,7 +2043,7 @@ def apply_play_mutation(
 def apply_enqueue_mutation(request: EnqueueMutation) -> Path:
     """Append text through the same Queue path used by the public CLI."""
     if AVAILABLE_VOICES and request.voice not in AVAILABLE_VOICES:
-        raise ValueError(f"unknown Kokoro voice: {request.voice}")
+        raise ValueError(f"unknown speech voice: {request.voice}")
     return enqueue_text(
         request.text,
         request.voice,
@@ -2082,7 +2100,7 @@ def apply_delete_mutation(request: DeleteMutation) -> None:
 
 def apply_history_move_mutation(request: MoveMutation) -> None:
     """Move one History row within the saved visible order."""
-    source = timeline.reorder_history(request.id, request.before_id, HISTORY_LIMIT)
+    source = timeline.reorder_history(request.id, request.before_id, history_limit)
     log(
         f"QUEUE move History {source.name} before "
         f"{request.before_id or 'visible end'}"
@@ -2744,7 +2762,7 @@ def run_engine_loop(
         kokoro = Kokoro(str(MODEL_PATH), str(VOICES_PATH))
     global AVAILABLE_VOICES
     try:
-        AVAILABLE_VOICES = set(kokoro.get_voices())
+        AVAILABLE_VOICES = set(kokoro.get_voices()) | {ALBA_VOICE}
     except Exception as e:
         log(f"could not enumerate voices: {e}; voice validation disabled")
         AVAILABLE_VOICES = set()
@@ -2758,7 +2776,8 @@ def run_engine_loop(
     consume(WARMUP)
 
     buf: "queue.Queue[BufferedPiece]" = queue.Queue(maxsize=BUFFER_MAX)
-    worker = threading.Thread(target=synth_worker, args=(kokoro, buf, st), daemon=True)
+    synthesizer = SpeechSynthesizer(kokoro, MODEL_DIR.parent)
+    worker = threading.Thread(target=synth_worker, args=(synthesizer, buf, st), daemon=True)
     worker.start()
     publish_status(st, force=True)
 
@@ -3121,7 +3140,7 @@ def cli(argv: list[str] | None = None) -> int:
         "--voice",
         default="af_heart",
         type=_normalize_cli_voice,
-        help="Kokoro voice ID",
+        help="voice ID, for example af_heart or piper_alba",
     )
     speak.add_argument("--gap-ms", type=int, help="pre-speech gap from 0 to 1500 ms")
     speak.add_argument("--source", help="short agent or session label")
@@ -3147,7 +3166,7 @@ def cli(argv: list[str] | None = None) -> int:
     play.add_argument(
         "--voice",
         type=_normalize_cli_voice,
-        help="play the same text with another Kokoro voice",
+        help="play the same text with another voice",
     )
     move = commands.add_parser(
         "move", help="move a Waiting Speechicle before another ID"

@@ -15,6 +15,7 @@ super-speech-engine = "super_speech_engine:cli"
 [tool.setuptools]
 py-modules = [
     "super_speech_engine",
+    "speech_synthesizer",
     "pauseable_audio",
     "speechicle_identity",
     "mutation_protocol",

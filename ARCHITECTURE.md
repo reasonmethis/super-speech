@@ -131,7 +131,7 @@ version number and field checks.
 
 Each snapshot contains:
 
-- Current, all Waiting rows, and up to 50 recent History rows
+- Current, all Waiting rows, and an initially 50-row History view
 - The total History count, which may be larger than the visible list
 - Engine process ID, lifecycle state, and publication time
 - A timeline revision that increases when visible identity, order, voice, or
@@ -150,6 +150,29 @@ The engine writes status to a temporary file and then swaps it into place, so
 the app never reads half a snapshot. Short Windows replacement collisions are
 retried. A persistent failure creates `status.failed`; the app then stops
 trusting the previous snapshot.
+
+Load more asks the control endpoint to grow that same History view by 50 rows.
+The engine keeps the larger limit until restart and acknowledges it with a
+published snapshot. Polls, mutation results, reply lookup, and the bottom-of-
+History drag target all use this one view. The renderer does not merge a second
+list of older rows into changing playback state.
+
+## Voice models
+
+Kokoro loads at startup. `SpeechSynthesizer` delegates Kokoro voices to it and
+loads the separate Piper Alba model only when `piper_alba` is first requested.
+Alba uses sherpa-onnx with two CPU threads and returns 22,050 Hz samples; Kokoro
+returns 24,000 Hz samples. Both feed the existing piece buffer and audio player.
+There is no provider-specific playback state or drainer.
+
+The Alba archive is SHA-256 pinned and includes its eSpeak data. The desktop
+installer bundles it and headless setup downloads it alongside Kokoro. Lazy
+loading avoids extra memory for users who never select Alba. Both loaded models
+are retained to avoid repeatedly loading them for interleaved voices.
+
+The manual composer's default voice is a local UI preference, not an override
+for agents. Agent commands still choose their own voice. Turning off extra
+voices resets an archived manual default to Heart.
 
 ## Commands and saved timeline changes
 
@@ -204,6 +227,11 @@ status again, finds the matching inbox itself, and appends one JSON object plus
 a newline. The renderer never chooses a destination path. Appends are
 serialized, flushed before success is reported, and do not change the timeline
 revision.
+
+The main composer uses the same send operation. It lists unique inboxes from
+loaded Speechicles and submits the selected Speechicle ID, never an arbitrary
+path. Selecting an inbox changes the action to Send reply and hides the voice
+control, because the message is written to the agent rather than spoken.
 
 Every message has protocol version 1, kind `user_message`, a unique message ID,
 UTC time, the Speechicle ID, optional source label, and user text. The engine's
@@ -269,6 +297,8 @@ checked status and sends commands through Electron main.
   commands, engine lifecycle, and status
 - `skills/super-speech/engine/pauseable_audio.py` owns sample-accurate pause and
   resume in the audio callback
+- `skills/super-speech/engine/speech_synthesizer.py` routes voice synthesis and
+  installs the pinned Alba bundle
 - `skills/super-speech/engine/speechicle_identity.py` describes old-to-current
   filename upgrades
 - `skills/super-speech/engine/mutation_protocol.py` checks timeline mutation
