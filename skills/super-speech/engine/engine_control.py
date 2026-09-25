@@ -42,6 +42,11 @@ class LivePlaybackControl:
         with self._lock:
             return self._user_pause_intent()
 
+    def audible(self) -> bool:
+        """Report whether a live stream is allowed to produce sound right now."""
+        with self._lock:
+            return self._playback is not None and not self._pause_intent()
+
     def begin_command(self, paused: bool) -> tuple[object, PlaybackState]:
         """Apply a command and return its ownership token and live audio state."""
         with self._lock:

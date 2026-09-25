@@ -123,6 +123,8 @@ const playbackBackground = [
 const desktopApi = window.superSpeech;
 const themeButtons = [...document.querySelectorAll<HTMLButtonElement>("[data-theme-choice]")];
 const extraVoicesToggle = requiredElement<HTMLInputElement>("extra-voices-toggle");
+const microphoneSettings = requiredElement<HTMLElement>("microphone-settings");
+const muteMicrophoneToggle = requiredElement<HTMLInputElement>("mute-microphone-toggle");
 
 type Theme = "dark" | "light";
 
@@ -280,6 +282,22 @@ extraVoicesToggle.addEventListener("change", () => {
   if (openMenu) {
     setOpenMenu(openMenu);
   }
+});
+
+// The engine owns this setting, so it is read from the app rather than localStorage
+void desktopApi?.getMuteMicrophone().then((enabled) => {
+  if (enabled !== null) {
+    muteMicrophoneToggle.checked = enabled;
+    microphoneSettings.hidden = false;
+  }
+});
+
+muteMicrophoneToggle.addEventListener("change", () => {
+  const enabled = muteMicrophoneToggle.checked;
+  desktopApi?.setMuteMicrophone(enabled).catch((error: unknown) => {
+    console.error("Could not change the microphone setting", error);
+    muteMicrophoneToggle.checked = !enabled;
+  });
 });
 
 function saveDefaultVoice(voice: string): void {

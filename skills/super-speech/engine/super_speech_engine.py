@@ -57,6 +57,7 @@ from typing import Literal, NamedTuple, assert_never
 from engine_control import EngineControlServer, LivePlaybackControl, PlaybackState
 from file_lock import InterprocessFileLock
 from inbox_listener import listen_inbox
+from microphone_mute import MicrophoneGuard, system_capture_devices
 
 from mutation_protocol import (
     ArchiveMutation,
@@ -110,6 +111,9 @@ SKIP = BASE / "SKIP"
 CONTINUE = BASE / "CONTINUE"
 MUTATION = BASE / "MUTATION.json"
 WARMUP = BASE / "WARMUP"
+# The desktop app creates this file when the user enables microphone muting
+MUTE_MICROPHONE = BASE / "MUTE_MICROPHONE"
+MICROPHONE_MUTE_RECORD = BASE / "microphone-mute.json"
 HEARTBEAT = BASE / "engine.alive"
 STATUS = BASE / "status.json"
 STATUS_FAILURE = BASE / "status.failed"
@@ -3000,7 +3004,18 @@ def serve() -> None:
         thread_name_prefix="super-speech-playback-marker",
     )
     _playback_marker_executor = playback_marker_executor
+    microphone_guard: MicrophoneGuard | None = None
     try:
+        capture_devices = system_capture_devices()
+        if capture_devices is not None:
+            microphone_guard = MicrophoneGuard(
+                capture_devices,
+                MICROPHONE_MUTE_RECORD,
+                enabled=MUTE_MICROPHONE.exists,
+                audible=playback_control.audible,
+                log=log,
+            )
+            microphone_guard.start()
         STORAGE_READY.unlink(missing_ok=True)
         clear_transient_signals()
         timeline_revision, timeline_fingerprint_seed = load_timeline_revision_seed()
@@ -3017,6 +3032,8 @@ def serve() -> None:
     finally:
         if control_server is not None:
             control_server.stop()
+        if microphone_guard is not None:
+            microphone_guard.stop()
         playback_marker_executor.shutdown(wait=True)
         _playback_marker_executor = None
         STORAGE_READY.unlink(missing_ok=True)

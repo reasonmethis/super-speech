@@ -17,8 +17,10 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  rmSync,
   statSync,
   unlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -72,6 +74,7 @@ const ENGINE_STABLE_AFTER_MS = 30_000;
 const ENGINE_START_TIMEOUT_MS = 120_000;
 const ENGINE_UNRESPONSIVE_TIMEOUT_MS = 30_000;
 const ENGINE_TERMINATE_TIMEOUT_MS = 5_000;
+const ENGINE_SHUTDOWN_TIMEOUT_MS = 2_000;
 const ENGINE_RESTART_MAX_DELAY_MS = 30_000;
 const ENGINE_FAILURES_BEFORE_ERROR = 3;
 const MODEL_MIN_BYTES = 300_000_000;
@@ -96,7 +99,7 @@ let lastEngineStatus: EngineStatus | null = null;
 let lastTrayPlaybackAction: TrayPlaybackAction | undefined;
 let windowStateSaveTimer: NodeJS.Timeout | null = null;
 let windowStateWrite = Promise.resolve();
-let windowStateFlushStarted = false;
+let quitCleanupStarted = false;
 let inboxMessageWrite = Promise.resolve();
 
 interface EngineLaunch {
@@ -120,6 +123,31 @@ interface AgentSkillInstall {
 
 function runtimeDir(): string {
   return process.env.SUPER_SPEECH_HOME ?? path.join(homedir(), ".super-speech");
+}
+
+// The engine checks for this file while it speaks, so the setting also reaches
+// an engine that the app adopted instead of starting
+function muteMicrophoneSettingPath(): string {
+  return path.join(runtimeDir(), "MUTE_MICROPHONE");
+}
+
+function getMuteMicrophone(): boolean | null {
+  if (process.platform !== "win32") {
+    return null;
+  }
+  return existsSync(muteMicrophoneSettingPath());
+}
+
+function setMuteMicrophone(enabled: boolean): void {
+  if (process.platform !== "win32") {
+    throw new Error("Microphone muting is only available on Windows");
+  }
+  if (enabled) {
+    mkdirSync(runtimeDir(), { recursive: true });
+    writeFileSync(muteMicrophoneSettingPath(), "");
+  } else {
+    rmSync(muteMicrophoneSettingPath(), { force: true });
+  }
 }
 
 function fileExceeds(filePath: string, minimumBytes: number): boolean {
@@ -726,6 +754,28 @@ function stopOwnedEngine(): void {
   }
 }
 
+// A killed engine skips its cleanup, including unmuting microphones it muted,
+// so quitting asks it to exit first and kills it only if it does not
+async function shutDownOwnedEngine(): Promise<void> {
+  const engine = ownedEngine;
+  const pid = engine?.child.pid;
+  if (engine && pid !== undefined && engine.child.exitCode === null) {
+    const exited = new Promise<void>((resolve) => {
+      engine.child.once("exit", () => resolve());
+    });
+    try {
+      await writeTextAtomically(
+        path.join(runtimeDir(), "INTERRUPT"),
+        JSON.stringify({ engine_pid: pid }),
+      );
+      await Promise.race([exited, delay(ENGINE_SHUTDOWN_TIMEOUT_MS)]);
+    } catch (error) {
+      console.error("Could not ask the Super Speech engine to exit", error);
+    }
+  }
+  stopOwnedEngine();
+}
+
 function failSmokeTest(interval: NodeJS.Timeout, message: string): void {
   clearInterval(interval);
   quitting = true;
@@ -1017,6 +1067,13 @@ function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.sendInboxMessage, (_event, speechicleId, text) =>
     sendInboxMessage(speechicleId, text)
   );
+  ipcMain.handle(IPC_CHANNELS.getMuteMicrophone, getMuteMicrophone);
+  ipcMain.handle(IPC_CHANNELS.setMuteMicrophone, (_event, enabled: unknown) => {
+    if (typeof enabled !== "boolean") {
+      throw new Error("Microphone setting must be true or false");
+    }
+    setMuteMicrophone(enabled);
+  });
   ipcMain.handle(IPC_CHANNELS.copyText, (_event, text: string) => clipboard.writeText(text));
   ipcMain.handle(IPC_CHANNELS.openSetup, () => shell.openExternal(SETUP_URL));
   ipcMain.handle(IPC_CHANNELS.minimize, (event) => {
@@ -1050,13 +1107,17 @@ if (!hasSingleInstanceLock) {
   app.on("before-quit", (event) => {
     quitting = true;
     stopEngineHealthMonitor();
-    stopOwnedEngine();
-    const window = mainWindow;
-    if (!windowStateFlushStarted && window && !window.isDestroyed()) {
-      event.preventDefault();
-      windowStateFlushStarted = true;
-      void flushWindowState(window).finally(() => app.quit());
+    if (quitCleanupStarted) {
+      stopOwnedEngine();
+      return;
     }
+    event.preventDefault();
+    quitCleanupStarted = true;
+    const window = mainWindow;
+    const windowSaved = window && !window.isDestroyed()
+      ? flushWindowState(window)
+      : Promise.resolve();
+    void Promise.allSettled([windowSaved, shutDownOwnedEngine()]).finally(() => app.quit());
   });
   app.on("activate", showWindow);
   app.on("window-all-closed", () => {

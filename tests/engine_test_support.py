@@ -39,6 +39,8 @@ def configure_runtime(
     engine.CONTINUE = tmp_path / "CONTINUE"
     engine.MUTATION = tmp_path / "MUTATION.json"
     engine.WARMUP = tmp_path / "WARMUP"
+    engine.MUTE_MICROPHONE = tmp_path / "MUTE_MICROPHONE"
+    engine.MICROPHONE_MUTE_RECORD = tmp_path / "microphone-mute.json"
     engine.HEARTBEAT = tmp_path / "engine.alive"
     engine.STATUS = tmp_path / "status.json"
     engine.STATUS_FAILURE = tmp_path / "status.failed"

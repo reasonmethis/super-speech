@@ -10,6 +10,9 @@ const api: DesktopApi = {
     ipcRenderer.invoke(IPC_CHANNELS.mutateTimeline, mutation),
   sendInboxMessage: (speechicleId, text) =>
     ipcRenderer.invoke(IPC_CHANNELS.sendInboxMessage, speechicleId, text),
+  getMuteMicrophone: () => ipcRenderer.invoke(IPC_CHANNELS.getMuteMicrophone),
+  setMuteMicrophone: (enabled) =>
+    ipcRenderer.invoke(IPC_CHANNELS.setMuteMicrophone, enabled),
   copyText: (text) => ipcRenderer.invoke(IPC_CHANNELS.copyText, text),
   openSetup: () => ipcRenderer.invoke(IPC_CHANNELS.openSetup),
   minimize: () => ipcRenderer.invoke(IPC_CHANNELS.minimize),

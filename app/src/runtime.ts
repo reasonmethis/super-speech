@@ -751,6 +751,9 @@ export interface DesktopApi {
     mutation: TimelineMutation,
   ): Promise<TimelineMutationResult<RuntimeStatus>>;
   sendInboxMessage(speechicleId: string, text: string): Promise<void>;
+  /** Null when this platform cannot mute microphones */
+  getMuteMicrophone(): Promise<boolean | null>;
+  setMuteMicrophone(enabled: boolean): Promise<void>;
   copyText(text: string): Promise<void>;
   openSetup(): Promise<void>;
   minimize(): Promise<void>;
@@ -773,6 +776,8 @@ export const IPC_CHANNELS = {
   setPaused: "runtime:set-paused",
   mutateTimeline: "runtime:mutate-timeline",
   sendInboxMessage: "runtime:send-inbox-message",
+  getMuteMicrophone: "settings:get-mute-microphone",
+  setMuteMicrophone: "settings:set-mute-microphone",
   copyText: "runtime:copy-text",
   openSetup: "app:open-setup",
   minimize: "window:minimize",
