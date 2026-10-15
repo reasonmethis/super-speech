@@ -1,4 +1,3 @@
-import "./styles.css";
 import {
   AGENT_MESSAGE_TEXT_MAX,
   ARCHIVED_VOICE_IDS,
