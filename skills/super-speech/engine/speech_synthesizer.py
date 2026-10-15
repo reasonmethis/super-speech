@@ -1,9 +1,13 @@
-"""Render both voice families into samples for the same buffered audio player."""
+"""Render every voice family into samples for the same buffered audio player."""
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import os
 import shutil
+import subprocess
+import sys
 import tarfile
 import tempfile
 import urllib.request
@@ -24,6 +28,28 @@ ALBA_URL = (
     f"{ALBA_ARCHIVE_ROOT}.tar.bz2"
 )
 ALBA_SHA256 = "fcd45962906933eec4431d3688f7d74aaac8713c87c6717f91fd3b23463aa1a1"
+
+# The default voice from Control Panel's Text to Speech dialog, rendered by System.Speech
+WINDOWS_VOICE = "win_default"
+WINDOWS_VOICE_AVAILABLE = sys.platform == "win32"
+WINDOWS_VOICE_UNAVAILABLE = f"{WINDOWS_VOICE} uses Windows' built-in speech and works only on Windows"
+WINDOWS_SAMPLE_RATE = 22050
+# Reads one base64 UTF-8 line per request and answers with one base64 line of
+# 16-bit mono PCM. Any error ends the helper, so a failed request never looks
+# like silence.
+WINDOWS_HELPER_SCRIPT = f"""
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Speech
+$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+$format = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo({WINDOWS_SAMPLE_RATE}, 'Sixteen', 'Mono')
+while ($null -ne ($line = [Console]::In.ReadLine())) {{
+    $stream = New-Object System.IO.MemoryStream
+    $synth.SetOutputToAudioStream($stream, $format)
+    $synth.Speak([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($line)))
+    $synth.SetOutputToNull()
+    [Console]::Out.WriteLine([Convert]::ToBase64String($stream.ToArray()))
+}}
+"""
 
 
 def install_alba_model(destination: Path) -> None:
@@ -47,6 +73,54 @@ def install_alba_model(destination: Path) -> None:
         marker.write_text(ALBA_SHA256)
 
 
+class WindowsSpeech:
+    """Keep one hidden PowerShell process so each piece skips its startup cost."""
+
+    def __init__(self) -> None:
+        self.process: subprocess.Popen[str] | None = None
+
+    def generate(self, text: str) -> tuple[NDArray[np.float32], int]:
+        import numpy as np
+
+        if not WINDOWS_VOICE_AVAILABLE:
+            raise RuntimeError(WINDOWS_VOICE_UNAVAILABLE)
+        if self.process is None:
+            # Windows PowerShell 5.1 ships with Windows and includes System.Speech
+            system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+            self.process = subprocess.Popen(
+                [
+                    str(system_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"),
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    WINDOWS_HELPER_SCRIPT,
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                # The packaged engine cannot pass its own stderr on (WinError 50)
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="ascii",
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        process = self.process
+        assert process.stdin is not None and process.stdout is not None
+        try:
+            process.stdin.write(base64.b64encode(text.encode()).decode() + "\n")
+            process.stdin.flush()
+            line = process.stdout.readline()
+            if not line:
+                raise RuntimeError("Windows speech helper exited")
+            pcm = np.frombuffer(base64.b64decode(line.rstrip("\n"), validate=True), dtype="<i2")
+        except Exception:
+            # Start a fresh helper so a partial or stray reply cannot answer the next piece
+            self.process = None
+            process.kill()
+            process.wait()
+            raise
+        return pcm.astype(np.float32) / 32768, WINDOWS_SAMPLE_RATE
+
+
 class SpeechSynthesizer:
     """Keep model choice separate from splitting, buffering, and sample-accurate pause."""
 
@@ -54,10 +128,14 @@ class SpeechSynthesizer:
         self.kokoro = kokoro
         self.models = models
         self.alba: sherpa_onnx.OfflineTts | None = None
+        self.windows = WindowsSpeech()
 
     def create(
         self, text: str, *, voice: str, speed: float, lang: str
     ) -> tuple[NDArray[np.float32], int]:
+        if voice == WINDOWS_VOICE:
+            # The engine always requests speed 1.0, which is the Windows default rate
+            return self.windows.generate(text)
         if voice != ALBA_VOICE:
             return self.kokoro.create(text, voice=voice, speed=speed, lang=lang)
         if self.alba is None:

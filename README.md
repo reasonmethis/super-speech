@@ -59,6 +59,9 @@ same Queue and playback implementation.
 - Alba is the Scottish female Piper voice also used in WhisperPilot. Its model
   loads on first use and stays available for subsequent speech. Kokoro voices
   remain available; switching voices does not change pause or replay behavior
+- On Windows, the Windows voice uses the operating system's built-in speech.
+  It needs far less CPU than Kokoro, so it suits a busy computer. It speaks with
+  the default voice set in Control Panel's Text to Speech dialog (`sapi.cpl`)
 - At the bottom of History, Load 50 more reveals older Speechicles. Loaded rows
   remain available until the engine restarts
 

@@ -154,6 +154,9 @@ Use `af_heart` unless the user asks for another voice. Useful alternatives:
 - US male: `am_echo`
 - UK female: `bf_emma`, `bf_lily`
 - UK male: `bm_fable`, `bm_george`
+- Windows only: `win_default`, the computer's built-in voice. It uses much less
+  CPU than the others. Use it when the user asks for the Windows voice or for
+  lighter speech
 
 ## Playback commands
 

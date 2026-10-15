@@ -78,7 +78,15 @@ from speechicle_identity import (
     is_public_id,
 )
 from super_speech_version import __version__ as ENGINE_VERSION
-from speech_synthesizer import ALBA_DIRECTORY, ALBA_VOICE, SpeechSynthesizer, install_alba_model
+from speech_synthesizer import (
+    ALBA_DIRECTORY,
+    ALBA_VOICE,
+    WINDOWS_VOICE,
+    WINDOWS_VOICE_AVAILABLE,
+    WINDOWS_VOICE_UNAVAILABLE,
+    SpeechSynthesizer,
+    install_alba_model,
+)
 from timeline_storage import (
     MutationOutcomeUnconfirmed,
     TimelinePaths,
@@ -502,6 +510,8 @@ def enqueue_text(
         raise ValueError("speech text cannot be empty")
     if not VOICE_PATTERN.fullmatch(voice):
         raise ValueError(f"invalid speech voice: {voice}")
+    if voice == WINDOWS_VOICE and not WINDOWS_VOICE_AVAILABLE:
+        raise ValueError(WINDOWS_VOICE_UNAVAILABLE)
     if gap_ms is not None and not 0 <= gap_ms <= 1500:
         raise ValueError("gap must be between 0 and 1500 milliseconds")
     return timeline.reserve(
@@ -2772,6 +2782,8 @@ def run_engine_loop(
     global AVAILABLE_VOICES
     try:
         AVAILABLE_VOICES = set(kokoro.get_voices()) | {ALBA_VOICE}
+        if WINDOWS_VOICE_AVAILABLE:
+            AVAILABLE_VOICES.add(WINDOWS_VOICE)
     except Exception as e:
         log(f"could not enumerate voices: {e}; voice validation disabled")
         AVAILABLE_VOICES = set()
@@ -3148,7 +3160,7 @@ def cli(argv: list[str] | None = None) -> int:
         "--voice",
         default="af_heart",
         type=_normalize_cli_voice,
-        help="voice ID, for example af_heart or piper_alba",
+        help="voice ID, for example af_heart, piper_alba, or win_default",
     )
     speak.add_argument("--gap-ms", type=int, help="pre-speech gap from 0 to 1500 ms")
     speak.add_argument("--source", help="short agent or session label")
