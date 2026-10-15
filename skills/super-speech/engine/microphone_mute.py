@@ -12,17 +12,12 @@ from __future__ import annotations
 import json
 import os
 import sys
-import threading
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Protocol
 
-# Audio stops briefly between sentences and between replies. Holding the mute
-# across those gaps keeps the microphone from flickering during one answer.
-RELEASE_DELAY_S = 0.3
-POLL_INTERVAL_S = 0.02
 RECORD_REFRESH_S = 5.0
 # Long enough for the desktop app to restart a crashed or frozen engine
 STALE_RECORD_S = 60.0
@@ -35,7 +30,11 @@ class CaptureDevices(Protocol):
 
 
 class MicrophoneGuard:
-    """Keep microphones muted while the engine reports audible playback."""
+    """Keep microphones muted while the engine is speaking.
+
+    An `audibility.AudibilityWatcher` calls `begin`, then `update` on every
+    sample, then `end`.
+    """
 
     def __init__(
         self,
@@ -43,67 +42,43 @@ class MicrophoneGuard:
         record: Path,
         *,
         enabled: Callable[[], bool],
-        audible: Callable[[], bool],
         log: Callable[[str], None],
-        release_delay: float = RELEASE_DELAY_S,
-        poll_interval: float = POLL_INTERVAL_S,
         record_refresh: float = RECORD_REFRESH_S,
     ) -> None:
         self._devices = devices
         self._record = record
         self._enabled = enabled
-        self._audible = audible
         self._log = log
-        self._release_delay = release_delay
-        self._poll_interval = poll_interval
         self._record_refresh = record_refresh
-        self._stopping = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._muted: list[str] | None = None
+        self._last_refresh = 0.0
 
-    def start(self) -> None:
-        self._thread = threading.Thread(
-            target=self._run,
-            name="super-speech-microphone",
-            daemon=True,
-        )
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stopping.set()
-        if self._thread is not None:
-            self._thread.join()
-            self._thread = None
-
-    def _run(self) -> None:
+    def begin(self) -> None:
         restore_microphones(
             self._devices, self._record, self._log, max_age=STALE_RECORD_S
         )
-        muted: list[str] | None = None
-        last_audible = -float("inf")
-        last_refresh = 0.0
-        try:
-            while not self._stopping.wait(self._poll_interval):
-                now = time.monotonic()
-                if self._audible():
-                    last_audible = now
-                holding = now - last_audible < self._release_delay
-                # The setting is read only near playback, so idle polling stays cheap
-                want_muted = holding and self._enabled()
-                if want_muted and muted is None:
-                    muted = self._mute()
-                    last_refresh = now
-                elif not want_muted and muted is not None:
-                    restore_microphones(self._devices, self._record, self._log)
-                    muted = None
-                elif muted and now - last_refresh >= self._record_refresh:
-                    last_refresh = now
-                    try:
-                        os.utime(self._record)
-                    except OSError as error:
-                        self._log(f"microphone mute record refresh failed: {error}")
-        finally:
-            if muted is not None:
-                restore_microphones(self._devices, self._record, self._log)
+
+    def update(self, speaking: bool, _last_sound: float) -> None:
+        # The setting is read only while speaking, so idle sampling stays cheap
+        want_muted = speaking and self._enabled()
+        now = time.monotonic()
+        if want_muted and self._muted is None:
+            self._muted = self._mute()
+            self._last_refresh = now
+        elif not want_muted and self._muted is not None:
+            restore_microphones(self._devices, self._record, self._log)
+            self._muted = None
+        elif self._muted and now - self._last_refresh >= self._record_refresh:
+            self._last_refresh = now
+            try:
+                os.utime(self._record)
+            except OSError as error:
+                self._log(f"microphone mute record refresh failed: {error}")
+
+    def end(self) -> None:
+        if self._muted is not None:
+            restore_microphones(self._devices, self._record, self._log)
+            self._muted = None
 
     def _mute(self) -> list[str]:
         try:

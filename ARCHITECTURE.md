@@ -305,6 +305,8 @@ checked status and sends commands through Electron main.
   requests and results
 - `skills/super-speech/engine/inbox_listener.py` follows complete agent inbox
   messages
+- `skills/super-speech/engine/audibility.py` tracks when speech is audible and
+  publishes those stretches for local apps that must ignore Super Speech
 - `skills/super-speech/engine/microphone_mute.py` mutes Windows microphones
   while speech is audible and restores them after a recent engine crash
 - `app/electron/main.ts` owns the window, tray, engine supervision, installer

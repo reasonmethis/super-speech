@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from audibility import AudibilityWatcher
 from engine_control import LivePlaybackControl
 from engine_test_support import CallbackStop, configure_runtime, load_engine, set_current
 from microphone_mute import MicrophoneGuard, restore_microphones
@@ -55,19 +56,19 @@ def start_guard(
     audible: Switch,
     release_delay: float = 0.05,
     record_refresh: float = 5.0,
-) -> MicrophoneGuard:
+) -> AudibilityWatcher:
     guard = MicrophoneGuard(
         devices,
         record,
         enabled=enabled,
-        audible=audible,
         log=lambda _message: None,
-        release_delay=release_delay,
-        poll_interval=0.005,
         record_refresh=record_refresh,
     )
-    guard.start()
-    return guard
+    watcher = AudibilityWatcher(
+        audible, [guard], release_delay=release_delay, poll_interval=0.005
+    )
+    watcher.start()
+    return watcher
 
 
 def test_guard_mutes_only_unmuted_microphones_while_audible(tmp_path: Path) -> None:

@@ -57,6 +57,7 @@ from typing import Literal, NamedTuple, assert_never
 from engine_control import EngineControlServer, LivePlaybackControl, PlaybackState
 from file_lock import InterprocessFileLock
 from inbox_listener import listen_inbox
+from audibility import AudibilityListener, AudibilityWatcher, AudibleSpanFile
 from microphone_mute import MicrophoneGuard, system_capture_devices
 
 from mutation_protocol import (
@@ -114,6 +115,8 @@ WARMUP = BASE / "WARMUP"
 # The desktop app creates this file when the user enables microphone muting
 MUTE_MICROPHONE = BASE / "MUTE_MICROPHONE"
 MICROPHONE_MUTE_RECORD = BASE / "microphone-mute.json"
+# When speech was audible, for local apps that must ignore it (see audibility.py)
+AUDIBLE_SPANS = BASE / "audible-spans.json"
 HEARTBEAT = BASE / "engine.alive"
 STATUS = BASE / "status.json"
 STATUS_FAILURE = BASE / "status.failed"
@@ -3004,18 +3007,25 @@ def serve() -> None:
         thread_name_prefix="super-speech-playback-marker",
     )
     _playback_marker_executor = playback_marker_executor
-    microphone_guard: MicrophoneGuard | None = None
+    audibility_watcher: AudibilityWatcher | None = None
     try:
+        audibility_listeners: list[AudibilityListener] = [
+            AudibleSpanFile(AUDIBLE_SPANS, log)
+        ]
         capture_devices = system_capture_devices()
         if capture_devices is not None:
-            microphone_guard = MicrophoneGuard(
-                capture_devices,
-                MICROPHONE_MUTE_RECORD,
-                enabled=MUTE_MICROPHONE.exists,
-                audible=playback_control.audible,
-                log=log,
+            audibility_listeners.append(
+                MicrophoneGuard(
+                    capture_devices,
+                    MICROPHONE_MUTE_RECORD,
+                    enabled=MUTE_MICROPHONE.exists,
+                    log=log,
+                )
             )
-            microphone_guard.start()
+        audibility_watcher = AudibilityWatcher(
+            playback_control.audible, audibility_listeners
+        )
+        audibility_watcher.start()
         STORAGE_READY.unlink(missing_ok=True)
         clear_transient_signals()
         timeline_revision, timeline_fingerprint_seed = load_timeline_revision_seed()
@@ -3032,8 +3042,8 @@ def serve() -> None:
     finally:
         if control_server is not None:
             control_server.stop()
-        if microphone_guard is not None:
-            microphone_guard.stop()
+        if audibility_watcher is not None:
+            audibility_watcher.stop()
         playback_marker_executor.shutdown(wait=True)
         _playback_marker_executor = None
         STORAGE_READY.unlink(missing_ok=True)
