@@ -55,12 +55,16 @@ test("reply destinations deduplicate inboxes without merging distinct agent path
   assert.deepEqual(replyTargets(rows).map(({ id }) => id), [rows[0].id, rows[2].id, rows[3].id]);
 });
 
-test("Alba works in both new speech and voice-change commands", () => {
-  const enqueue = { type: "enqueue", text: "Hello", voice: "piper_alba" };
-  const play = { type: "play", id: speechicleId(1), voice: "piper_alba" };
-  assert.deepEqual(parseTimelineMutation(enqueue), enqueue);
-  assert.deepEqual(parseTimelineMutation(play), play);
-  assert.equal(parseTimelineMutation({ ...enqueue, voice: "piper_unknown" }), null);
+test("Alba and Windows work in both new speech and voice-change commands", () => {
+  for (const voice of ["piper_alba", "win_default"]) {
+    const enqueue = { type: "enqueue", text: "Hello", voice };
+    const play = { type: "play", id: speechicleId(1), voice };
+    assert.deepEqual(parseTimelineMutation(enqueue), enqueue);
+    assert.deepEqual(parseTimelineMutation(play), play);
+  }
+  for (const voice of ["piper_unknown", "win_zira"]) {
+    assert.equal(parseTimelineMutation({ type: "enqueue", text: "Hello", voice }), null);
+  }
 });
 
 const status: EngineStatus = {

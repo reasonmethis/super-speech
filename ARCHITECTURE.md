@@ -170,6 +170,15 @@ installer bundles it and headless setup downloads it alongside Kokoro. Lazy
 loading avoids extra memory for users who never select Alba. Both loaded models
 are retained to avoid repeatedly loading them for interleaved voices.
 
+On Windows, `win_default` uses the default voice set in Control Panel's Text
+to Speech dialog (`sapi.cpl`). Its first use starts one hidden Windows
+PowerShell process that loads System.Speech. That process then renders each
+piece into 22,050 Hz 16-bit samples, which feed the same buffer and player. A failed or exited helper fails
+that piece and is replaced on the next one. One ID covers the system default
+because installed Windows voices differ between machines, while voice IDs are
+fixed in filenames and the app's voice list. Other platforms reject this voice
+when it is queued.
+
 The manual composer's default voice is a local UI preference, not an override
 for agents. Agent commands still choose their own voice. Turning off extra
 voices resets an archived manual default to Heart.
@@ -298,7 +307,7 @@ checked status and sends commands through Electron main.
 - `skills/super-speech/engine/pauseable_audio.py` owns sample-accurate pause and
   resume in the audio callback
 - `skills/super-speech/engine/speech_synthesizer.py` routes voice synthesis and
-  installs the pinned Alba bundle
+  installs the pinned Alba bundle, and runs the Windows speech helper
 - `skills/super-speech/engine/speechicle_identity.py` describes old-to-current
   filename upgrades
 - `skills/super-speech/engine/mutation_protocol.py` checks timeline mutation

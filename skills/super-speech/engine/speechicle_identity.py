@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Literal
 
 PUBLIC_ID_PATTERN = re.compile(r"sp_[a-f0-9]{32}\Z")
-VOICE_ID_SOURCE = r"(?:[ab][fm]_[a-z0-9_]+|piper_alba)"
+VOICE_ID_SOURCE = r"(?:[ab][fm]_[a-z0-9_]+|piper_alba|win_default)"
 VOICE_PATTERN = re.compile(VOICE_ID_SOURCE + r"\Z")
 SPEECHICLE_FILENAME_PATTERN = re.compile(
     r"(?P<sequence>[0-9]{3,})-"

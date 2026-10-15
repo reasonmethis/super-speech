@@ -16,7 +16,7 @@ export const AGENT_MESSAGE_TEXT_MAX = 4_000;
 
 const SPEECHICLE_ID = /^sp_[0-9a-f]{32}$/;
 const MUTATION_REQUEST_ID = /^[0-9a-f]{24}$/;
-const VOICE_ID = /^(?:[ab][fm]_[a-z0-9_]+|piper_alba)$/;
+const VOICE_ID = /^(?:[ab][fm]_[a-z0-9_]+|piper_alba|win_default)$/;
 const SOURCE_LABEL_MAX = 80;
 const INBOX_PATH_MAX = 4_096;
 
@@ -24,7 +24,8 @@ export function isSpeechicleId(value: unknown): value is string {
   return typeof value === "string" && SPEECHICLE_ID.test(value);
 }
 
-// Voices included in the SHA-pinned model bundles staged by prepare_resources
+// Kokoro and Alba come from the SHA-pinned bundles staged by prepare_resources;
+// Windows uses the voice built into the operating system
 export const VOICE_OPTIONS = [
   ["af_alloy", "Alloy", "US female"],
   ["af_aoede", "Aoede", "US female"],
@@ -55,6 +56,7 @@ export const VOICE_OPTIONS = [
   ["bm_george", "George", "UK male"],
   ["bm_lewis", "Lewis", "UK male"],
   ["piper_alba", "Alba", "Piper - Scottish female"],
+  ["win_default", "Windows", "Windows built-in voice"],
 ] as const;
 
 export const ARCHIVED_VOICE_IDS: ReadonlySet<string> = new Set([
