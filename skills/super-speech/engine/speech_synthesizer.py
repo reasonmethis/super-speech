@@ -97,6 +97,8 @@ class WindowsSpeech:
                 ],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
+                # The packaged engine cannot pass its own stderr on (WinError 50)
+                stderr=subprocess.DEVNULL,
                 text=True,
                 encoding="ascii",
                 creationflags=subprocess.CREATE_NO_WINDOW,
