@@ -61,7 +61,7 @@ same Queue and playback implementation.
   remain available; switching voices does not change pause or replay behavior
 - On Windows, the Windows voice uses the operating system's built-in speech.
   It needs far less CPU than Kokoro, so it suits a busy computer. It speaks with
-  the voice chosen in Windows' Text to Speech settings
+  the default voice set in Control Panel's Text to Speech dialog (`sapi.cpl`)
 - At the bottom of History, Load 50 more reveals older Speechicles. Loaded rows
   remain available until the engine restarts
 

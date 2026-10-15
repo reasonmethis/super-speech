@@ -170,10 +170,10 @@ installer bundles it and headless setup downloads it alongside Kokoro. Lazy
 loading avoids extra memory for users who never select Alba. Both loaded models
 are retained to avoid repeatedly loading them for interleaved voices.
 
-On Windows, `win_default` uses the voice selected in Windows' Text to Speech
-settings. Its first use starts one hidden Windows PowerShell process that loads
-System.Speech. That process then renders each piece into 22,050 Hz 16-bit
-samples, which feed the same buffer and player. A failed or exited helper fails
+On Windows, `win_default` uses the default voice set in Control Panel's Text
+to Speech dialog (`sapi.cpl`). Its first use starts one hidden Windows
+PowerShell process that loads System.Speech. That process then renders each
+piece into 22,050 Hz 16-bit samples, which feed the same buffer and player. A failed or exited helper fails
 that piece and is replaced on the next one. One ID covers the system default
 because installed Windows voices differ between machines, while voice IDs are
 fixed in filenames and the app's voice list. Other platforms reject this voice
