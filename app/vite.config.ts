@@ -18,5 +18,11 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 1420,
     strictPort: true,
+    watch: {
+      // Packaged installers and prepared engine resources are generated output
+      // that the renderer never imports. Crawling them delays the first page
+      // by minutes once a few releases have accumulated.
+      ignored: ["**/release/**", "**/build-resources/**"],
+    },
   },
 });
