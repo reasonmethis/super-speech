@@ -26,6 +26,13 @@ understand the answer in one listen.
 Do not use unexplained local shorthand. Describe the concrete thing first. Use
 an internal name only when it helps the rest of the explanation.
 
+Draft the chunk as you would say it to someone on a walk, then read it back as
+that listener before speaking. A sentence that lists three or more things gets
+split or cut to one example. A name the user has not used becomes what it does.
+A sentence with two ideas becomes two. The failure this catches (reported
+2026-07-19, 07-20, 09-02) is always the same: the written reply read aloud. If
+the chunk would read fine as text, it is too dense for audio.
+
 ## Keep speech and visible text aligned
 
 Every conclusion, recommendation, question, commitment, correction, and caveat
@@ -38,6 +45,13 @@ or a new action from a listener who is away from the screen.
 
 Write the spoken answer first. Then write the visible reply as the same answer
 rendered for the eye.
+
+Assume the listener never reads the visible text. Anything waiting on them goes
+in the speech of this reply: a question, a choice, an approval, and equally
+anything merely flagged, deferred, or left open. That holds even when an earlier
+reply already spoke it and this one only restates it in text. Before speaking,
+read the visible reply you are about to send and check each open item in it
+against the speech.
 
 ## Speak one reply
 
