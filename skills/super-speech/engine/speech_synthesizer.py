@@ -29,7 +29,7 @@ ALBA_URL = (
 )
 ALBA_SHA256 = "fcd45962906933eec4431d3688f7d74aaac8713c87c6717f91fd3b23463aa1a1"
 
-# The voice chosen in Windows' Text to Speech settings, rendered by System.Speech
+# The default voice from Control Panel's Text to Speech dialog, rendered by System.Speech
 WINDOWS_VOICE = "win_default"
 WINDOWS_VOICE_AVAILABLE = sys.platform == "win32"
 WINDOWS_VOICE_UNAVAILABLE = f"{WINDOWS_VOICE} uses Windows' built-in speech and works only on Windows"
@@ -109,13 +109,13 @@ class WindowsSpeech:
             line = process.stdout.readline()
             if not line:
                 raise RuntimeError("Windows speech helper exited")
-        except (OSError, RuntimeError):
-            # Start a fresh helper for the next piece
+            pcm = np.frombuffer(base64.b64decode(line.rstrip("\n"), validate=True), dtype="<i2")
+        except Exception:
+            # Start a fresh helper so a partial or stray reply cannot answer the next piece
             self.process = None
             process.kill()
             process.wait()
             raise
-        pcm = np.frombuffer(base64.b64decode(line), dtype="<i2")
         return pcm.astype(np.float32) / 32768, WINDOWS_SAMPLE_RATE
 
 
