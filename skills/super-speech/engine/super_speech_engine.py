@@ -2631,7 +2631,7 @@ def _hold_for_quiet(st: State, held_chunk_name: str | None, waited: float) -> bo
     if other_audio and waited < QUIET_WAIT_MAX_S:
         if not st.waiting_for_quiet:
             st.waiting_for_quiet = True
-            log(f"WAIT_FOR_QUIET {held_chunk_name}: another app is playing sound")
+            log(f"WAIT_FOR_QUIET {held_chunk_name}: waiting for other apps to be quiet")
             publish_status(st, force=True)
         return True
     if st.waiting_for_quiet:
@@ -3059,6 +3059,17 @@ def clear_transient_signals() -> None:
     prune_mutation_results()
 
 
+def _should_watch_other_audio() -> bool:
+    """Whether the setting is on and speech is queued, checked many times a second."""
+    if not WAIT_FOR_QUIET.exists():
+        return False
+    try:
+        with os.scandir(QUEUE) as entries:
+            return next(entries, None) is not None
+    except OSError:
+        return False
+
+
 def serve() -> None:
     """Run the single engine process until a stop command or interruption."""
     global _playback_marker_executor, other_audio_monitor
@@ -3093,7 +3104,7 @@ def serve() -> None:
         other_audio = system_other_audio(os.getpid())
         if other_audio is not None:
             other_audio_monitor = OtherAudioMonitor(
-                other_audio, enabled=WAIT_FOR_QUIET.exists, log=log
+                other_audio, active=_should_watch_other_audio, log=log
             )
             other_audio_monitor.start()
         STORAGE_READY.unlink(missing_ok=True)

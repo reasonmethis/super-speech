@@ -2369,7 +2369,7 @@ def test_next_speechicle_waits_while_another_app_plays_then_speaks(
     assert "waiting_for_quiet" not in status
     assert not state.waiting_for_quiet
     log = engine.LOG.read_text(encoding="utf-8")
-    assert "another app is playing sound" in log
+    assert "waiting for other apps to be quiet" in log
     assert "quiet; speaking after" in log
 
 
@@ -2406,3 +2406,19 @@ def test_skip_releases_a_speechicle_waiting_for_quiet(tmp_path: Path) -> None:
 
     assert engine.gap_wait(0.0, queue.Queue(), state) == "skip"
     assert not state.waiting_for_quiet
+
+
+def test_other_apps_are_watched_only_while_the_setting_is_on_and_speech_is_queued(
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_wait_for_quiet_watch")
+    configure_runtime(engine, tmp_path)
+    queued = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    queued.write_text("Queued", encoding="utf-8")
+    assert not engine._should_watch_other_audio()
+
+    engine.WAIT_FOR_QUIET.touch()
+    assert engine._should_watch_other_audio()
+
+    queued.unlink()
+    assert not engine._should_watch_other_audio()

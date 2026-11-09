@@ -162,14 +162,17 @@ list of older rows into changing playback state.
 ## Waiting for other apps to go quiet
 
 On Windows, the Settings option "Wait until other apps are quiet" creates the
-`WAIT_FOR_QUIET` file in the runtime folder. While it exists, a background
-thread reads Windows' per-app sound meters on every active output device ten
-times a second, skipping the engine's own process. Another app counts as
-playing when its meter is above about -50 dBFS.
+`WAIT_FOR_QUIET` file in the runtime folder. While it exists and speech is
+queued, a background thread reads Windows' per-app sound meters on every active
+output device 20 times a second, skipping the engine's own process. Another
+app counts as playing when its meter is above about -50 dBFS. An idle engine
+reads no meters, because each read costs about 2 ms of CPU.
 
 Before each Speechicle starts, after its usual short gap, the engine waits
-until no other app has made sound for one second, so pauses between another
-voice's words do not count as quiet. Current shows "Waiting for quiet" in the
+until it has seen one second with no sound from other apps, so pauses between
+another voice's words do not count as quiet. Quiet counts only from when
+sampling began, so the first reply after idle time waits at least that second
+from when it was queued, usually while its first piece is still being prepared. Current shows "Waiting for quiet" in the
 window meanwhile. The wait gives up after 60 seconds so endless sound, such as
 music, cannot hold speech forever. Pause, Skip, Play, and other commands work
 during the wait, and a row started with Play skips it. Pieces inside a

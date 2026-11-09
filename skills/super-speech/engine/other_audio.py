@@ -16,8 +16,9 @@ from typing import Protocol
 
 # Pauses between words and sentences are shorter, so they do not count as quiet
 QUIET_S = 1.0
-# One read takes a few milliseconds, so this costs a few percent of one core
-POLL_INTERVAL_S = 0.1
+# Sparse samples can miss the sound on both sides of a pause and mistake it for
+# quiet. One read costs about 2 ms of CPU, so sampling runs only while needed.
+POLL_INTERVAL_S = 0.05
 # About -50 dBFS; a session below it counts as silent
 SILENCE_PEAK = 0.003
 
@@ -30,22 +31,25 @@ class OtherAudio(Protocol):
 class OtherAudioMonitor:
     """Remember when other apps last made sound, sampled on one thread.
 
-    Sampling runs only while the setting is on, so a disabled setting costs a
-    file check per sample.
+    Sampling runs only while `active` is true, which the engine limits to when
+    the setting is on and speech is queued, so an idle engine reads no meters.
+    Quiet counts only from when sampling began, so speech that arrives while
+    sampling was off waits for one full observed quiet period.
     """
 
     def __init__(
         self,
         other_audio: OtherAudio,
         *,
-        enabled: Callable[[], bool],
+        active: Callable[[], bool],
         log: Callable[[str], None],
         poll_interval: float = POLL_INTERVAL_S,
     ) -> None:
         self._other_audio = other_audio
-        self._enabled = enabled
+        self._active = active
         self._log = log
         self._poll_interval = poll_interval
+        self._sampling_since: float | None = None
         self._last_heard = -float("inf")
         self._read_failed = False
         self._stopping = threading.Event()
@@ -65,20 +69,23 @@ class OtherAudioMonitor:
             self._thread.join()
             self._thread = None
 
-    def quiet_for(self) -> float:
-        """Seconds since another app last made sound; infinite when never heard."""
-        return time.monotonic() - self._last_heard
-
     def should_wait(self) -> bool:
-        """Whether speech should wait because the setting is on and it is not quiet yet."""
-        return self._enabled() and self.quiet_for() < QUIET_S
+        """Whether speech should wait because it has not been quiet for `QUIET_S`."""
+        if not self._active():
+            return False
+        since = self._sampling_since
+        if since is None:
+            # The sampler has not noticed the queued speech yet
+            return True
+        return time.monotonic() - max(since, self._last_heard) < QUIET_S
 
     def _run(self) -> None:
         while not self._stopping.wait(self._poll_interval):
-            if not self._enabled():
-                # Sound heard before the setting was turned off is no longer current
-                self._last_heard = -float("inf")
+            if not self._active():
+                self._sampling_since = None
                 continue
+            if self._sampling_since is None:
+                self._sampling_since = time.monotonic()
             try:
                 playing = self._other_audio.playing()
             except OSError as error:

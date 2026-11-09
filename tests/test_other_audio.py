@@ -41,11 +41,11 @@ def test_speech_waits_until_other_sound_has_stopped_for_the_quiet_period(
 ) -> None:
     sound = FakeOtherAudio()
     monitor = OtherAudioMonitor(
-        sound, enabled=lambda: True, log=lambda _message: None, poll_interval=0.005
+        sound, active=lambda: True, log=lambda _message: None, poll_interval=0.005
     )
     monitor.start()
     try:
-        assert not monitor.should_wait()
+        wait_until(lambda: not monitor.should_wait())
         sound.sound = True
         wait_until(monitor.should_wait)
         sound.sound = False
@@ -56,23 +56,30 @@ def test_speech_waits_until_other_sound_has_stopped_for_the_quiet_period(
         monitor.stop()
 
 
-def test_a_disabled_setting_never_waits_or_reads_the_meters(short_quiet: float) -> None:
+def test_quiet_counts_only_from_when_sampling_began(short_quiet: float) -> None:
     sound = FakeOtherAudio()
-    sound.sound = True
-    enabled = False
+    active = False
     monitor = OtherAudioMonitor(
-        sound, enabled=lambda: enabled, log=lambda _message: None, poll_interval=0.005
+        sound, active=lambda: active, log=lambda _message: None, poll_interval=0.005
     )
     monitor.start()
     try:
         time.sleep(0.05)
         assert sound.reads == 0
         assert not monitor.should_wait()
-        enabled = True
+        active = True
+        started = time.monotonic()
+        assert monitor.should_wait()
+        wait_until(lambda: not monitor.should_wait())
+        assert time.monotonic() - started >= short_quiet * 0.9
+        # Going inactive releases a waiting reply at once and stops reading
+        sound.sound = True
         wait_until(monitor.should_wait)
-        # Turning the setting off releases a waiting reply at once
-        enabled = False
+        active = False
         assert not monitor.should_wait()
+        reads = sound.reads
+        time.sleep(0.05)
+        assert sound.reads == reads
     finally:
         monitor.stop()
 
@@ -82,12 +89,12 @@ def test_a_failing_meter_counts_as_quiet_and_is_logged_once(short_quiet: float) 
     sound.error = OSError("device vanished")
     messages: list[str] = []
     monitor = OtherAudioMonitor(
-        sound, enabled=lambda: True, log=messages.append, poll_interval=0.005
+        sound, active=lambda: True, log=messages.append, poll_interval=0.005
     )
     monitor.start()
     try:
-        wait_until(lambda: sound.reads >= 5)
-        assert not monitor.should_wait()
+        wait_until(lambda: not monitor.should_wait())
+        assert sound.reads >= 1
         assert messages == ["other audio check failed: device vanished"]
     finally:
         monitor.stop()
