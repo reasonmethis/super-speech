@@ -79,13 +79,19 @@ def free_string(text: int) -> str:
         _ole32.CoTaskMemFree(text)
 
 
-@contextmanager
-def com_apartment() -> Iterator[None]:
+def join_com() -> bool:
+    """Ready this thread for COM; return whether the caller must uninitialize it."""
     result = _ole32.CoInitializeEx(None, _COINIT_MULTITHREADED)
     # A thread that already chose another COM model can still make these calls
     initialized = result >= 0
     if not initialized and result != _RPC_E_CHANGED_MODE:
         raise OSError(f"COM initialization failed: {result:#x}")
+    return initialized
+
+
+@contextmanager
+def com_apartment() -> Iterator[None]:
+    initialized = join_com()
     try:
         yield
     finally:

@@ -59,6 +59,7 @@ from file_lock import InterprocessFileLock
 from inbox_listener import listen_inbox
 from audibility import AudibilityListener, AudibilityWatcher, AudibleSpanFile
 from microphone_mute import MicrophoneGuard, system_capture_devices
+from other_audio import OtherAudioMonitor, system_other_audio
 
 from mutation_protocol import (
     ArchiveMutation,
@@ -123,6 +124,9 @@ WARMUP = BASE / "WARMUP"
 # The desktop app creates this file when the user enables microphone muting
 MUTE_MICROPHONE = BASE / "MUTE_MICROPHONE"
 MICROPHONE_MUTE_RECORD = BASE / "microphone-mute.json"
+# The desktop app creates this file when the user wants speech to wait for
+# other apps to go quiet (see other_audio.py)
+WAIT_FOR_QUIET = BASE / "WAIT_FOR_QUIET"
 # When speech was audible, for local apps that must ignore it (see audibility.py)
 AUDIBLE_SPANS = BASE / "audible-spans.json"
 HEARTBEAT = BASE / "engine.alive"
@@ -159,6 +163,8 @@ AVAILABLE_VOICES: set[str] = set()  # populated in main() once kokoro loads
 POLL_INTERVAL = 0.2   # idle poll cadence
 SIGNAL_TICK = 0.02    # match the output block for responsive playback controls
 CHUNK_GAP_S = 0.2     # silence before each chunk (natural rhythm); override per-file with -gMMM-
+# Endless sound, such as music, must not hold speech forever
+QUIET_WAIT_MAX_S = 60.0
 BUFFER_MAX = 8        # pieces of pre-rendered audio the worker may bank ahead
 HISTORY_LIMIT = 50    # recent spoken entries published to desktop clients
 history_limit = HISTORY_LIMIT
@@ -171,6 +177,8 @@ STARTUP_TIMEOUT = 120.0
 
 timeline = TimelineStorage(TIMELINE_PATHS, DEFAULT_VOICE)
 playback_control = LivePlaybackControl(lambda: PAUSE.exists())
+# Set while serving on a platform that can tell when other apps make sound
+other_audio_monitor: OtherAudioMonitor | None = None
 _playback_marker_executor: ThreadPoolExecutor | None = None
 
 
@@ -1265,6 +1273,11 @@ def _snapshot_is_valid(snapshot: object) -> bool:
         and (current is not None or not queue_items)
         and (state not in {"playing", "paused"} or current is not None)
         and (state not in {"idle", "holding"} or current is None)
+        # Optional and only ever true, matching the app's check
+        and (
+            "waiting_for_quiet" not in snapshot
+            or (snapshot["waiting_for_quiet"] is True and current is not None)
+        )
     ):
         return False
     active_ids = {item["id"] for item in queue_items}
@@ -1288,6 +1301,7 @@ def _status_payload(
     queue_items: list[dict[str, object]],
     history_count: int,
     history_items: list[dict[str, object]],
+    waiting_for_quiet: bool = False,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "version": STATUS_VERSION,
@@ -1301,6 +1315,9 @@ def _status_payload(
         "history_count": history_count,
         "history": history_items,
     }
+    # Optional, so status readers that predate it still accept the snapshot
+    if waiting_for_quiet:
+        payload["waiting_for_quiet"] = True
     if not _snapshot_is_valid(payload):
         raise ValueError("invalid engine status payload")
     return payload
@@ -1559,6 +1576,7 @@ class State:
         self.read_failures: dict[str, float] = {}
         self.stop = threading.Event()    # tell the worker to exit
         self.saw_stop = False            # graceful Stop; a newer accepted command may cancel it
+        self.waiting_for_quiet = False   # Current is held until other apps go quiet
         self.timeline_revision = timeline_revision
         self.timeline_fingerprint = timeline_fingerprint
 
@@ -1930,6 +1948,7 @@ def publish_status(
         queue_items=queue_items,
         history_count=history_count,
         history_items=history_items,
+        waiting_for_quiet=st.waiting_for_quiet and current is not None,
     )
     temp_path = STATUS.with_name(
         f"{STATUS.name}.{os.getpid()}.{time.time_ns()}.tmp"
@@ -2553,7 +2572,11 @@ def gap_wait(
     buf: "queue.Queue[BufferedPiece]",
     st: State,
 ) -> str | None:
-    """Wait for an audible gap without counting time spent paused."""
+    """Wait before a Speechicle without counting time spent paused.
+
+    The wait lasts `seconds`, then, while the user's setting asks for it,
+    continues until other apps have been quiet for a moment.
+    """
     try:
         ordered_queue = queue_files_in_order()
     except RuntimeError as error:
@@ -2562,37 +2585,65 @@ def gap_wait(
         return "fatal"
     held_chunk_name = ordered_queue[0].name if ordered_queue else None
     remaining = seconds
+    waited_for_quiet = 0.0
     last_tick = time.monotonic()
-    while remaining > 0:
-        if st.stop.is_set():
-            return "fatal"
-        consume_continue(st)
-        if consume_control(INTERRUPT):
-            reject_pending_requests("engine interrupted before command was applied", st)
-            return "interrupt"
-        mutation_effect = process_mutation_requests(buf, st, held_chunk_name)
-        if mutation_effect in {"select", "clear"}:
-            return mutation_effect
-        if mutation_effect == "queue_changed" and (
-            held_chunk_name is None or not _claimed(st, held_chunk_name)
-        ):
-            return "queue_changed"
-        if consume_ordered_marker(STOP):
-            reject_pending_requests("engine stopped before command was applied", st)
-            return "stop"
-        if st.stop.is_set():
-            return "fatal"
-        if consume_control(SKIP):
-            return "skip"
-        now = time.monotonic()
-        if playback_control.pause_requested():
+    try:
+        while remaining > 0 or _hold_for_quiet(st, held_chunk_name, waited_for_quiet):
+            if st.stop.is_set():
+                return "fatal"
+            consume_continue(st)
+            if consume_control(INTERRUPT):
+                reject_pending_requests("engine interrupted before command was applied", st)
+                return "interrupt"
+            mutation_effect = process_mutation_requests(buf, st, held_chunk_name)
+            if mutation_effect in {"select", "clear"}:
+                return mutation_effect
+            if mutation_effect == "queue_changed" and (
+                held_chunk_name is None or not _claimed(st, held_chunk_name)
+            ):
+                return "queue_changed"
+            if consume_ordered_marker(STOP):
+                reject_pending_requests("engine stopped before command was applied", st)
+                return "stop"
+            if st.stop.is_set():
+                return "fatal"
+            if consume_control(SKIP):
+                return "skip"
+            now = time.monotonic()
+            if not playback_control.pause_requested():
+                if st.waiting_for_quiet:
+                    waited_for_quiet += now - last_tick
+                else:
+                    remaining -= now - last_tick
             publish_status(st)
-        else:
-            remaining -= now - last_tick
-            publish_status(st)
-        last_tick = now
-        time.sleep(SIGNAL_TICK)
-    return None
+            last_tick = now
+            time.sleep(SIGNAL_TICK)
+        return None
+    finally:
+        if st.waiting_for_quiet:
+            st.waiting_for_quiet = False
+            publish_status(st, force=True)
+
+
+def _hold_for_quiet(st: State, held_chunk_name: str | None, waited: float) -> bool:
+    """Return whether the next Speechicle should keep waiting for other apps."""
+    other_audio = other_audio_monitor is not None and other_audio_monitor.should_wait()
+    if other_audio and waited < QUIET_WAIT_MAX_S:
+        if not st.waiting_for_quiet:
+            st.waiting_for_quiet = True
+            log(f"WAIT_FOR_QUIET {held_chunk_name}: another app is playing sound")
+            publish_status(st, force=True)
+        return True
+    if st.waiting_for_quiet:
+        log(
+            f"WAIT_FOR_QUIET {held_chunk_name}: "
+            + (
+                f"still not quiet after {waited:.0f}s; speaking anyway"
+                if other_audio
+                else f"quiet; speaking after {waited:.1f}s"
+            )
+        )
+    return False
 
 
 _prev_audio_end: float | None = None
@@ -2886,8 +2937,9 @@ def run_engine_loop(
                 st,
                 buffered.path.name,
             )
-            if buffered.is_first_piece and not session_first and not skip_initial_gap:
-                g = gap_from_name(buffered.path.name)
+            if buffered.is_first_piece and not skip_initial_gap:
+                # The first Speechicle has no gap but may still wait for quiet
+                g = 0.0 if session_first else gap_from_name(buffered.path.name)
                 outcome = gap_wait(g if g is not None else CHUNK_GAP_S, buf, st)
                 if outcome == "interrupt":
                     log("INTERRUPT (gap); exiting")
@@ -3009,7 +3061,7 @@ def clear_transient_signals() -> None:
 
 def serve() -> None:
     """Run the single engine process until a stop command or interruption."""
-    global _playback_marker_executor
+    global _playback_marker_executor, other_audio_monitor
     instance_lock = EngineInstanceLock()
     if not instance_lock.acquire():
         return
@@ -3038,6 +3090,12 @@ def serve() -> None:
             playback_control.audible, audibility_listeners
         )
         audibility_watcher.start()
+        other_audio = system_other_audio(os.getpid())
+        if other_audio is not None:
+            other_audio_monitor = OtherAudioMonitor(
+                other_audio, enabled=WAIT_FOR_QUIET.exists, log=log
+            )
+            other_audio_monitor.start()
         STORAGE_READY.unlink(missing_ok=True)
         clear_transient_signals()
         timeline_revision, timeline_fingerprint_seed = load_timeline_revision_seed()
@@ -3056,6 +3114,9 @@ def serve() -> None:
             control_server.stop()
         if audibility_watcher is not None:
             audibility_watcher.stop()
+        if other_audio_monitor is not None:
+            other_audio_monitor.stop()
+            other_audio_monitor = None
         playback_marker_executor.shutdown(wait=True)
         _playback_marker_executor = None
         STORAGE_READY.unlink(missing_ok=True)

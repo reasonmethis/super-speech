@@ -2328,3 +2328,81 @@ def test_clear_cannot_race_a_worker_refilling_a_full_buffer(tmp_path: Path) -> N
     assert state.claims == {}
     assert (engine.SPOKEN / current.name).read_text(encoding="utf-8") == "Current"
     assert (engine.SPOKEN / queued.name).read_text(encoding="utf-8") == "Queued"
+
+
+class ScriptedOtherAudio:
+    """Report other apps' sound for a fixed number of checks."""
+
+    def __init__(self, loud_checks: int, on_check=lambda: None) -> None:
+        self.loud_checks = loud_checks
+        self.on_check = on_check
+
+    def should_wait(self) -> bool:
+        self.on_check()
+        self.loud_checks -= 1
+        return self.loud_checks >= 0
+
+
+def test_next_speechicle_waits_while_another_app_plays_then_speaks(
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_wait_for_quiet")
+    configure_runtime(engine, tmp_path)
+    engine.SIGNAL_TICK = 0.001
+    held = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    held.write_text("Held", encoding="utf-8")
+    state = engine.State()
+    engine._record_claim(state, held)
+    published: list[bool] = []
+
+    def record_status() -> None:
+        if engine.STATUS.exists():
+            status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
+            published.append(status.get("waiting_for_quiet", False))
+
+    engine.other_audio_monitor = ScriptedOtherAudio(5, record_status)
+
+    assert engine.gap_wait(0.0, queue.Queue(), state) is None
+
+    assert published[1:5] == [True] * 4
+    status = json.loads(engine.STATUS.read_text(encoding="utf-8"))
+    assert "waiting_for_quiet" not in status
+    assert not state.waiting_for_quiet
+    log = engine.LOG.read_text(encoding="utf-8")
+    assert "another app is playing sound" in log
+    assert "quiet; speaking after" in log
+
+
+def test_endless_sound_from_another_app_holds_speech_only_up_to_a_limit(
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_wait_for_quiet_limit")
+    configure_runtime(engine, tmp_path)
+    engine.SIGNAL_TICK = 0.001
+    engine.QUIET_WAIT_MAX_S = 0.05
+    held = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    held.write_text("Held", encoding="utf-8")
+    state = engine.State()
+    engine._record_claim(state, held)
+    engine.other_audio_monitor = ScriptedOtherAudio(10**9)
+
+    assert engine.gap_wait(0.0, queue.Queue(), state) is None
+
+    assert not state.waiting_for_quiet
+    assert "speaking anyway" in engine.LOG.read_text(encoding="utf-8")
+
+
+def test_skip_releases_a_speechicle_waiting_for_quiet(tmp_path: Path) -> None:
+    engine = load_engine("super_speech_engine_wait_for_quiet_skip")
+    configure_runtime(engine, tmp_path)
+    engine.SIGNAL_TICK = 0.001
+    held = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    held.write_text("Held", encoding="utf-8")
+    state = engine.State()
+    engine._record_claim(state, held)
+    engine.other_audio_monitor = ScriptedOtherAudio(
+        10**9, lambda: engine.SKIP.touch() if state.waiting_for_quiet else None
+    )
+
+    assert engine.gap_wait(0.0, queue.Queue(), state) == "skip"
+    assert not state.waiting_for_quiet

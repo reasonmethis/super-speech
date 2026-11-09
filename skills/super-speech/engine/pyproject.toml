@@ -24,6 +24,7 @@ py-modules = [
     "inbox_listener",
     "microphone_mute",
     "windows_audio",
+    "other_audio",
     "audibility",
     "engine_control",
     "super_speech_version",

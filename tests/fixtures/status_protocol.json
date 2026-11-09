@@ -79,6 +79,42 @@
       "queue": [],
       "history_count": 0,
       "history": []
+    },
+    {
+      "version": 19,
+      "timeline_revision": 7,
+      "state": "playing",
+      "updated_at": 2.5,
+      "engine_pid": 42,
+      "current": {
+        "id": "sp_00000000000000000000000000000001",
+        "text": "Hello world",
+        "voice": "af_heart",
+        "source": "Codex: Protocol test",
+        "inbox": "C:\\Users\\agent\\inbox.jsonl",
+        "piece": 1,
+        "piece_count": 2,
+        "piece_start": 0,
+        "piece_end": 5,
+        "elapsed_seconds": 0.25
+      },
+      "queue_count": 1,
+      "queue": [
+        {
+          "id": "sp_00000000000000000000000000000002",
+          "text": "Next",
+          "voice": "bm_fable"
+        }
+      ],
+      "history_count": 3,
+      "history": [
+        {
+          "id": "sp_00000000000000000000000000000003",
+          "text": "Earlier",
+          "voice": "af_bella"
+        }
+      ],
+      "waiting_for_quiet": true
     }
   ],
   "invalid": [
@@ -277,6 +313,55 @@
           "source": "One line\nTwo lines"
         }
       ]
+    },
+    {
+      "version": 19,
+      "timeline_revision": 0,
+      "state": "idle",
+      "updated_at": 1,
+      "engine_pid": 41,
+      "current": null,
+      "queue_count": 0,
+      "queue": [],
+      "history_count": 0,
+      "history": [],
+      "waiting_for_quiet": true
+    },
+    {
+      "version": 19,
+      "timeline_revision": 7,
+      "state": "playing",
+      "updated_at": 2.5,
+      "engine_pid": 42,
+      "current": {
+        "id": "sp_00000000000000000000000000000001",
+        "text": "Hello world",
+        "voice": "af_heart",
+        "source": "Codex: Protocol test",
+        "inbox": "C:\\Users\\agent\\inbox.jsonl",
+        "piece": 1,
+        "piece_count": 2,
+        "piece_start": 0,
+        "piece_end": 5,
+        "elapsed_seconds": 0.25
+      },
+      "queue_count": 1,
+      "queue": [
+        {
+          "id": "sp_00000000000000000000000000000002",
+          "text": "Next",
+          "voice": "bm_fable"
+        }
+      ],
+      "history_count": 3,
+      "history": [
+        {
+          "id": "sp_00000000000000000000000000000003",
+          "text": "Earlier",
+          "voice": "af_bella"
+        }
+      ],
+      "waiting_for_quiet": "yes"
     }
   ]
 }
