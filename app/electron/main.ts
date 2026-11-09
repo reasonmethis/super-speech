@@ -125,28 +125,30 @@ function runtimeDir(): string {
   return process.env.SUPER_SPEECH_HOME ?? path.join(homedir(), ".super-speech");
 }
 
-// The engine checks for this file while it speaks, so the setting also reaches
-// an engine that the app adopted instead of starting
-function muteMicrophoneSettingPath(): string {
-  return path.join(runtimeDir(), "MUTE_MICROPHONE");
-}
+// Windows-only settings are files the engine checks while it runs, so a
+// setting also reaches an engine that the app adopted instead of starting
+const MUTE_MICROPHONE_FILE = "MUTE_MICROPHONE";
+const WAIT_FOR_QUIET_FILE = "WAIT_FOR_QUIET";
 
-function getMuteMicrophone(): boolean | null {
+function getWindowsSetting(file: string): boolean | null {
   if (process.platform !== "win32") {
     return null;
   }
-  return existsSync(muteMicrophoneSettingPath());
+  return existsSync(path.join(runtimeDir(), file));
 }
 
-function setMuteMicrophone(enabled: boolean): void {
+function setWindowsSetting(file: string, enabled: unknown): void {
   if (process.platform !== "win32") {
-    throw new Error("Microphone muting is only available on Windows");
+    throw new Error("This setting is only available on Windows");
+  }
+  if (typeof enabled !== "boolean") {
+    throw new Error("Setting must be true or false");
   }
   if (enabled) {
     mkdirSync(runtimeDir(), { recursive: true });
-    writeFileSync(muteMicrophoneSettingPath(), "");
+    writeFileSync(path.join(runtimeDir(), file), "");
   } else {
-    rmSync(muteMicrophoneSettingPath(), { force: true });
+    rmSync(path.join(runtimeDir(), file), { force: true });
   }
 }
 
@@ -1067,13 +1069,18 @@ function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.sendInboxMessage, (_event, speechicleId, text) =>
     sendInboxMessage(speechicleId, text)
   );
-  ipcMain.handle(IPC_CHANNELS.getMuteMicrophone, getMuteMicrophone);
-  ipcMain.handle(IPC_CHANNELS.setMuteMicrophone, (_event, enabled: unknown) => {
-    if (typeof enabled !== "boolean") {
-      throw new Error("Microphone setting must be true or false");
-    }
-    setMuteMicrophone(enabled);
-  });
+  ipcMain.handle(IPC_CHANNELS.getMuteMicrophone, () =>
+    getWindowsSetting(MUTE_MICROPHONE_FILE)
+  );
+  ipcMain.handle(IPC_CHANNELS.setMuteMicrophone, (_event, enabled: unknown) =>
+    setWindowsSetting(MUTE_MICROPHONE_FILE, enabled)
+  );
+  ipcMain.handle(IPC_CHANNELS.getWaitForQuiet, () =>
+    getWindowsSetting(WAIT_FOR_QUIET_FILE)
+  );
+  ipcMain.handle(IPC_CHANNELS.setWaitForQuiet, (_event, enabled: unknown) =>
+    setWindowsSetting(WAIT_FOR_QUIET_FILE, enabled)
+  );
   ipcMain.handle(IPC_CHANNELS.copyText, (_event, text: string) => clipboard.writeText(text));
   ipcMain.handle(IPC_CHANNELS.openSetup, () => shell.openExternal(SETUP_URL));
   ipcMain.handle(IPC_CHANNELS.minimize, (event) => {

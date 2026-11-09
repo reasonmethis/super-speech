@@ -13,6 +13,9 @@ const api: DesktopApi = {
   getMuteMicrophone: () => ipcRenderer.invoke(IPC_CHANNELS.getMuteMicrophone),
   setMuteMicrophone: (enabled) =>
     ipcRenderer.invoke(IPC_CHANNELS.setMuteMicrophone, enabled),
+  getWaitForQuiet: () => ipcRenderer.invoke(IPC_CHANNELS.getWaitForQuiet),
+  setWaitForQuiet: (enabled) =>
+    ipcRenderer.invoke(IPC_CHANNELS.setWaitForQuiet, enabled),
   copyText: (text) => ipcRenderer.invoke(IPC_CHANNELS.copyText, text),
   openSetup: () => ipcRenderer.invoke(IPC_CHANNELS.openSetup),
   minimize: () => ipcRenderer.invoke(IPC_CHANNELS.minimize),

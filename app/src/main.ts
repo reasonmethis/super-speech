@@ -8,6 +8,7 @@ import {
   clearedTimeline,
   currentPieceSegments,
   defaultComposerVoice,
+  isWaitingForQuiet,
   moveSpeechicleItemBefore,
   playbackPresentation,
   playbackStateForBoundary,
@@ -124,6 +125,8 @@ const themeButtons = [...document.querySelectorAll<HTMLButtonElement>("[data-the
 const extraVoicesToggle = requiredElement<HTMLInputElement>("extra-voices-toggle");
 const microphoneSettings = requiredElement<HTMLElement>("microphone-settings");
 const muteMicrophoneToggle = requiredElement<HTMLInputElement>("mute-microphone-toggle");
+const otherAppsSettings = requiredElement<HTMLElement>("other-apps-settings");
+const waitForQuietToggle = requiredElement<HTMLInputElement>("wait-for-quiet-toggle");
 
 type Theme = "dark" | "light";
 
@@ -283,21 +286,43 @@ extraVoicesToggle.addEventListener("change", () => {
   }
 });
 
-// The engine owns this setting, so it is read from the app rather than localStorage
-void desktopApi?.getMuteMicrophone().then((enabled) => {
-  if (enabled !== null) {
-    muteMicrophoneToggle.checked = enabled;
-    microphoneSettings.hidden = false;
-  }
-});
-
-muteMicrophoneToggle.addEventListener("change", () => {
-  const enabled = muteMicrophoneToggle.checked;
-  desktopApi?.setMuteMicrophone(enabled).catch((error: unknown) => {
-    console.error("Could not change the microphone setting", error);
-    muteMicrophoneToggle.checked = !enabled;
+// The engine owns these settings, so they are read from the app rather than localStorage
+function bindEngineSetting(
+  toggle: HTMLInputElement,
+  section: HTMLElement,
+  read: (() => Promise<boolean | null>) | undefined,
+  write: ((enabled: boolean) => Promise<void>) | undefined,
+  name: string,
+): void {
+  void read?.().then((enabled) => {
+    if (enabled !== null) {
+      toggle.checked = enabled;
+      section.hidden = false;
+    }
   });
-});
+  toggle.addEventListener("change", () => {
+    const enabled = toggle.checked;
+    write?.(enabled).catch((error: unknown) => {
+      console.error(`Could not change the ${name} setting`, error);
+      toggle.checked = !enabled;
+    });
+  });
+}
+
+bindEngineSetting(
+  muteMicrophoneToggle,
+  microphoneSettings,
+  desktopApi?.getMuteMicrophone,
+  desktopApi?.setMuteMicrophone,
+  "microphone",
+);
+bindEngineSetting(
+  waitForQuietToggle,
+  otherAppsSettings,
+  desktopApi?.getWaitForQuiet,
+  desktopApi?.setWaitForQuiet,
+  "wait for quiet",
+);
 
 function saveDefaultVoice(voice: string): void {
   defaultVoiceId = voice;
@@ -364,6 +389,9 @@ function timelineAction(
     setup_required: "Setup needed",
     stopped: "Stopped",
   };
+  if (isWaitingForQuiet(currentStatus)) {
+    return "Waiting for quiet";
+  }
   return labels[currentStatus.state] ?? "";
 }
 
@@ -579,7 +607,11 @@ function render(status: RuntimeStatus): void {
   setPlaybackState(presentation.state);
 
   statusDot.className = `status-dot state-${presentation.state}`;
-  statusLabel.textContent = commandStatus.textContent || copy.label;
+  statusLabel.textContent = commandStatus.textContent || (
+    presentation.state === "playing" && isWaitingForQuiet(displayedStatus)
+      ? "Waiting for quiet"
+      : copy.label
+  );
   playbackTitle.textContent = copy.title;
   currentText.classList.toggle("is-hidden", showComposer);
   speechComposer.classList.toggle("is-hidden", !showComposer);
@@ -1558,7 +1590,7 @@ function closeInboxReply(): void {
 function updateTimelineDividers(items: TimelineItem[], historyTotal: number): void {
   const waitingCount = items.filter(({ kind }) => kind === "waiting").length;
   const historyCount = items.filter(({ kind }) => kind === "history").length;
-  const currentLabel = ({
+  const stateLabel = ({
       loading: "Preparing",
       playing: "Playing",
       paused: "Paused",
@@ -1567,6 +1599,7 @@ function updateTimelineDividers(items: TimelineItem[], historyTotal: number): vo
       stopped: "Stopped",
       idle: "Idle",
     } satisfies Record<RuntimeStatus["state"], string>)[currentStatus.state];
+  const currentLabel = isWaitingForQuiet(currentStatus) ? "Waiting for quiet" : stateLabel;
   const labels: Record<TimelineSection, [string, string]> = {
     waiting: ["Waiting", waitingCount.toLocaleString()],
     current: ["Current", currentLabel],

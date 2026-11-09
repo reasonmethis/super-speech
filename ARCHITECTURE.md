@@ -137,6 +137,8 @@ Each snapshot contains:
 - A timeline revision that increases when visible identity, order, voice, or
   source label, inbox availability, or History count changes
 - The current piece number and its Unicode text offsets
+- `waiting_for_quiet: true` while Current waits for other apps to go quiet.
+  The field is absent otherwise, so older readers still accept the snapshot
 
 For historical protocol compatibility, JSON `current` contains Current while
 JSON `queue` contains Waiting only. The conceptual Queue is both fields
@@ -156,6 +158,22 @@ The engine keeps the larger limit until restart and acknowledges it with a
 published snapshot. Polls, mutation results, reply lookup, and the bottom-of-
 History drag target all use this one view. The renderer does not merge a second
 list of older rows into changing playback state.
+
+## Waiting for other apps to go quiet
+
+On Windows, the Settings option "Wait until other apps are quiet" creates the
+`WAIT_FOR_QUIET` file in the runtime folder. While it exists, a background
+thread reads Windows' per-app sound meters on every active output device ten
+times a second, skipping the engine's own process. Another app counts as
+playing when its meter is above about -50 dBFS.
+
+Before each Speechicle starts, after its usual short gap, the engine waits
+until no other app has made sound for one second, so pauses between another
+voice's words do not count as quiet. Current shows "Waiting for quiet" in the
+window meanwhile. The wait gives up after 60 seconds so endless sound, such as
+music, cannot hold speech forever. Pause, Skip, Play, and other commands work
+during the wait, and a row started with Play skips it. Pieces inside a
+Speechicle never wait, so one reply is never split by another app.
 
 ## Voice models
 
@@ -318,6 +336,10 @@ checked status and sends commands through Electron main.
   publishes those stretches for local apps that must ignore Super Speech
 - `skills/super-speech/engine/microphone_mute.py` mutes Windows microphones
   while speech is audible and restores them after a recent engine crash
+- `skills/super-speech/engine/other_audio.py` notices when other apps make
+  sound, so speech can wait for quiet
+- `skills/super-speech/engine/windows_audio.py` calls the Windows Core Audio
+  API for the microphone and other-app sound modules
 - `app/electron/main.ts` owns the window, tray, engine supervision, installer
   integration, and calls from the renderer
 - `app/electron/agent-inbox.ts` validates and appends user messages without

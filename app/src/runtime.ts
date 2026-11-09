@@ -136,6 +136,8 @@ export interface EngineStatus {
   queue: SpeechicleItem[];
   history_count: number;
   history: SpeechicleItem[];
+  /** Present while Current waits for other apps to go quiet */
+  waiting_for_quiet?: true;
 }
 
 export interface EngineProcessStatus {
@@ -233,6 +235,11 @@ export function playbackStateForBoundary(
     return paused ? "paused" : "playing";
   }
   return paused ? "holding" : "idle";
+}
+
+/** Current holds silently until other apps have been quiet for a moment */
+export function isWaitingForQuiet(status: EngineStatus): boolean {
+  return status.state === "playing" && status.waiting_for_quiet === true;
 }
 
 export function playbackPresentation(
@@ -338,7 +345,9 @@ function hasStatusCore(value: Record<string, unknown>): boolean {
     (current === null || !queue.some(({ id }) => id === current.id)) &&
     new Set(queue.map(({ id }) => id)).size === queue.length &&
     value.queue_count === queue.length &&
-    playbackBoundaryMatchesState(value)
+    playbackBoundaryMatchesState(value) &&
+    (value.waiting_for_quiet === undefined ||
+      (value.waiting_for_quiet === true && current !== null))
   );
 }
 
@@ -756,6 +765,9 @@ export interface DesktopApi {
   /** Null when this platform cannot mute microphones */
   getMuteMicrophone(): Promise<boolean | null>;
   setMuteMicrophone(enabled: boolean): Promise<void>;
+  /** Null when this platform cannot tell when other apps make sound */
+  getWaitForQuiet(): Promise<boolean | null>;
+  setWaitForQuiet(enabled: boolean): Promise<void>;
   copyText(text: string): Promise<void>;
   openSetup(): Promise<void>;
   minimize(): Promise<void>;
@@ -780,6 +792,8 @@ export const IPC_CHANNELS = {
   sendInboxMessage: "runtime:send-inbox-message",
   getMuteMicrophone: "settings:get-mute-microphone",
   setMuteMicrophone: "settings:set-mute-microphone",
+  getWaitForQuiet: "settings:get-wait-for-quiet",
+  setWaitForQuiet: "settings:set-wait-for-quiet",
   copyText: "runtime:copy-text",
   openSetup: "app:open-setup",
   minimize: "window:minimize",
