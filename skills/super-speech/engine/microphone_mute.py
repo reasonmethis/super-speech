@@ -14,9 +14,8 @@ import os
 import sys
 import time
 from collections.abc import Callable
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Protocol
+from typing import Protocol
 
 RECORD_REFRESH_S = 5.0
 # Long enough for the desktop app to restart a crashed or frozen engine
@@ -155,152 +154,63 @@ class WindowsCaptureDevices:
     """Mute active recording endpoints through the Windows Core Audio API."""
 
     def unmuted_device_ids(self) -> list[str]:
-        with _com_apartment():
-            enumerator = _create_device_enumerator()
+        with windows_audio.com_apartment():
+            enumerator = windows_audio.create_device_enumerator()
             try:
-                collection = _out_pointer(
-                    lambda out: _call(enumerator, 3, _UINT, _UINT, _PVOID)(
-                        _E_CAPTURE, _DEVICE_STATE_ACTIVE, out
+                return [
+                    _device_id(device)
+                    for device in windows_audio.active_devices(
+                        enumerator, windows_audio.E_CAPTURE
                     )
-                )
-                try:
-                    count = _UINT()
-                    _call(collection, 3, _PVOID)(ctypes.byref(count))
-                    device_ids: list[str] = []
-                    for index in range(count.value):
-                        device = _out_pointer(
-                            lambda out: _call(collection, 4, _UINT, _PVOID)(index, out)
-                        )
-                        try:
-                            if not _endpoint_muted(device):
-                                device_ids.append(_device_id(device))
-                        finally:
-                            _release(device)
-                    return device_ids
-                finally:
-                    _release(collection)
+                    if not _endpoint_muted(device)
+                ]
             finally:
-                _release(enumerator)
+                windows_audio.release(enumerator)
 
     def set_muted(self, device_id: str, muted: bool) -> None:
-        with _com_apartment():
-            enumerator = _create_device_enumerator()
+        with windows_audio.com_apartment():
+            enumerator = windows_audio.create_device_enumerator()
             try:
-                device = _out_pointer(
-                    lambda out: _call(enumerator, 5, ctypes.c_wchar_p, _PVOID)(
-                        device_id, out
-                    )
+                device = windows_audio.out_pointer(
+                    lambda out: windows_audio.call(
+                        enumerator, 5, ctypes.c_wchar_p, windows_audio.PVOID
+                    )(device_id, out)
                 )
                 try:
-                    volume = _activate_endpoint_volume(device)
+                    volume = windows_audio.activate(device, _IID_IAUDIO_ENDPOINT_VOLUME)
                     try:
-                        _call(volume, 14, ctypes.c_int, _PVOID)(int(muted), None)
+                        windows_audio.call(volume, 14, ctypes.c_int, windows_audio.PVOID)(
+                            int(muted), None
+                        )
                     finally:
-                        _release(volume)
+                        windows_audio.release(volume)
                 finally:
-                    _release(device)
+                    windows_audio.release(device)
             finally:
-                _release(enumerator)
+                windows_audio.release(enumerator)
 
 
-# Core Audio COM bindings. Python has no COM support without extra packages, so
-# the few interface methods used here are called through their vtable slots.
-# Slot numbers follow the interface declarations in mmdeviceapi.h and
-# endpointvolume.h, where slots 0-2 are IUnknown.
 if sys.platform == "win32":
     import ctypes
-    from ctypes import wintypes
 
-    _UINT = ctypes.c_uint
-    _PVOID = ctypes.c_void_p
-    _E_CAPTURE = 1
-    _DEVICE_STATE_ACTIVE = 1
-    _CLSCTX_ALL = 0x17
-    _COINIT_MULTITHREADED = 0
-    _RPC_E_CHANGED_MODE = -2147417850  # 0x80010106 as a signed HRESULT
+    import windows_audio
 
-    class _GUID(ctypes.Structure):
-        _fields_ = [
-            ("Data1", wintypes.DWORD),
-            ("Data2", wintypes.WORD),
-            ("Data3", wintypes.WORD),
-            ("Data4", ctypes.c_ubyte * 8),
-        ]
-
-        def __init__(self, text: str) -> None:
-            super().__init__()
-            ctypes.oledll.ole32.CLSIDFromString(text, ctypes.byref(self))
-
-    _CLSID_MM_DEVICE_ENUMERATOR = _GUID("{BCDE0395-E52F-467C-8E3D-C4579291692E}")
-    _IID_IMM_DEVICE_ENUMERATOR = _GUID("{A95664D2-9614-4F35-A746-DE8DB63617E6}")
-    _IID_IAUDIO_ENDPOINT_VOLUME = _GUID("{5CDF2C82-841E-4546-9722-0CF74078229A}")
-
-    _ole32 = ctypes.windll.ole32
-    _ole32.CoInitializeEx.restype = ctypes.c_long
-    _ole32.CoInitializeEx.argtypes = [_PVOID, wintypes.DWORD]
-    _ole32.CoTaskMemFree.argtypes = [_PVOID]
-
-    def _call(pointer: int, slot: int, *argtypes: object) -> Callable[..., object]:
-        """Bind one COM method; ctypes.HRESULT raises OSError on failure codes."""
-        vtable = ctypes.cast(pointer, ctypes.POINTER(ctypes.POINTER(_PVOID))).contents
-        prototype = ctypes.WINFUNCTYPE(ctypes.HRESULT, _PVOID, *argtypes)
-        method = prototype(vtable[slot])
-        return lambda *args: method(pointer, *args)
-
-    def _out_pointer(invoke: Callable[[object], object]) -> int:
-        result = _PVOID()
-        invoke(ctypes.byref(result))
-        if not result.value:
-            raise OSError("Core Audio returned no object")
-        return result.value
-
-    def _release(pointer: int) -> None:
-        vtable = ctypes.cast(pointer, ctypes.POINTER(ctypes.POINTER(_PVOID))).contents
-        ctypes.WINFUNCTYPE(ctypes.c_ulong, _PVOID)(vtable[2])(pointer)
-
-    @contextmanager
-    def _com_apartment() -> Iterator[None]:
-        result = _ole32.CoInitializeEx(None, _COINIT_MULTITHREADED)
-        # A thread that already chose another COM model can still make these calls
-        initialized = result >= 0
-        if not initialized and result != _RPC_E_CHANGED_MODE:
-            raise OSError(f"COM initialization failed: {result:#x}")
-        try:
-            yield
-        finally:
-            if initialized:
-                _ole32.CoUninitialize()
-
-    def _create_device_enumerator() -> int:
-        return _out_pointer(
-            lambda out: ctypes.oledll.ole32.CoCreateInstance(
-                ctypes.byref(_CLSID_MM_DEVICE_ENUMERATOR),
-                None,
-                _CLSCTX_ALL,
-                ctypes.byref(_IID_IMM_DEVICE_ENUMERATOR),
-                out,
-            )
-        )
-
-    def _activate_endpoint_volume(device: int) -> int:
-        return _out_pointer(
-            lambda out: _call(device, 3, _PVOID, wintypes.DWORD, _PVOID, _PVOID)(
-                ctypes.byref(_IID_IAUDIO_ENDPOINT_VOLUME), _CLSCTX_ALL, None, out
-            )
-        )
+    _IID_IAUDIO_ENDPOINT_VOLUME = windows_audio.GUID(
+        "{5CDF2C82-841E-4546-9722-0CF74078229A}"
+    )
 
     def _endpoint_muted(device: int) -> bool:
-        volume = _activate_endpoint_volume(device)
+        volume = windows_audio.activate(device, _IID_IAUDIO_ENDPOINT_VOLUME)
         try:
             muted = ctypes.c_int()
-            _call(volume, 15, _PVOID)(ctypes.byref(muted))
+            windows_audio.call(volume, 15, windows_audio.PVOID)(ctypes.byref(muted))
             return bool(muted.value)
         finally:
-            _release(volume)
+            windows_audio.release(volume)
 
     def _device_id(device: int) -> str:
-        text = _out_pointer(lambda out: _call(device, 5, _PVOID)(out))
-        try:
-            return ctypes.wstring_at(text)
-        finally:
-            _ole32.CoTaskMemFree(text)
+        return windows_audio.free_string(
+            windows_audio.out_pointer(
+                lambda out: windows_audio.call(device, 5, windows_audio.PVOID)(out)
+            )
+        )
