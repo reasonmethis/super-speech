@@ -82,8 +82,9 @@ same Queue and playback implementation.
 - Click the main text area to follow the current piece in a larger view
 - Use Settings to switch appearance or reveal extra voices hidden by default
 - On Windows, turn on "Wait until other apps are quiet" in Settings so a new
-  reply waits until other apps, such as another voice assistant, have been
-  silent for a second. It waits at most a minute. It is off by default
+  reply, and each later part of a long reply, waits until other apps, such as
+  another voice assistant, have been silent for a second. It waits at most a
+  minute. It is off by default
 
 Agents can attach a short source label to spoken replies. The app shows that
 label beside the voice so simultaneous agent tasks remain distinguishable. An

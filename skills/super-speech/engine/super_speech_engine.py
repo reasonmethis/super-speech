@@ -2657,8 +2657,15 @@ def play_one(
     kind: str,
     buf: "queue.Queue[BufferedPiece]",
     st: State,
+    *,
+    hold_for_quiet: bool = False,
 ) -> str:
-    """Play one rendered piece while honoring pause and control signals."""
+    """Play one rendered piece while honoring pause and control signals.
+
+    With `hold_for_quiet`, the piece first waits, as `gap_wait` does before a
+    Speechicle, until other apps are quiet. Pieces after a Speechicle's first
+    need this because another app may start speaking in the gap between them.
+    """
     global _prev_audio_end
     if st.stop.is_set():
         return "fatal"
@@ -2674,31 +2681,42 @@ def play_one(
             if SILENT:
                 outdata.fill(0)
 
-    paused = playback_control.attach(playback)
-    t0 = time.time()
-    stream = sd.OutputStream(
-        samplerate=sr,
-        channels=playback.channels,
-        dtype=audio.dtype,
-        blocksize=max(64, int(sr * 0.02)),
-        callback=output_callback,
-        finished_callback=playback.mark_done,
-    )
-    stream.start()
-    publish_status(
-        st,
-        playback=playback,
-        sample_rate=sr,
-        force=True,
-    )
-    if _prev_audio_end is not None:
-        log(f"boundary kind={kind} silence={(t0 - _prev_audio_end)*1000:.0f}ms before {path.name}")
-
+    stream = None
+    t0 = 0.0
+    waited_for_quiet = 0.0
+    last_tick = time.monotonic()
     last_position = playback.position
-    last_progress = time.monotonic()
+    last_progress = last_tick
     stalled = False
     try:
-        while not playback.done.wait(SIGNAL_TICK):
+        while True:
+            if stream is None and not (
+                hold_for_quiet and _hold_for_quiet(st, path.name, waited_for_quiet)
+            ):
+                playback_control.attach(playback)
+                t0 = time.time()
+                stream = sd.OutputStream(
+                    samplerate=sr,
+                    channels=playback.channels,
+                    dtype=audio.dtype,
+                    blocksize=max(64, int(sr * 0.02)),
+                    callback=output_callback,
+                    finished_callback=playback.mark_done,
+                )
+                stream.start()
+                publish_status(
+                    st,
+                    playback=playback,
+                    sample_rate=sr,
+                    force=True,
+                )
+                if _prev_audio_end is not None:
+                    log(f"boundary kind={kind} silence={(t0 - _prev_audio_end)*1000:.0f}ms before {path.name}")
+                last_progress = time.monotonic()
+            if stream is None:
+                time.sleep(SIGNAL_TICK)
+            elif playback.done.wait(SIGNAL_TICK):
+                break
             if st.stop.is_set():
                 return "fatal"
             paused = playback_control.pause_requested()
@@ -2731,7 +2749,12 @@ def play_one(
 
             position = playback.position
             now = time.monotonic()
-            if playback.paused or position != last_position:
+            if stream is None:
+                # Like `gap_wait`, time spent paused does not count toward the limit
+                if not paused:
+                    waited_for_quiet += now - last_tick
+                last_tick = now
+            elif playback.paused or position != last_position:
                 last_position = position
                 last_progress = now
             elif now - last_progress >= 2.0:
@@ -2745,10 +2768,14 @@ def play_one(
             )
             heartbeat()
     finally:
-        if stream.active:
-            stream.abort()
-        stream.close()
+        if stream is not None:
+            if stream.active:
+                stream.abort()
+            stream.close()
         playback_control.detach(playback)
+        if st.waiting_for_quiet:
+            st.waiting_for_quiet = False
+            publish_status(st, force=True)
 
     if stalled:
         log(f"PLAYBACK_STALL {path.name}: no audio progress for 2s; cutting")
@@ -2992,6 +3019,8 @@ def run_engine_loop(
                 "speechicle" if buffered.is_first_piece else "piece",
                 buf,
                 st,
+                # The first piece's quiet wait happens in `gap_wait`
+                hold_for_quiet=not buffered.is_first_piece,
             )
 
             finished = finish_chunk_playback(

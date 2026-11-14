@@ -175,8 +175,14 @@ sampling began, so the first reply after idle time waits at least that second
 from when it was queued, usually while its first piece is still being prepared. Current shows "Waiting for quiet" in the
 window meanwhile. The wait gives up after 60 seconds so endless sound, such as
 music, cannot hold speech forever. Pause, Skip, Play, and other commands work
-during the wait, and a row started with Play skips it. Pieces inside a
-Speechicle never wait, so one reply is never split by another app.
+during the wait, and a row started with Play skips it.
+
+Each later piece of a Speechicle waits the same way before it starts. The gap
+while the next piece is prepared can pass one second, and another app that
+waits for quiet may start speaking in it. Without this wait, both would speak
+at once. The engine's own speech never counts, so a short gap between its
+pieces does not make it wait. Stop during this wait still lets the Speechicle
+finish, as it does during playback.
 
 ## Voice models
 

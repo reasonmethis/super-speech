@@ -2422,3 +2422,103 @@ def test_other_apps_are_watched_only_while_the_setting_is_on_and_speech_is_queue
 
     queued.unlink()
     assert not engine._should_watch_other_audio()
+
+
+class FinishingStream:
+    """Play the whole piece as soon as it starts, recording when that was."""
+
+    started: list[str] = []
+
+    def __init__(self, *, callback, finished_callback, **_settings) -> None:
+        self.callback = callback
+        self.finished_callback = finished_callback
+        self.active = False
+
+    def start(self) -> None:
+        FinishingStream.started.append("start")
+        block = np.empty((8, 1), dtype=np.float32)
+        try:
+            self.callback(block, 8, None, None)
+        except CallbackStop:
+            self.finished_callback()
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize("hold_for_quiet", [True, False])
+def test_a_later_piece_waits_for_other_apps_only_when_asked(
+    tmp_path: Path, hold_for_quiet: bool
+) -> None:
+    engine = load_engine(f"super_speech_engine_piece_quiet_{hold_for_quiet}")
+    configure_runtime(engine, tmp_path)
+    engine.SIGNAL_TICK = 0.001
+    path = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    path.write_text("Two pieces", encoding="utf-8")
+    state = engine.State()
+    set_current(engine, state, path)
+    FinishingStream.started = []
+    started_while_loud: list[bool] = []
+    other_audio = ScriptedOtherAudio(
+        5, lambda: started_while_loud.append(bool(FinishingStream.started))
+    )
+    engine.other_audio_monitor = other_audio
+    sounddevice = SimpleNamespace(CallbackStop=CallbackStop, OutputStream=FinishingStream)
+
+    outcome = engine.play_one(
+        sounddevice,
+        path,
+        np.ones(4, dtype=np.float32),
+        1000,
+        "piece",
+        queue.Queue(),
+        state,
+        hold_for_quiet=hold_for_quiet,
+    )
+
+    assert outcome == "done"
+    assert FinishingStream.started == ["start"]
+    assert not state.waiting_for_quiet
+    log = engine.LOG.read_text(encoding="utf-8") if engine.LOG.exists() else ""
+    if hold_for_quiet:
+        # Five loud checks, then the quiet one that lets the stream start
+        assert started_while_loud == [False] * 6
+        assert "waiting for other apps to be quiet" in log
+    else:
+        assert started_while_loud == []
+        assert "WAIT_FOR_QUIET" not in log
+
+
+def test_stop_while_a_later_piece_waits_for_quiet_lets_the_speechicle_finish(
+    tmp_path: Path,
+) -> None:
+    engine = load_engine("super_speech_engine_piece_quiet_stop")
+    configure_runtime(engine, tmp_path)
+    engine.SIGNAL_TICK = 0.001
+    path = engine.QUEUE / "001-sp_00000000000000000000000000000001-af_heart-say.txt"
+    path.write_text("Two pieces", encoding="utf-8")
+    state = engine.State()
+    set_current(engine, state, path)
+    FinishingStream.started = []
+
+    def request_stop_once() -> None:
+        if state.waiting_for_quiet and not state.saw_stop:
+            engine.publish_ordered_marker(engine.STOP)
+
+    engine.other_audio_monitor = ScriptedOtherAudio(5, request_stop_once)
+    sounddevice = SimpleNamespace(CallbackStop=CallbackStop, OutputStream=FinishingStream)
+
+    outcome = engine.play_one(
+        sounddevice,
+        path,
+        np.ones(4, dtype=np.float32),
+        1000,
+        "piece",
+        queue.Queue(),
+        state,
+        hold_for_quiet=True,
+    )
+
+    assert outcome == "done"
+    assert FinishingStream.started == ["start"]
+    assert state.saw_stop
